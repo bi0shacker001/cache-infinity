@@ -1,0 +1,5 @@
+games:
+  psx:
+    cachelink_Test:
+      url: https://archive.org/download/TestIdentifier
+      subfolder: /

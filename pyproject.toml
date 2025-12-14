@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cache-infinity"
+version = "0.1.0"
+description = "Reference implementation of the CacheInfinity WebDAV caching proxy"
+readme = "README.md"
+authors = [{name = "CacheInfinity Team"}]
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+    "WsgiDAV>=4.0",
+    "cheroot>=10.0",
+    "watchdog>=4.0",
+    "psycopg[binary]>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+cacheinfinity = "cache_infinity.cli:main"

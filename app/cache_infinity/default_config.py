@@ -1,0 +1,85 @@
+"""Generate default configuration template."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+_TEMPLATE = """# CacheInfinity default configuration
+# Copy to settings.yaml and adjust paths/users as needed.
+settings:
+  paths:
+    backend_1:
+      backend_mounted: false
+      backend_mount_root: /backend
+      backend_cache_root: /backend
+    staging:
+      size_gb: 25
+      staging_mounted: false
+      staging_mount_root: /staging
+
+limits:
+  max_zip_total_gb: 20
+  one_zip_cache_at_a_time: true
+
+cookies:
+  # archive.org:
+  #   cookie_jar: /config/cookies/archive.org.txt
+
+webdav:
+  share_games:
+    backend_folder: /games
+    frontend_folder: /games
+    writable: true
+    cachelink_overlay: true
+    users:
+      anonymous:
+        login: false
+        read: false
+        write: false
+        cache: false
+      demo:
+        login: true
+        read: true
+        write: true
+        cache: true
+
+cachelinks: {}
+# Add cachelinks in this file or via /config/cachelinks.yaml or /config/cachelinks/**/*.yaml.
+
+tls:
+  enabled: false
+  mode: external
+
+# database:
+#   engine: sqlite
+#   sqlite:
+#     path: /config/cacheinfinity.db
+#   # engine: postgres
+#   # postgres_dsn: postgresql://cacheinfinity:cacheinfinity@db/cacheinfinity
+
+# indexing:
+#   min_full_reindex_days: 7
+#   max_full_reindex_days: 60
+#   hot_window_days: 14
+#   hot_radius: 2
+#   daily_full_reindex_budget: 10
+#   daily_cheap_check_budget: 200
+#   max_full_reindex_per_14d: 2
+#   max_cheap_checks_per_day: 1
+#   allow_early_full_on_change: true
+#   early_full_requires_hot: true
+#   score_weights:
+#     due: 1.0
+#     hot: 2.0
+#     change: 3.0
+#     penalty: 2.0
+"""
+
+
+def ensure_default_config(config_dir: Path) -> None:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target = config_dir / "config.yaml.defaults"
+    target.write_text(_TEMPLATE, encoding="utf-8")
+
+
+__all__ = ["ensure_default_config"]
