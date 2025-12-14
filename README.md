@@ -3,7 +3,7 @@
 CacheInfinity is an experimental WebDAV read-through cache for large public archives.
 It is very early in development, so **expect bugs, sharp edges, and incomplete
 functionality** while the feature set converges with `SPEC.md`. The architecture and
-goal are heavily inspired by Infinite Mac’s *Infinite Drive* project—this codebase is
+goal are heavily inspired by Infinite Mac's *Infinite Drive* project—this codebase is
 an attempt to bring similar ideas to broader WebDAV ecosystems.
 
 Throughout this README, `$CONFIG` refers to the runtime configuration directory.
@@ -14,6 +14,13 @@ When running natively the config search order is:
 1. `/etc/cacheinfinity/` (system scope)
 2. `$HOME/.config/cacheinfinity/` (user scope)
 3. `$CONFIG` passed via CLI/env (highest precedence; defaults to `/config`)
+
+## Requirements
+
+- **Python:** 3.11 or higher (tested up to 3.14)
+- **Dependencies:** PyYAML (≥6.0), WsgiDAV (≥4.0), cheroot (≥10.0), watchdog (≥4.0), psycopg[binary] (≥3.2) for PostgreSQL support
+- **System:** `curl` must be available in PATH for downloads
+- **Database:** SQLite (development only) or PostgreSQL (recommended for production)
 
 ## Overview
 
@@ -56,46 +63,65 @@ When running natively the config search order is:
 
 ## Configuration quickstart
 
-1. Create a Python 3.11+ environment (tested up to 3.14) and install the package:
+1. Create a Python 3.11+ environment and install the package:
    ```bash
    pip install -e .[dev]
    ```
+   Or install from the repository:
+   ```bash
+   pip install -e .
+   ```
+
 2. Optionally prepare `$CONFIG` with:
-   - `settings.yaml` (see the schema in `SPEC.md`). Inline `cachelinks:` are allowed
+   - `settings.yaml` (see `config/settings.example.yaml` for a template). Inline `cachelinks:` are allowed
      here, but you can also split cachelinks into `$CONFIG/cachelinks.yaml` or any
      files under `$CONFIG/cachelinks/**`. Every document must wrap definitions under
      a top-level `cachelinks:` mapping. Cachelinks are mirrored into the database for
-     fast lookups; edits from the Web UI or API write to the DB first, then immediately
+     fast lookups; edits from the Web UI or CLI write to the DB first, then immediately
      flush updated YAML plus a gzipped snapshot to disk. Treat the YAML files as a
      convenient export/backup format—the daemon keeps the database as the canonical
      representation of config/cachelinks.
    - Optional credentials file (`$CONFIG/credentials/users.yaml` is the convention).
    - Cookie jars and, for Archive.org, a `credfile` with `username=` / `password=` that
-     CacheInfinity uses with `curl --dump-header <jar> -u "$user:$pass" ...` to
-     bootstrap authenticated cookies ethically.
+     CacheInfinity uses to bootstrap authenticated cookies ethically.
    - Credentials are seeded from YAML or CLI once, then stored solely in the database.
      Default bootstrap credentials are `admin` / `password`; change them immediately
-     via the Web UI or `cacheinfinity admin users set --user admin`.
-3. On every startup CacheInfinity rewrites `$CONFIG/config.yaml.defaults`, a fully
-   commented template describing every supported key. If no YAML files exist, the
-   daemon starts with its default config, persists it to the database, and exports
-   fresh `settings.yaml` / `cachelinks.yaml` files (plus gzipped backups in
-   `$CONFIG/backups/`). To modify a running instance edit through the Web UI or CLI,
-   not by hand-editing the YAML exports.
+     via the Web UI or `cacheinfinity admin users set --username admin --password <new>`.
+
+3. **Configuration lifecycle:**
+   - On every startup, CacheInfinity ensures `$CONFIG/config.yaml.defaults` exists and
+     is up to date (this is a reference template only, never loaded as live config).
+   - **First startup (empty database):** If the database has no stored configuration,
+     CacheInfinity reads from YAML files (`settings.yaml`, `cachelinks.yaml`) if they
+     exist, or creates default files if missing. The loaded configuration is then
+     persisted to the database.
+   - **Subsequent startups:** The database is authoritative. CacheInfinity reads from
+     the database and syncs the current state back to YAML files (for backup/audit).
+     Manual edits to YAML files are **not** loaded automatically—they are only used
+     on first startup or when explicitly imported via CLI commands.
+   - **Runtime changes:** All configuration changes via the Web UI or CLI are written
+     to the database first, then immediately exported to YAML files (plus gzipped
+     backups in `$CONFIG/backups/`). To apply manual YAML edits to a running instance,
+     you must use import commands (when implemented) or restart with an empty database.
+   
    > **Important:** SQLite (`database.engine: sqlite`) is **only** suitable for VERY
    > small, single-user experiments. For any realistic workload you **must** point
    > CacheInfinity at an external SQL database (PostgreSQL recommended). SQLite lacks
    > the locking, durability, and concurrency guarantees CacheInfinity requires; using
    > it in production is unstable, risky, and likely to corrupt data.
+
 4. Launch the server:
    ```bash
    cacheinfinity serve --config-dir $CONFIG \
-       --credentials $CONFIG/credentials/users.yaml
+       --credentials $CONFIG/credentials/users.yaml \
+       --host 0.0.0.0 --port 8080 \
+       --ui-port 8090
    ```
-   Environment overrides:
-   - `CACHEINFINITY_CONFIG_DIR`
-   - `CACHEINFINITY_CREDENTIALS_PATH`
-   - `CACHEINFINITY_DATABASE_URL` (optional PostgreSQL DSN)
+   
+   **Environment variables:**
+   - `CACHEINFINITY_CONFIG_DIR` - Configuration directory path
+   - `CACHEINFINITY_CREDENTIALS_PATH` - Path to credentials YAML file
+   - `CACHEINFINITY_DATABASE_URL` - PostgreSQL connection string (overrides `settings.yaml` database config)
 
 ## Runtime behaviour
 
@@ -123,11 +149,14 @@ When running natively the config search order is:
   pattern for bare-metal installs as well.
 - **Hot indexing:** access events mark directories as “hot”, biasing the scheduler to
   recheck them sooner while staying under the configured daily budgets.
-- **Config lifecycle:** the service watches the **database** for changes triggered by
-  the Web UI or CLI, applies them atomically in-process, and exports updated YAML +
-  gzipped backups. Manual YAML edits are ignored unless you import them via
-  `cacheinfinity admin import-config …`; this prevents surprise reloads and keeps the
-  DB authoritative.
+- **Config lifecycle:** the database is the authoritative source of configuration after
+  first startup. The service reads from the database on startup and reload, syncing
+  the current state back to YAML files for backup/audit purposes. Manual YAML edits
+  are only loaded on first startup (when the database is empty) or when explicitly
+  imported via CLI commands (when implemented). Runtime changes via Web UI or CLI are
+  written to the database first, then immediately exported to YAML files and gzipped
+  backups. This prevents surprise reloads and keeps the database as the single source
+  of truth.
 - **Web UI:** a lightweight dashboard (served from a dedicated control port, default
   `http://<host>:8090/`) shows backend/staging utilization, cache hit/miss counts,
   indexing hotness, checksum catalog totals, degraded cachelinks, and cookie status.
@@ -142,8 +171,9 @@ When running natively the config search order is:
   Myrient downloads are also harvested after a successful fetch so download validation
   works even when upstream listings omit hashes.
 - **TLS requirement:** any share with authenticated users (non-`anonymous`) must run
-  under TLS. Use built-in manual/http/dns modes or set `tls.mode: external` when a
-  reverse proxy terminates HTTPS.
+  under TLS. Use built-in manual mode or set `tls.mode: external` when a
+  reverse proxy terminates HTTPS. Note: HTTP-01 and DNS-01 Let's Encrypt modes are
+  planned but not yet implemented (only `manual` and `external` modes are currently supported).
 
 ## Deployment & administration
 
@@ -162,26 +192,67 @@ When running natively the config search order is:
 - **Environment variables:** besides the config/credential/DB overrides noted above,
   standard `UID`/`GID` env vars set the runtime identity inside Docker so host
   permissions stay predictable.
-- **CLI workflows:** `cacheinfinity admin` mirrors the Web UI API. Use it for scripted
-  user management, cachelink CRUD, reindexing, cookie regeneration, and importing
-  YAML exports back into the database. The CLI is also the entry point for applying
-  manual YAML edits (`cacheinfinity admin import-config` / `import-cachelinks`), since
-  the daemon no longer watches files for changes.
+- **CLI workflows:** `cacheinfinity admin` provides administrative commands. Available subcommands:
+  - `cacheinfinity admin users list` - List admin users
+  - `cacheinfinity admin users set --username <name> [--password <pass>] [--disable] [--no-admin]` - Create or update a user
+  - `cacheinfinity admin cachelinks add --path <path> --url <url> [--subfolder <subfolder>]` - Add a new cachelink
+  - `cacheinfinity admin reindex --canonical-id <id>` - Trigger a reindex for a cachelink
+  - `cacheinfinity admin refresh-cookie --domain <domain>` - Regenerate cookies for a domain
 
 ## Repository layout
 
-- `app/cache_infinity/`: application code (config loaders, indexer, service orchestration,
-  fetcher, WebDAV provider).
+- `app/cache_infinity/`: application code
+  - `cli.py`: Command-line interface (`cacheinfinity serve` and `cacheinfinity admin`)
+  - `service.py`: Main service orchestration
+  - `webdav.py`: WebDAV provider implementation
+  - `webui.py`: Web UI dashboard and API
+  - `indexer.py`: Background indexing worker
+  - `fetcher.py`: Download manager using `curl`
+  - `config.py`: Configuration loading and validation
+  - `index_db.py`: Database interface for metadata storage
+  - `backend.py`: Backend storage management
+  - `staging.py`: Staging area for downloads
+  - `cachelinks.py`: Cachelink definition and management
+  - `checksum_catalog.py`: Checksum catalog import and lookup
+  - `credentials.py`: User credential management
+  - `config_manager.py`: Configuration lifecycle management
+  - `config_state_store.py`: Database-backed configuration persistence
 - `config/`: example `settings.example.yaml`, cachelink samples, and docs for `$CONFIG`.
-- `tests/`: pytest suite (run via `.venv/bin/python3.14 -m pytest`).
+- `tests/`: pytest suite (run via `pytest` or `python -m pytest`).
 - `docker/`: Dockerfile, .dockerignore, and compose stack.
 - `cacheinfinity.service`: reference unit for systemd deployments.
 - `SPEC.md`: canonical product spec—keep implementation changes in sync.
+- `pyproject.toml`: Python package configuration and dependencies.
 
 ## Development
 
-- Run tests with `.venv/bin/python3.14 -m pytest` before sending changes.
-- Use `SPEC.md` as the contract; update it alongside code when behaviour changes.
-- Contributions should preserve the `$CONFIG` terminology, keep cookie-handling
+- **Running tests:** Use `pytest` or `python -m pytest` from the project root.
+- **Code structure:** Main application code lives in `app/cache_infinity/`. The package
+  uses standard Python packaging with `pyproject.toml` and `setup.cfg`.
+- **Spec compliance:** Use `SPEC.md` as the contract; update it alongside code when
+  behaviour changes.
+- **Contributions:** Should preserve the `$CONFIG` terminology, keep cookie-handling
   logic ethical (Archive.org credentials opt-in), and respect the tiered indexing
   budgets.
+
+## Implementation status
+
+**Implemented:**
+- ✅ Database-first configuration (SQLite and PostgreSQL)
+- ✅ WebDAV provider with read-through caching
+- ✅ Background indexing with tiered, access-aware scheduling
+- ✅ Web UI dashboard (port 8090)
+- ✅ CLI admin commands
+- ✅ Cookie management for Archive.org and other domains
+- ✅ Checksum catalog import
+- ✅ Staging-based download pipeline
+- ✅ TLS manual mode and external proxy mode
+- ✅ Multi-backend support
+- ✅ User management (WebDAV and Web UI)
+
+**Planned/Incomplete:**
+- ⏳ TLS HTTP-01 and DNS-01 Let's Encrypt modes (only manual and external are implemented)
+- ⏳ FTP/FTPS protocol support (HTTP/HTTPS only currently)
+- ⏳ Zip file extraction and whole-zip caching policies
+- ⏳ Configuration import commands (`import-config`, `import-cachelinks`)
+- ⏳ File system watching for config changes (database-first approach is used instead)
