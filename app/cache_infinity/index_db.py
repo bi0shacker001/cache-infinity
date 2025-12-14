@@ -11,6 +11,7 @@ from typing import Iterable, Sequence
 
 from .cachelinks import CachelinkDescriptor
 from .config import ConfigError, DatabaseSettings
+from .db_adapter import DBAdapter
 from .credentials import CredentialStore
 
 
@@ -66,7 +67,7 @@ class IndexDatabase:
     """Persistent storage for indexing state."""
 
     def __init__(self, settings: DatabaseSettings):
-        self._db = _DBAdapter(settings)
+        self._db = DBAdapter(settings)
         self._lock = threading.RLock()
         self._init_schema()
 
@@ -159,6 +160,50 @@ class IndexDatabase:
             )
             self._db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS config_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    settings_text TEXT,
+                    cachelinks_text TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cookie_state (
+                    domain TEXT PRIMARY KEY,
+                    cookie_present INTEGER NOT NULL DEFAULT 0,
+                    last_updated_at TEXT,
+                    last_error TEXT,
+                    last_error_at TEXT,
+                    auth_fail INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_cachelinks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_id TEXT,
+                    backend_path TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    subfolder TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    source_file TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(backend_path, url, subfolder)
+                )
+                """
+            )
+            self._db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_config_cachelinks_canonical
+                ON config_cachelinks(canonical_id)
+                """
+            )
+            self._db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS auth_users (
                     username TEXT PRIMARY KEY,
                     password_plain TEXT,
@@ -169,6 +214,7 @@ class IndexDatabase:
                 )
                 """
             )
+            self._db.commit()
             try:
                 self._db.execute("ALTER TABLE auth_users ADD COLUMN purpose TEXT NOT NULL DEFAULT 'webui'")
                 self._db.commit()
@@ -414,6 +460,78 @@ class IndexDatabase:
         state = self.ensure_target(descriptor, descriptor.remote_listing_url)
         return self.list_entries_for_target(state.id)
 
+    # Configuration snapshot helpers -----------------------------------
+    def load_config_snapshot(self) -> tuple[str | None, str | None]:
+        """Return the last stored settings/cachelinks text from the DB."""
+
+        with self._lock:
+            row = self._db.fetchone("SELECT settings_text, cachelinks_text FROM config_state WHERE id = 1")
+        if not row:
+            return None, None
+        return row["settings_text"], row["cachelinks_text"]
+
+    def save_config_snapshot(self, settings_text: str | None, cachelinks_text: str | None) -> None:
+        """Persist the current text blobs so fresh boots can hydrate from the DB."""
+
+        if settings_text is None:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_state (id, settings_text, cachelinks_text, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    settings_text = excluded.settings_text,
+                    cachelinks_text = excluded.cachelinks_text,
+                    updated_at = excluded.updated_at
+                """,
+                (settings_text, cachelinks_text, timestamp),
+            )
+            self._db.commit()
+
+    # Cachelink catalog -------------------------------------------------
+    def replace_cachelinks(self, descriptors: Iterable[CachelinkDescriptor]) -> None:
+        """Replace the cachelink catalog with the provided descriptors."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (
+                descriptor.canonical_id,
+                descriptor.backend_relative_folder.as_posix(),
+                descriptor.source_url,
+                descriptor.subfolder,
+                descriptor.mode.value,
+                str(descriptor.source_file),
+                now,
+                now,
+            )
+            for descriptor in descriptors
+        ]
+        with self._lock:
+            self._db.execute("DELETE FROM config_cachelinks")
+            if rows:
+                self._db.executemany(
+                    """
+                    INSERT INTO config_cachelinks
+                    (canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._db.commit()
+
+    def list_cachelink_rows(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT canonical_id, backend_path, url, subfolder, mode, source_file, updated_at
+                FROM config_cachelinks
+                ORDER BY backend_path, canonical_id
+                """
+            )
+        return rows
+
     def update_entry_checksum(
         self,
         descriptor: CachelinkDescriptor,
@@ -539,6 +657,127 @@ class IndexDatabase:
                 }
             )
         return degraded
+
+    def access_summary(self) -> dict[str, object]:
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT COUNT(*) AS count, MAX(accessed_at) AS latest
+                FROM indexing_access_events
+                """
+            )
+        return {
+            "total": row["count"] if row and row["count"] is not None else 0,
+            "last_access": row["latest"],
+        }
+
+    # Cookie metadata ---------------------------------------------------
+    def list_cookie_states(self, domains: Iterable[str] | None = None) -> dict[str, dict[str, object]]:
+        """Return metadata for requested domains (or all known domains when None)."""
+
+        domain_list: list[str] | None = None
+        if domains is not None:
+            domain_list = sorted({d.lower() for d in domains if d})
+            if not domain_list:
+                return {}
+        with self._lock:
+            if domain_list:
+                placeholders = ",".join("?" for _ in domain_list)
+                rows = self._db.fetchall(
+                    f"SELECT domain, cookie_present, last_updated_at, last_error, last_error_at, auth_fail FROM cookie_state WHERE domain IN ({placeholders})",
+                    tuple(domain_list),
+                )
+            else:
+                rows = self._db.fetchall(
+                    "SELECT domain, cookie_present, last_updated_at, last_error, last_error_at, auth_fail FROM cookie_state"
+                )
+        return {
+            row["domain"]: {
+                "domain": row["domain"],
+                "cookie_present": bool(row["cookie_present"]),
+                "last_updated_at": row["last_updated_at"],
+                "last_error": row["last_error"],
+                "last_error_at": row["last_error_at"],
+                "auth_fail": bool(row["auth_fail"]),
+            }
+            for row in rows
+        }
+
+    def mark_cookie_uploaded(self, domain: str) -> None:
+        """Record that a cookie jar was updated successfully for *domain*."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO cookie_state (domain, cookie_present, last_updated_at, last_error, last_error_at, auth_fail)
+                VALUES (?, 1, ?, NULL, NULL, 0)
+                ON CONFLICT(domain) DO UPDATE SET
+                    cookie_present = 1,
+                    last_updated_at = excluded.last_updated_at,
+                    last_error = NULL,
+                    last_error_at = NULL,
+                    auth_fail = 0
+                """,
+                (domain.lower(), now),
+            )
+            self._db.commit()
+
+    def record_cookie_error(self, domain: str, message: str, *, auth_fail: bool = False) -> None:
+        """Store the most recent error surfaced while handling a cookie refresh/upload."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO cookie_state (domain, cookie_present, last_updated_at, last_error, last_error_at, auth_fail)
+                VALUES (?, 0, NULL, ?, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    cookie_present = 0,
+                    last_error = excluded.last_error,
+                    last_error_at = excluded.last_error_at,
+                    auth_fail = excluded.auth_fail
+                """,
+                (domain.lower(), message[:500], now, 1 if auth_fail else 0),
+            )
+            self._db.commit()
+
+    def clear_cookie_error(self, domain: str) -> None:
+        """Remove error/auth_fail markers while preserving last_updated metadata."""
+
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO cookie_state (domain, cookie_present, last_updated_at, last_error, last_error_at, auth_fail)
+                VALUES (?, 0, NULL, NULL, NULL, 0)
+                ON CONFLICT(domain) DO UPDATE SET
+                    last_error = NULL,
+                    last_error_at = NULL,
+                    auth_fail = 0
+                """,
+                (domain.lower(),),
+            )
+            self._db.commit()
+
+    def get_cookie_error(self, domain: str) -> str | None:
+        """Return the last recorded cookie error for *domain*."""
+
+        with self._lock:
+            row = self._db.fetchone("SELECT last_error FROM cookie_state WHERE domain = ?", (domain.lower(),))
+        return row["last_error"] if row else None
+
+    def get_cookie_error_at(self, domain: str) -> str | None:
+        """Return when the last cookie error occurred for *domain*."""
+
+        with self._lock:
+            row = self._db.fetchone("SELECT last_error_at FROM cookie_state WHERE domain = ?", (domain.lower(),))
+        return row["last_error_at"] if row else None
+
+    def record_cookie_auth_failure(self, domain: str, message: str | None = None) -> None:
+        """Convenience wrapper that records an auth-specific refresh failure."""
+
+        note = message or "Authentication failed while refreshing cookie"
+        self.record_cookie_error(domain, note, auth_fail=True)
 
     def close(self) -> None:
         with self._lock:

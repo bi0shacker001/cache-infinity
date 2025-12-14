@@ -23,6 +23,7 @@ from .cachelinks import (
     CachelinkDescriptor,
     CachelinkIndex,
     CachelinkRecord,
+    _detect_mode,
     load_cachelinks,
     normalize_source_url,
     records_for_file,
@@ -34,7 +35,7 @@ from .config_state_store import ConfigStateStore
 from .credentials import CredentialStore, load_credentials
 from .fetcher import Fetcher
 from .index_db import IndexDatabase, IndexedEntry
-from .indexer import Indexer
+from .indexer import Indexer, RemoteListingFetcher
 from .staging import StagingArea
 from .webdav import CacheInfinityProvider, ProviderContext
 from .webui import WebUIApp
@@ -54,6 +55,7 @@ class CacheInfinityService:
         self._lock = threading.RLock()
         self._background_running = False
         self._state_store = state_store
+        self._preview_fetcher = RemoteListingFetcher()
         self.apply_settings(settings, credentials)
 
     @classmethod
@@ -94,6 +96,7 @@ class CacheInfinityService:
         index_db = IndexDatabase(settings.database)
         index_db.ensure_default_admin()
         index_db.sync_users_from_config(credentials)
+        index_db.replace_cachelinks(cachelinks.cachelinks.values())
         checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
         indexer = Indexer(cachelinks, settings.indexing, index_db, checksum_catalog=checksum_catalog)
         fetcher = Fetcher(settings.cookies)
@@ -236,8 +239,10 @@ class CacheInfinityService:
             ]
             cachelink_count = len(self.cachelinks.cachelinks)
             db_stats = self.index_db.stats_summary()
+            access_stats = self.index_db.access_summary()
             cache_stats = self._compute_cache_counts()
             degraded = self.list_degraded_targets()
+            storage = self.describe_storage()
             status = {
                 "config_dir": str(self.settings.config_dir),
                 "backend_root": str(self.settings.backend_cache_root),
@@ -248,13 +253,19 @@ class CacheInfinityService:
                 "stats": {
                     **db_stats,
                     **cache_stats,
+                    "cache_hits": cache_stats["cached_files"],
+                    "cache_misses": cache_stats["uncached_files"],
                     "degraded_count": len(degraded),
+                    "access_total": access_stats["total"],
+                    "last_access": access_stats["last_access"],
                 },
+                "storage": storage,
                 "degraded_targets": degraded,
             }
             if getattr(self, "indexer", None):
                 status["indexing"] = {
                     "targets": cachelink_count,
+                    "needing_full": db_stats.get("targets_needing_full", 0),
                 }
             return status
 
@@ -376,24 +387,339 @@ class CacheInfinityService:
     def regenerate_cookie(self, domain: str) -> None:
         if domain not in self.settings.cookies:
             raise ConfigError(f"Unknown cookie domain {domain}")
-        self.fetcher.refresh_cookie(domain)
+        try:
+            self.fetcher.refresh_cookie(domain)
+        except Exception as exc:
+            _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc)
+            self.index_db.record_cookie_error(domain, str(exc), auth_fail=_looks_like_auth_error(str(exc)))
+            raise
+        else:
+            self.index_db.mark_cookie_uploaded(domain)
+
+    def upload_cookie_file(self, domain: str, cookie_content: str) -> None:
+        """Upload a cookies.txt file for a domain."""
+        if domain not in self.settings.cookies:
+            # Auto-create cookie config if domain is from cachelink
+            cookie_jar_path = self.settings.config_dir / "cookies" / f"{domain.replace('.', '_')}.txt"
+            cookie_jar_path.parent.mkdir(parents=True, exist_ok=True)
+            # This would require updating settings, which is complex - for now, require pre-configuration
+            raise ConfigError(f"Cookie domain {domain} must be configured in settings.yaml first")
+        
+        cookie_path = self.settings.cookies[domain].cookie_jar
+        cookie_path.parent.mkdir(parents=True, exist_ok=True)
+        cookie_path.write_text(cookie_content, encoding="utf-8")
+        self.index_db.mark_cookie_uploaded(domain)
+
+    def update_cookie_credentials(self, domain: str, username: str, password: str) -> None:
+        """Update credentials for cookie generation."""
+        if domain not in self.settings.cookies:
+            raise ConfigError(f"Unknown cookie domain {domain}")
+        definition = self.settings.cookies[domain]
+        if not definition.credfile:
+            raise ConfigError(f"Domain {domain} does not support credential-based cookie generation")
+        
+        credfile_path = definition.credfile
+        credfile_path.parent.mkdir(parents=True, exist_ok=True)
+        credfile_path.write_text(f"username={username}\npassword={password}\n", encoding="utf-8")
+        self.index_db.clear_cookie_error(domain)
+
+    def add_cookie_domain(
+        self,
+        domain: str,
+        *,
+        credfile: bool = False,
+        cookie_jar: str | None = None,
+        credfile_path: str | None = None,
+    ) -> None:
+        safe = domain.strip().lower()
+        if not safe:
+            raise ConfigError("Domain name required")
+
+        def mutator(doc: dict) -> None:
+            cookies = doc.setdefault("cookies", {})
+            if safe in cookies:
+                raise ConfigError("Domain already exists in cookies")
+            base_path = self.settings.config_dir / "cookies"
+            default_jar = base_path / f"{safe.replace('.', '_')}.txt"
+            entry: dict[str, str] = {
+                "cookie_jar": cookie_jar.strip() if cookie_jar else str(default_jar),
+            }
+            if credfile_path and credfile_path.strip():
+                entry["credfile"] = credfile_path.strip()
+            elif credfile:
+                entry["credfile"] = str((self.settings.config_dir / "credentials" / f"{safe}.txt"))
+            cookies[safe] = entry
+
+        self._mutate_settings_file(mutator)
 
     def get_config_payload(self) -> dict[str, object]:
-        settings_text = ""
-        cachelinks_text = ""
+        settings_text: str | None = None
+        cachelinks_text: str | None = None
         try:
             settings_text = self.settings.settings_path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            pass
+            settings_text = None
         cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
+        stored_settings = None
+        stored_cachelinks = None
+        if hasattr(self, "index_db"):
+            stored_settings, stored_cachelinks = self.index_db.load_config_snapshot()
         if cachelinks_path.exists():
             cachelinks_text = cachelinks_path.read_text(encoding="utf-8")
+        elif stored_cachelinks:
+            cachelinks_text = stored_cachelinks
+        if settings_text is None and stored_settings:
+            settings_text = stored_settings
         return {
             "settings_path": str(self.settings.settings_path),
-            "settings_text": settings_text,
+            "settings_text": settings_text or "",
             "cachelinks_path": str(cachelinks_path),
-            "cachelinks_text": cachelinks_text,
+            "cachelinks_text": cachelinks_text or "",
         }
+
+    def describe_settings_detail(self) -> dict[str, object]:
+        settings = self.settings
+
+        def _path(value) -> str:
+            return str(value) if value else ""
+
+        paths: list[dict[str, object]] = []
+        for name, backend in settings.backends.items():
+            paths.append(
+                {
+                    "name": name,
+                    "backend_cache_root": _path(backend.backend_cache_root),
+                    "backend_mounted": backend.backend_mounted,
+                    "backend_mount_root": _path(backend.backend_mount_root),
+                }
+            )
+        staging = {
+            "staging_mounted": settings.staging.staging_mounted,
+            "staging_mount_root": _path(settings.staging.staging_mount_root),
+            "size_gb": settings.staging.size_gb,
+        }
+        limits = {
+            "max_zip_total_gb": settings.limits.max_zip_total_gb,
+            "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
+        }
+        cookies = [
+            {
+                "domain": name,
+                "cookie_jar": _path(defn.cookie_jar),
+                "credfile": _path(defn.credfile),
+            }
+            for name, defn in settings.cookies.items()
+        ]
+        shares = [
+            {
+                "name": share.name,
+                "backend_folder": share.backend_folder.as_posix(),
+                "frontend_folder": share.frontend_folder.as_posix(),
+                "writable": share.writable,
+                "cachelink_overlay": share.cachelink_overlay,
+            }
+            for share in settings.shares.values()
+        ]
+        tls = {
+            "enabled": settings.tls.enabled,
+            "mode": settings.tls.mode.value,
+            "manual": {
+                "cert_path": _path(settings.tls.manual.cert_path),
+                "key_path": _path(settings.tls.manual.key_path),
+            },
+            "http": {
+                "email": settings.tls.http.email or "",
+                "domains": list(settings.tls.http.domains),
+                "challenge": settings.tls.http.challenge,
+                "webroot_path": _path(settings.tls.http.webroot_path),
+                "staging": settings.tls.http.staging,
+            },
+            "dns01": {
+                "email": settings.tls.dns01.email or "",
+                "domains": list(settings.tls.dns01.domains),
+                "provider": settings.tls.dns01.provider or "",
+                "credentials_ini": _path(settings.tls.dns01.credentials_ini),
+                "staging": settings.tls.dns01.staging,
+                "propagation_seconds": settings.tls.dns01.propagation_seconds,
+            },
+        }
+        database = {
+            "engine": settings.database.engine,
+            "sqlite_path": _path(settings.database.sqlite_path),
+            "postgres_dsn": settings.database.postgres_dsn or "",
+        }
+        idx = settings.indexing
+        indexing = {
+            "min_full_reindex_days": idx.min_full_reindex_days,
+            "max_full_reindex_days": idx.max_full_reindex_days,
+            "hot_window_days": idx.hot_window_days,
+            "hot_radius": idx.hot_radius,
+            "daily_full_reindex_budget": idx.daily_full_reindex_budget,
+            "daily_cheap_check_budget": idx.daily_cheap_check_budget,
+            "max_full_reindex_per_14d": idx.max_full_reindex_per_14d,
+            "max_cheap_checks_per_day": idx.max_cheap_checks_per_day,
+            "allow_early_full_on_change": idx.allow_early_full_on_change,
+            "early_full_requires_hot": idx.early_full_requires_hot,
+            "score_weights": {
+                "due": idx.score_weights.due,
+                "hot": idx.score_weights.hot,
+                "change": idx.score_weights.change,
+                "penalty": idx.score_weights.penalty,
+            },
+        }
+        auth = {
+            "oidc": {
+                "enabled": settings.auth.oidc.enabled,
+                "issuer": settings.auth.oidc.issuer or "",
+                "client_id": settings.auth.oidc.client_id or "",
+                "client_secret": settings.auth.oidc.client_secret or "",
+                "redirect_uri": settings.auth.oidc.redirect_uri or "",
+                "scopes": list(settings.auth.oidc.scopes),
+                "allow_insecure_http": settings.auth.oidc.allow_insecure_http,
+            },
+            "ldap": {
+                "enabled": settings.auth.ldap.enabled,
+                "uri": settings.auth.ldap.uri or "",
+                "bind_dn": settings.auth.ldap.bind_dn or "",
+                "bind_password": settings.auth.ldap.bind_password or "",
+                "user_base_dn": settings.auth.ldap.user_base_dn or "",
+                "user_filter": settings.auth.ldap.user_filter or "",
+                "start_tls": settings.auth.ldap.start_tls,
+                "ca_cert": _path(settings.auth.ldap.ca_cert),
+            },
+            "proxy_header": {
+                "enabled": settings.auth.proxy_header.enabled,
+                "header_name": settings.auth.proxy_header.header_name,
+                "auto_create": settings.auth.proxy_header.auto_create,
+            },
+        }
+        return {
+            "paths": paths,
+            "staging": staging,
+            "limits": limits,
+            "cookies": cookies,
+            "shares": shares,
+            "tls": tls,
+            "database": database,
+            "indexing": indexing,
+            "auth": auth,
+        }
+
+    def update_settings_detail(self, payload: dict[str, object]) -> None:
+        if not isinstance(payload, dict):
+            raise ConfigError("Invalid settings payload")
+
+        def _clean_path(value: object) -> str | None:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return None
+
+        def mutator(doc: dict) -> None:
+            settings_doc = doc.setdefault("settings", {})
+            paths_doc: dict[str, object] = {}
+            for backend in payload.get("paths", []):
+                name = (backend.get("name") or "").strip()
+                if not name:
+                    continue
+                paths_doc[name] = {
+                    "backend_cache_root": backend.get("backend_cache_root"),
+                    "backend_mounted": bool(backend.get("backend_mounted", False)),
+                    "backend_mount_root": backend.get("backend_mount_root"),
+                }
+            staging_payload = payload.get("staging") or {}
+            paths_doc["staging"] = {
+                "staging_mounted": bool(staging_payload.get("staging_mounted", False)),
+                "staging_mount_root": staging_payload.get("staging_mount_root"),
+                "size_gb": staging_payload.get("size_gb"),
+            }
+            settings_doc["paths"] = paths_doc
+
+            limits_payload = payload.get("limits") or {}
+            doc["limits"] = {
+                "max_zip_total_gb": limits_payload.get("max_zip_total_gb"),
+                "one_zip_cache_at_a_time": bool(limits_payload.get("one_zip_cache_at_a_time", False)),
+            }
+
+            cookies_doc: dict[str, dict[str, object]] = {}
+            for cookie in payload.get("cookies", []):
+                domain = (cookie.get("domain") or "").strip().lower()
+                if not domain:
+                    continue
+                entry = {"cookie_jar": cookie.get("cookie_jar") or ""}
+                credfile = _clean_path(cookie.get("credfile"))
+                if credfile:
+                    entry["credfile"] = credfile
+                cookies_doc[domain] = entry
+            doc["cookies"] = cookies_doc
+
+            shares_doc: dict[str, dict[str, object]] = {}
+            for share in payload.get("shares", []):
+                name = (share.get("name") or "").strip()
+                if not name:
+                    continue
+                shares_doc[name] = {
+                    "backend_folder": share.get("backend_folder"),
+                    "frontend_folder": share.get("frontend_folder"),
+                    "writable": bool(share.get("writable", True)),
+                    "cachelink_overlay": bool(share.get("cachelink_overlay", True)),
+                    "users": doc.get("webdav", {}).get(name, {}).get("users", {}),
+                }
+            doc["webdav"] = shares_doc
+
+            tls_payload = payload.get("tls") or {}
+            doc["tls"] = {
+                "enabled": bool(tls_payload.get("enabled", False)),
+                "mode": tls_payload.get("mode", "manual"),
+                "cert_path": tls_payload.get("manual", {}).get("cert_path"),
+                "key_path": tls_payload.get("manual", {}).get("key_path"),
+                "http": {
+                    "email": tls_payload.get("http", {}).get("email"),
+                    "domains": tls_payload.get("http", {}).get("domains", []),
+                    "challenge": tls_payload.get("http", {}).get("challenge"),
+                    "webroot_path": tls_payload.get("http", {}).get("webroot_path"),
+                    "staging": bool(tls_payload.get("http", {}).get("staging", False)),
+                },
+                "dns01": {
+                    "email": tls_payload.get("dns01", {}).get("email"),
+                    "domains": tls_payload.get("dns01", {}).get("domains", []),
+                    "provider": tls_payload.get("dns01", {}).get("provider"),
+                    "credentials_ini": tls_payload.get("dns01", {}).get("credentials_ini"),
+                    "staging": bool(tls_payload.get("dns01", {}).get("staging", False)),
+                    "propagation_seconds": tls_payload.get("dns01", {}).get("propagation_seconds"),
+                },
+            }
+
+            database_payload = payload.get("database") or {}
+            database_doc = {"engine": database_payload.get("engine", "sqlite")}
+            if database_doc["engine"] == "sqlite":
+                database_doc["sqlite"] = {"path": database_payload.get("sqlite_path")}
+            elif database_doc["engine"] == "postgres":
+                database_doc["postgres_dsn"] = database_payload.get("postgres_dsn")
+            doc["database"] = database_doc
+
+            indexing_payload = payload.get("indexing") or {}
+            doc["indexing"] = {
+                "min_full_reindex_days": indexing_payload.get("min_full_reindex_days"),
+                "max_full_reindex_days": indexing_payload.get("max_full_reindex_days"),
+                "hot_window_days": indexing_payload.get("hot_window_days"),
+                "hot_radius": indexing_payload.get("hot_radius"),
+                "daily_full_reindex_budget": indexing_payload.get("daily_full_reindex_budget"),
+                "daily_cheap_check_budget": indexing_payload.get("daily_cheap_check_budget"),
+                "max_full_reindex_per_14d": indexing_payload.get("max_full_reindex_per_14d"),
+                "max_cheap_checks_per_day": indexing_payload.get("max_cheap_checks_per_day"),
+                "allow_early_full_on_change": bool(indexing_payload.get("allow_early_full_on_change", False)),
+                "early_full_requires_hot": bool(indexing_payload.get("early_full_requires_hot", False)),
+                "score_weights": indexing_payload.get("score_weights", {}),
+            }
+
+            auth_payload = payload.get("auth") or {}
+            doc["auth"] = {
+                "oidc": auth_payload.get("oidc", {}),
+                "ldap": auth_payload.get("ldap", {}),
+                "proxy_header": auth_payload.get("proxy_header", {}),
+            }
+
+        self._mutate_settings_file(mutator)
 
     def describe_cachelinks(self) -> list[dict[str, object]]:
         degraded_map = {row["cachelink_id"]: row for row in self.index_db.list_degraded_targets()}
@@ -402,6 +728,154 @@ class CacheInfinityService:
             snapshot = self._build_cachelink_snapshot(descriptor, degraded_map.get(descriptor.canonical_id))
             descriptions.append(snapshot)
         return descriptions
+
+    def describe_cachelink_tree(self) -> dict[str, object]:
+        doc = self._load_cachelinks_document(self.settings.config_dir / "cachelinks.yaml")
+        folder_nodes = self._collect_folder_nodes(doc)
+        entries_by_folder: dict[str, list[dict[str, object]]] = {}
+        for descriptor in self.cachelinks.cachelinks.values():
+            folder_path = "/".join(descriptor.path_segments[:-1])
+            folder_nodes.add(folder_path)
+            entries_by_folder.setdefault(folder_path, []).append(self._cachelink_entry_snapshot(descriptor))
+        for folder, entry_list in entries_by_folder.items():
+            entry_list.sort(key=lambda item: item["canonical_id"])
+        folders: list[dict[str, object]] = []
+        for path in sorted(folder_nodes):
+            if not path:
+                label = "ROOT"
+                parent = None
+            else:
+                segments = path.split("/")
+                label = segments[-1]
+                parent = "/".join(segments[:-1]) if len(segments) > 1 else ""
+            depth = 0 if not path else len(path.split("/"))
+            folders.append({"path": path, "label": label, "parent": parent, "depth": depth})
+        return {"folders": folders, "entries": entries_by_folder}
+
+    def update_cachelink_entry(self, canonical_id: str, *, url: str, subfolder: str) -> None:
+        descriptor = self.cachelinks.cachelinks.get(canonical_id)
+        if not descriptor:
+            raise ConfigError(f"Unknown cachelink id {canonical_id}")
+        doc = self._load_cachelinks_document(descriptor.source_file)
+        segments = list(descriptor.path_segments)
+        node = doc.get("cachelinks")
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks.yaml missing root section")
+        for segment in segments[:-1]:
+            child = node.get(segment)
+            if not isinstance(child, dict):
+                raise ConfigError(f"Folder '{segment}' missing for descriptor {canonical_id}")
+            node = child
+        leaf_name = segments[-1]
+        leaf = node.get(leaf_name)
+        if not isinstance(leaf, dict):
+            raise ConfigError(f"Entry '{canonical_id}' missing in source file")
+        leaf["url"] = url.strip()
+        leaf["subfolder"] = subfolder.strip() or "/"
+        self._write_cachelinks_document(doc, descriptor.source_file)
+
+    def delete_cachelink_entry(self, canonical_id: str) -> None:
+        """Remove a cachelink leaf and prune empty parents."""
+
+        descriptor = self.cachelinks.cachelinks.get(canonical_id)
+        if not descriptor:
+            raise ConfigError(f"Unknown cachelink id {canonical_id}")
+        doc = self._load_cachelinks_document(descriptor.source_file)
+        node = doc.get("cachelinks")
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks root missing")
+        stack: list[tuple[dict, str]] = []
+        current = node
+        for segment in descriptor.path_segments[:-1]:
+            child = current.get(segment)
+            if not isinstance(child, dict):
+                raise ConfigError(f"Folder '{segment}' missing for descriptor {canonical_id}")
+            stack.append((current, segment))
+            current = child
+        removed = current.pop(descriptor.path_segments[-1], None)
+        if removed is None:
+            raise ConfigError(f"Cachelink '{canonical_id}' not found in source file")
+        while stack:
+            parent, key = stack.pop()
+            child = parent.get(key)
+            if isinstance(child, dict) and not child:
+                parent.pop(key, None)
+            else:
+                break
+        self._write_cachelinks_document(doc, descriptor.source_file)
+
+    def add_cachelink_folder(self, path: str) -> None:
+        segments = self._folder_segments(path)
+        doc_path = self.settings.config_dir / "cachelinks.yaml"
+        doc = self._load_cachelinks_document(doc_path)
+        node = doc.setdefault("cachelinks", {})
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks root must be a mapping")
+        current = node
+        for segment in segments:
+            child = current.get(segment)
+            if not isinstance(child, dict):
+                child = {}
+            current[segment] = child
+            current = child
+        self._write_cachelinks_document(doc, doc_path)
+
+    def remove_cachelink_folder(self, path: str) -> None:
+        segments = self._folder_segments(path)
+        if not segments:
+            raise ConfigError("Cannot remove root folder")
+        doc_path = self.settings.config_dir / "cachelinks.yaml"
+        doc = self._load_cachelinks_document(doc_path)
+        node = doc.get("cachelinks")
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks root missing")
+        stack: list[tuple[dict, str]] = []
+        current = node
+        for segment in segments:
+            child = current.get(segment)
+            if not isinstance(child, dict):
+                raise ConfigError(f"Folder '{path}' does not exist")
+            stack.append((current, segment))
+            current = child
+        if self._node_contains_entries(current):
+            raise ConfigError("Folder contains cachelinks and cannot be removed")
+        parent, key = stack.pop()
+        parent.pop(key, None)
+        while stack:
+            parent, key = stack.pop()
+            child = parent.get(key)
+            if isinstance(child, dict) and not child:
+                parent.pop(key, None)
+            else:
+                break
+        self._write_cachelinks_document(doc, doc_path)
+
+    def preview_cachelink(self, url: str, subfolder: str | None = None) -> dict[str, object]:
+        sub = (subfolder or "/").strip() or "/"
+        identifier, download_root = normalize_source_url(url)
+        descriptor = CachelinkDescriptor(
+            canonical_id="preview",
+            path_segments=("preview",),
+            source_file=self.settings.config_dir / "cachelinks.yaml",
+            source_url=url,
+            identifier=identifier,
+            download_root=download_root,
+            subfolder=sub,
+            mode=_detect_mode(sub),
+        )
+        remote_url = descriptor.remote_listing_url
+        entries, metadata = self._preview_fetcher.fetch(descriptor, remote_url, parse_entries=True)
+        preview_rows = [
+            {
+                "path": entry.path,
+                "is_dir": entry.is_dir,
+                "size": entry.size,
+                "modified": entry.modified.isoformat() if entry.modified else None,
+                "remote_url": entry.remote_url,
+            }
+            for entry in entries
+        ]
+        return {"entries": preview_rows, "metadata": metadata}
 
     def update_config_from_webui(
         self,
@@ -500,24 +974,7 @@ class CacheInfinityService:
         return {"backends": backends, "staging": summarize_path(self.staging.base_path)}
 
     def list_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
-        location = (location or "backend").strip().lower()
-        if location == "backend":
-            base = self.backend_registry.primary.definition.backend_cache_root
-        elif location == "staging":
-            base = self.staging.base_path
-        else:
-            raise ConfigError("Unknown storage location")
-        segments = self._normalize_relative_path(relative)
-        target = base.joinpath(*segments) if segments else base
-        resolved_base = base.resolve()
-        if not target.exists() or not target.is_dir():
-            raise ConfigError("Requested path is unavailable")
-        resolved_target = target.resolve()
-        try:
-            resolved_target.relative_to(resolved_base)
-        except ValueError as exc:
-            raise ConfigError("Path traversal outside base is not allowed") from exc
-
+        normalized_location, segments, target = self._resolve_storage_directory(location, relative)
         entries: list[dict[str, object]] = []
         for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
             try:
@@ -536,33 +993,106 @@ class CacheInfinityService:
             )
 
         breadcrumbs: list[dict[str, object]] = []
-        breadcrumbs.append({"label": location.upper(), "path": "/"})
+        breadcrumbs.append({"label": normalized_location.upper(), "path": "/"})
         accum: list[str] = []
         for segment in segments:
             accum.append(segment)
             breadcrumbs.append({"label": segment, "path": "/" + "/".join(accum)})
         return {
-            "location": location,
+            "location": normalized_location,
             "path": "/" + "/".join(segments) if segments else "/",
             "entries": entries,
             "breadcrumbs": breadcrumbs,
         }
 
+    def upload_storage_file(self, location: str, relative_dir: str | None, filename: str, data: bytes) -> None:
+        _, _, directory = self._resolve_storage_directory(location, relative_dir, ensure_exists=False)
+        directory.mkdir(parents=True, exist_ok=True)
+        safe_name = filename.replace("/", "_")
+        target = directory / safe_name
+        target.write_bytes(data)
+
+    def delete_storage_entry(self, location: str, relative_path: str) -> None:
+        base_path = self._resolve_storage_path(location, relative_path)
+        if not base_path.exists() or not base_path.is_file():
+            raise ConfigError("Only existing files can be deleted through the Web UI")
+        base_path.unlink()
+        parent = base_path.parent
+        if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+    def create_storage_folder(self, location: str, relative_dir: str | None, folder_name: str) -> None:
+        if not folder_name:
+            raise ConfigError("Folder name is required")
+        _, _, directory = self._resolve_storage_directory(location, relative_dir, ensure_exists=False)
+        safe_name = folder_name.replace("/", "_")
+        target = directory / safe_name
+        target.mkdir(parents=True, exist_ok=True)
+
+    def delete_storage_folder(self, location: str, relative_path: str) -> None:
+        target = self._resolve_storage_path(location, relative_path)
+        if not target.is_dir():
+            raise ConfigError("Path is not a directory")
+        if any(target.iterdir()):
+            raise ConfigError("Directory must be empty before deletion")
+        target.rmdir()
+
     def describe_cookies(self) -> list[dict[str, object]]:
+        """Describe cookies with domains extracted from cachelinks and recorded state."""
+
+        from urllib.parse import urlparse
+
+        domains_from_cachelinks: set[str] = set()
+        for descriptor in self.cachelinks.cachelinks.values():
+            try:
+                parsed = urlparse(descriptor.download_root or descriptor.source_url)
+                domain = parsed.netloc.split(":")[0].lower()
+                if domain:
+                    domains_from_cachelinks.add(domain)
+            except Exception:
+                continue
+
+        cookie_defs = {name.lower(): definition for name, definition in self.settings.cookies.items()}
+        configured_domains = set(cookie_defs.keys())
+        db_states = self.index_db.list_cookie_states()
+        all_domains = domains_from_cachelinks | configured_domains | set(db_states.keys())
+
+        def _epoch(ts: str | None) -> float | None:
+            if not ts:
+                return None
+            try:
+                return datetime.fromisoformat(ts).timestamp()
+            except ValueError:
+                return None
+
         cookies: list[dict[str, object]] = []
-        for domain, definition in self.settings.cookies.items():
-            cookie_path = definition.cookie_jar
-            has_cookie = cookie_path.exists() and cookie_path.stat().st_size > 0
+        for domain in sorted(all_domains):
+            normalized = domain.lower()
+            state = db_states.get(normalized)
+            definition = cookie_defs.get(normalized)
+            cookie_path = definition.cookie_jar if definition else None
+            file_timestamp = None
+            file_present = False
+            if cookie_path and cookie_path.exists():
+                file_present = cookie_path.stat().st_size > 0
+                file_timestamp = cookie_path.stat().st_mtime
+            cookie_present = state["cookie_present"] if state else file_present
+            last_updated = _epoch(state["last_updated_at"]) if state else None
             cookies.append(
                 {
                     "domain": domain,
-                    "cookie_path": str(cookie_path),
-                    "cookie_present": has_cookie,
-                    "credfile": str(definition.credfile) if definition.credfile else None,
-                    "supports_generation": bool(definition.credfile),
-                    "last_error": self.index_db.get_cookie_error(domain),
-                    "last_error_at": self.index_db.get_cookie_error_at(domain),
-                    "last_updated": cookie_path.stat().st_mtime if cookie_path.exists() else None,
+                    "cookie_path": str(cookie_path) if cookie_path else None,
+                    "cookie_present": bool(cookie_present),
+                    "credfile": str(definition.credfile) if definition and definition.credfile else None,
+                    "supports_generation": bool(definition and definition.credfile),
+                    "auth_fail": bool(state["auth_fail"]) if state else False,
+                    "last_error": state.get("last_error") if state else None,
+                    "last_error_at": state.get("last_error_at") if state else None,
+                    "last_updated": last_updated or file_timestamp,
+                    "configured": normalized in configured_domains,
                 }
             )
         return cookies
@@ -748,14 +1278,157 @@ class CacheInfinityService:
         }
 
     def _persist_state_snapshot(self) -> None:
-        if not self._state_store:
-            return
         settings_path = self.settings.settings_path
         cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
         settings_text = settings_path.read_text(encoding="utf-8") if settings_path.exists() else None
         cachelinks_text = cachelinks_path.read_text(encoding="utf-8") if cachelinks_path.exists() else None
-        if settings_text is not None:
+        if settings_text is None:
+            return
+        if getattr(self, "index_db", None):
+            self.index_db.save_config_snapshot(settings_text, cachelinks_text)
+        if self._state_store:
             self._state_store.save_state(settings_text, cachelinks_text)
+
+    # Cachelink helpers -------------------------------------------------
+    def _load_cachelinks_document(self, path: Path) -> dict:
+        if not path.exists():
+            return {"cachelinks": {}}
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(doc, dict):
+            doc = {"cachelinks": {}}
+        root = doc.get("cachelinks")
+        if not isinstance(root, dict):
+            doc["cachelinks"] = {}
+        return doc
+
+    def _write_cachelinks_document(self, document: dict, path: Path) -> None:
+        self._backup_file(path, "cachelinks")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        new_settings = load_settings(self.settings.config_dir)
+        self.apply_settings(new_settings, self.credentials)
+        self.ensure_filesystems()
+
+    def _folder_segments(self, path: str | None) -> tuple[str, ...]:
+        if not path:
+            return tuple()
+        segments = tuple(segment for segment in path.strip().strip("/").split("/") if segment)
+        return segments
+
+    def _collect_folder_nodes(self, document: dict) -> set[str]:
+        nodes: set[str] = {""}
+
+        def recurse(prefix: str, node: dict) -> None:
+            for key, value in sorted(node.items()):
+                new_path = "/".join(filter(None, [prefix, key]))
+                nodes.add(new_path)
+                if isinstance(value, dict) and not self._is_leaf_mapping(value):
+                    recurse(new_path, value)
+
+        root = document.get("cachelinks")
+        if isinstance(root, dict):
+            recurse("", root)
+        return nodes
+
+    def _node_contains_entries(self, node: dict) -> bool:
+        for value in node.values():
+            if self._is_leaf_mapping(value):
+                return True
+            if isinstance(value, dict) and self._node_contains_entries(value):
+                return True
+        return False
+
+    def _is_leaf_mapping(self, node: object) -> bool:
+        return isinstance(node, dict) and "url" in node and "subfolder" in node
+
+    def _locate_cachelink_leaf(self, descriptor: CachelinkDescriptor) -> tuple[dict, dict]:
+        doc = self._load_cachelinks_document(descriptor.source_file)
+        node = doc.get("cachelinks")
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks root missing")
+        for segment in descriptor.path_segments[:-1]:
+            child = node.get(segment)
+            if not isinstance(child, dict):
+                raise ConfigError(f"Cachelink folder '{segment}' not found for descriptor {descriptor.canonical_id}")
+            node = child
+        leaf = node.get(descriptor.path_segments[-1])
+        if not isinstance(leaf, dict):
+            raise ConfigError(f"Cachelink entry '{descriptor.canonical_id}' not found in source")
+        return doc, leaf
+
+    def _cachelink_entry_snapshot(self, descriptor: CachelinkDescriptor) -> dict[str, object]:
+        snapshot = self._build_cachelink_snapshot(descriptor)
+        try:
+            _, leaf = self._locate_cachelink_leaf(descriptor)
+            source_url = leaf.get("url", descriptor.source_url)
+            subfolder = leaf.get("subfolder", descriptor.subfolder)
+        except ConfigError:
+            source_url = descriptor.source_url
+            subfolder = descriptor.subfolder
+        return {
+            "canonical_id": descriptor.canonical_id,
+            "name": descriptor.path_segments[-1],
+            "url": source_url,
+            "subfolder": subfolder,
+            "mode": snapshot["mode"],
+            "files_total": snapshot["files_total"],
+            "cached_files": snapshot["cached_files"],
+        }
+
+    # Storage helpers --------------------------------------------------
+    def _resolve_storage_directory(
+        self,
+        location: str,
+        relative: str | None,
+        *,
+        ensure_exists: bool = True,
+    ) -> tuple[str, tuple[str, ...], Path]:
+        base = self._storage_base(location)
+        segments = self._normalize_relative_path(relative)
+        target = base.joinpath(*segments) if segments else base
+        resolved_base = base.resolve()
+        resolved_target = target if not ensure_exists else target.resolve() if target.exists() else target
+        if ensure_exists:
+            if not target.exists() or not target.is_dir():
+                raise ConfigError("Requested path is unavailable")
+            try:
+                resolved_target.relative_to(resolved_base)
+            except ValueError as exc:
+                raise ConfigError("Path traversal outside base is not allowed") from exc
+        return location.lower(), segments, target
+
+    def _resolve_storage_path(self, location: str, relative: str | None) -> Path:
+        base = self._storage_base(location)
+        segments = self._normalize_relative_path(relative)
+        target = base.joinpath(*segments) if segments else base
+        resolved_base = base.resolve()
+        resolved_target = target.resolve()
+        try:
+            resolved_target.relative_to(resolved_base)
+        except ValueError as exc:
+            raise ConfigError("Path traversal outside base is not allowed") from exc
+        return resolved_target
+
+    def _storage_base(self, location: str) -> Path:
+        loc = (location or "backend").strip().lower()
+        if loc == "backend":
+            return self.backend_registry.primary.definition.backend_cache_root
+        if loc == "staging":
+            return self.staging.base_path
+        raise ConfigError("Unknown storage location")
+
+    def _normalize_relative_path(self, relative: str | None) -> tuple[str, ...]:
+        if not relative or relative == "/":
+            return tuple()
+        clean = PurePosixPath("/" + relative.lstrip("/"))
+        segments: list[str] = []
+        for segment in clean.parts:
+            if segment in ("", "/"):
+                continue
+            if segment == "..":
+                raise ConfigError("Path traversal is not allowed")
+            segments.append(segment)
+        return tuple(segments)
 
 
 def _filter_available_middleware(entries: list[str]) -> list[str]:
@@ -769,6 +1442,13 @@ def _filter_available_middleware(entries: list[str]) -> list[str]:
             continue
         filtered.append(path)
     return filtered
+
+
+def _looks_like_auth_error(message: str) -> bool:
+    """Best-effort detection of auth failures from curl/remote responses."""
+
+    lowered = message.lower()
+    return "401" in lowered or "403" in lowered or "unauthorized" in lowered or "forbidden" in lowered
 
 
 __all__ = ["CacheInfinityService"]

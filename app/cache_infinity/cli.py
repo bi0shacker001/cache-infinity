@@ -17,6 +17,7 @@ from cheroot.ssl import pyopenssl
 from .config import ConfigError, TLSMode, TLSSettings
 from .config_manager import ConfigManager
 from .default_config import ensure_default_config
+from .logging_setup import configure_logging
 from .service import CacheInfinityService
 
 _LOGGER = logging.getLogger("cacheinfinity.cli")
@@ -25,11 +26,17 @@ DEFAULT_CONFIG_DIR = "/config"
 DEFAULT_CREDENTIALS_RELATIVE = "credentials/users.yaml"
 CONFIG_ENV = "CACHEINFINITY_CONFIG_DIR"
 CREDENTIALS_ENV = "CACHEINFINITY_CREDENTIALS_PATH"
+LOG_LEVEL_ENV = "CACHEINFINITY_LOG_LEVEL"
 DEFAULT_UI_PORT = 8090
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CacheInfinity service controller")
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv(LOG_LEVEL_ENV, "INFO"),
+        help=f"Logging verbosity (case-insensitive). Environment override via {LOG_LEVEL_ENV}.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve = subparsers.add_parser("serve", help="Start the embedded WebDAV server")
@@ -99,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_serve(args) -> None:
     config_dir = _resolve_config_dir(args.config_dir)
     ensure_default_config(config_dir)
+    configure_logging(config_dir / "logs", args.log_level)
     credentials_path = _resolve_credentials_path(args.credentials, config_dir)
     manager = ConfigManager(config_dir, credentials_path)
     service = CacheInfinityService.from_settings(manager.settings, manager.credentials, state_store=manager.state_store)
@@ -135,7 +143,6 @@ def cmd_serve(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -232,6 +239,7 @@ def _install_reload_signal(callback: Callable[[str], None]) -> None:
 def cmd_admin(args) -> None:
     config_dir = _resolve_config_dir(args.config_dir)
     ensure_default_config(config_dir)
+    configure_logging(config_dir / "logs", args.log_level)
     credentials_path = _resolve_credentials_path(args.credentials, config_dir)
     manager = ConfigManager(config_dir, credentials_path)
     service = CacheInfinityService.from_settings(manager.settings, manager.credentials, state_store=manager.state_store)

@@ -1,0 +1,50 @@
+version: "3.9"
+
+# Docker Compose file for testing the CacheInfinity test image
+# Usage: docker compose -f testing/compose.yml up -d
+# Volumes are stored in $HOME/.dev/docker-test/cache-infinity
+
+services:
+  cacheinfinity:
+    image: siliconautomaton/cache-infinity:test
+    container_name: cacheinfinity-test
+    restart: unless-stopped
+    environment:
+      UID: "${UID:-1000}"                      # container runtime user id
+      GID: "${GID:-1000}"                      # container runtime group id
+      DB_USER: "${DB_USER:-cacheinfinity}"     # shared DB username
+      DB_PASS: "${DB_PASS:-cacheinfinity}"     # shared DB password
+      CACHEINFINITY_DATABASE_URL: "postgresql://${DB_USER:-cacheinfinity}:${DB_PASS:-cacheinfinity}@cacheinfinity-db-test/cacheinfinity"
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"                           # expose WebDAV service
+      - "8090:8090"                           # expose Web UI control plane
+    volumes:
+      - ${HOME}/.dev/docker-test/cache-infinity/backend:/backend            # persistent backend storage mount
+      - ${HOME}/.dev/docker-test/cache-infinity/staging:/staging            # staging workspace for downloads
+      - ${HOME}/.dev/docker-test/cache-infinity/config:/config              # configuration directory mounted to $CONFIG (default /config)
+    networks:
+      - cacheinfinity-test-network
+      - cacheinfinity-db-link-test
+
+  db:
+    image: postgres:18
+    container_name: cacheinfinity-db-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${DB_USER:-cacheinfinity}"
+      POSTGRES_PASSWORD: "${DB_PASS:-cacheinfinity}"
+      POSTGRES_DB: cacheinfinity
+    volumes:
+      - ${HOME}/.dev/docker-test/cache-infinity/db:/var/lib/postgresql
+    networks:
+      - cacheinfinity-db-link-test
+
+networks:
+  cacheinfinity-test-network:
+    driver: bridge
+  cacheinfinity-db-link-test:
+    driver: bridge
+    internal: true
+

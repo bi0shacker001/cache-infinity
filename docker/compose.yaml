@@ -2,7 +2,10 @@ version: "3.9"
 
 services:
   cacheinfinity:
-    image: siliconautomaton/cache-infinity:test # deploy test-tagged image
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # image: siliconautomaton/cache-infinity:test # deploy test-tagged image (uncomment to use published image)
     container_name: cacheinfinity
     restart: unless-stopped
     environment:

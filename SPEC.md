@@ -533,24 +533,134 @@ Notes:
 
 ## 15. Web UI
 
-CacheInfinity ships with an integrated Web UI served alongside WebDAV (distinct path) that:
+CacheInfinity ships with a comprehensive Web UI served alongside WebDAV (distinct path) that provides complete administrative control over all aspects of the system. The Web UI is the primary interface for managing CacheInfinity—all administrative functions must be accessible through it.
+
+### 15.1 UI Layout and Navigation
+
+* **Sidebar navigation:** The UI uses a sidebar-only navigation system with the following main sections:
+  * Overview: Dashboard with statistics and system status
+  * Storage: Backend storage management and file browser
+  * Cachelinks: Cachelink management and configuration
+  * Cookies: Cookie management for authenticated domains
+  * Users: Complete user management (WebUI, WebDAV, authentication methods)
+  * Settings: All configuration settings
+  * Maintenance: System maintenance operations
+* **Category sub-options:** Within each main section, sub-options appear in the top bar (not as separate tabs). For example, the Users section has sub-options for Web UI Users, WebDAV Users, and Authentication configuration.
+* **No top-level tabs:** The previous tab-based navigation is removed; all navigation is through the sidebar.
+
+### 15.2 Overview Dashboard
 
 * Displays live statistics: backend usage, staging usage, cache hit/miss counters, indexing backlog, recent errors, and download throughput.
-* Lists cachelinks, shares, and cookie domains with their current status (hotness, last indexed).
-* Dashboard statistics must include backend/staging utilization, cache hit/miss counters, indexing backlog, checksum catalog entry counts, degraded cachelinks, and download throughput.
-* Allows editing `settings.yaml` (shares, limits, TLS, cookies) and cachelinks:
-  * Edits apply to the database first, then immediately flush to disk (`settings.yaml` or cachelinks files), create a gzipped snapshot in `$CONFIG/backups/`, and trigger the reload pipeline.
-  * Validation follows the same schema as CLI loads—invalid edits are rejected with detailed errors.
-* Provides forms to add/remove cachelinks and share-user mappings. Newly added cachelinks must immediately persist to the DB, rewrite YAML, enqueue an indexing job, and surface the metadata gathered (remote URL, entry counts, cached/uncached totals, last index time).
-* Exposes safe actions: kick off a reindex, regenerate Archive.org cookies, download the latest config snapshot.
+* Dashboard statistics include: backend/staging utilization, cache hit/miss counters, indexing backlog, checksum catalog entry counts, degraded cachelinks, and download throughput.
+* Lists all configured shares with user counts and status.
+
+### 15.3 Storage Management
+
+* **Backend storage management:**
+  * List all configured backend storage locations
+  * Display mount status, usage statistics (total/used/free), and paths
+  * Add, edit, and remove backend storage configurations
+  * View storage utilization across all backends
+* **File browser:**
+  * Browse files and directories on the cache drive (backend storage)
+  * Navigate through directory structure with breadcrumb navigation
+  * View file metadata (size, modification time)
+  * Upload files directly to backend storage
+  * Delete files from backend storage
+  * Overlay files: manage files that overlay virtual cachelink entries
+
+### 15.4 Cachelink Management
+
+* Lists all indexed cachelinks with metadata (remote URL, file counts, cached status, mode).
+* Provides forms to add/remove cachelinks. Newly added cachelinks must immediately persist to the DB, rewrite YAML, enqueue an indexing job, and surface the metadata gathered.
+* Shows cachelink status including last index time, error states, and degradation status.
+
+### 15.5 Cookie Management
+
+* **Domain discovery:** Automatically lists all domains from cachelinks associated with current shares, plus any domains explicitly configured in settings.
+* **Cookie status display:** For each domain, shows:
+  * `cookie_present`: Boolean indicating if a cookie file exists and has content (stored in database/cookie jar)
+  * `auth_fail`: Boolean indicating if an authentication failure (401/403) has occurred since the last time the cookie was successfully updated
+  * Last error message and timestamp
+  * Last update timestamp
+  * Whether the domain supports credential-based cookie generation
+* **Cookie operations:**
+  * **Upload cookies.txt:** Button to upload a cookies.txt file for any domain. The file is stored in the configured cookie jar path for that domain.
+  * **Update credentials:** For domains that support credential-based cookie generation (have a `credfile` configured), provides a form to update username/password credentials used for cookie generation.
+  * **Refresh cookie:** Regenerate cookies using stored credentials (for domains with credfile support).
+* **Visual indicators:** Cookie list items are colorized:
+  * Green border: Cookie present and no auth failures
+  * Red border: Auth failure detected
+  * Yellow border: No cookie present
+* **Scrollable list:** The cookie management interface uses a scrollable list to handle many domains.
+
+### 15.6 User Management
+
+The Users section provides complete user management across all authentication methods:
+
+* **Web UI Users:**
+  * List, create, update, and disable Web UI admin accounts
+  * Set passwords and admin privileges
+  * Enable/disable accounts
+* **WebDAV Users:**
+  * Manage users per share with granular permissions (login, read, write, cache)
+  * Assign users to shares
+  * Set per-share user policies
+* **Authentication Methods:**
+  * **OIDC Configuration:**
+    * Enable/disable OIDC authentication
+    * Configure issuer URL, client ID, client secret, redirect URI
+    * Set allowed scopes
+    * Configure insecure HTTP allowance
+  * **LDAP Configuration:**
+    * Enable/disable LDAP authentication
+    * Configure LDAP URI, bind DN, bind password
+    * Set user base DN and user filter
+    * Configure STARTTLS and CA certificate
+  * **Proxy Header Authentication:**
+    * Enable/disable proxy header authentication
+    * Configure header name (default: X-Forwarded-User)
+    * Enable/disable automatic user creation
+
+### 15.7 Settings Management
+
+* **Complete settings editor:**
+  * Full `settings.yaml` editor with syntax highlighting
+  * All configuration options accessible:
+    * Backend storage paths and mount configuration
+    * Staging area configuration
+    * Operational limits (zip caching, etc.)
+    * Cookie domain configurations
+    * WebDAV shares and user policies
+    * TLS configuration (manual, external modes)
+    * Database configuration (SQLite/PostgreSQL)
+    * Indexing settings and budgets
+    * Authentication settings (OIDC, LDAP, proxy header)
+* **Validation:** All edits are validated against the schema before applying. Invalid edits are rejected with detailed error messages.
+* **Persistence:** Changes apply to the database first, then immediately flush to disk (`settings.yaml`), create a gzipped snapshot in `$CONFIG/backups/`, and trigger the reload pipeline.
+
+### 15.8 Maintenance Operations
+
+* Trigger manual reindexing for specific cachelinks
+* View degraded targets (cachelinks with errors)
+* System health monitoring
+* Configuration backup/restore
+
+### 15.9 Technical Requirements
+
 * Runs on a **dedicated control port** (separate from WebDAV) for isolation. Default binding is `0.0.0.0:8090`, configurable via CLI flags.
-* Requires authentication; reuse WebDAV credentials or define a dedicated admin role under `settings.yaml:webui`. Treat the Web UI as the primary configuration interface—config YAMLs are a synchronized backup/export that the daemon rewrites after each successful change.
+* Requires authentication; uses WebUI credentials (stored in database). Treat the Web UI as the primary configuration interface—config YAMLs are a synchronized backup/export that the daemon rewrites after each successful change.
+* **API-first design:** All UI operations use RESTful API endpoints. The UI is a single-page application that communicates with backend APIs.
+* **Responsive design:** UI must work on desktop and tablet devices. Mobile support is optional.
+* **Real-time updates:** Status information refreshes automatically (every 15 seconds for overview, on-demand for other sections).
 
 Implementation notes:
 
 * UI reads from the database for speed (avoiding repeated disk scans).
 * Any DB-level edit (via API/UI) must be mirrored to disk synchronously; the export pipeline rewrites YAML/backups immediately after the transaction commits.
 * The UI must remain responsive while indexing/downloading proceed in the background; use async jobs or worker threads for long operations.
+* File uploads use multipart/form-data encoding.
+* Cookie management extracts domains from cachelink URLs automatically.
 
 Ports:
 

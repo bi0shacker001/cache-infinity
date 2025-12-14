@@ -1,4 +1,3 @@
-import base64
 import io
 import json
 
@@ -9,6 +8,7 @@ class DummyService:
     def __init__(self):
         self.updated = None
         self.created = None
+        self.deleted = None
         self.users = [{"username": "admin", "enabled": True, "is_admin": True}]
         self.webdav = {
             "shares": [
@@ -24,6 +24,27 @@ class DummyService:
         }
         self.webdav_upsert = None
         self.webdav_removed = None
+        self.detail_requested = False
+        self.detail_updated = None
+        self.settings_detail = {
+            "paths": [
+                {"name": "backend_1", "backend_cache_root": "/backend/cache", "backend_mounted": False, "backend_mount_root": "/mnt/backend"}
+            ],
+            "staging": {"staging_mounted": False, "staging_mount_root": "/staging", "size_gb": 10},
+            "limits": {"max_zip_total_gb": 20, "one_zip_cache_at_a_time": True},
+            "cookies": [],
+            "shares": [],
+            "tls": {
+                "enabled": False,
+                "mode": "manual",
+                "manual": {"cert_path": "", "key_path": ""},
+                "http": {},
+                "dns01": {},
+            },
+            "database": {"engine": "sqlite", "sqlite_path": "/config/cacheinfinity.db", "postgres_dsn": ""},
+            "indexing": {"score_weights": {}},
+            "auth": {},
+        }
 
     def has_ui_credentials(self):
         return True
@@ -118,24 +139,39 @@ class DummyService:
         self.created = kwargs
         return {"canonical_id": "games/psx/cachelink_new"}
 
+    def delete_cachelink_entry(self, canonical_id):
+        self.deleted = canonical_id
+
     def trigger_reindex(self, canonical_id):
         self.reindexed = canonical_id
 
     def regenerate_cookie(self, domain):
         self.cookie_refreshed = domain
 
+    def describe_settings_detail(self):
+        self.detail_requested = True
+        return self.settings_detail
 
-def _make_env(path, method="GET", body=b"", auth=True):
+    def update_settings_detail(self, payload):
+        self.detail_updated = payload
+
+
+def _make_env(path, method="GET", body=b"", session=None):
     env = {
         "PATH_INFO": path,
         "REQUEST_METHOD": method,
         "CONTENT_LENGTH": str(len(body)),
         "wsgi.input": io.BytesIO(body),
     }
-    if auth:
-        token = base64.b64encode(b"admin:pass").decode("ascii")
-        env["HTTP_AUTHORIZATION"] = f"Basic {token}"
+    if session:
+        env["HTTP_COOKIE"] = f"ci_session={session}"
     return env
+
+
+def _add_session(app, username="admin"):
+    token = "tok-" + username
+    app.sessions[token] = {"username": username}
+    return token
 
 
 def _run(app, environ):
@@ -152,25 +188,36 @@ def _run(app, environ):
 def test_status_endpoint_requires_auth():
     service = DummyService()
     app = WebUIApp(service)
-    code, _, _ = _run(app, _make_env("/api/status", auth=False))
+    code, _, _ = _run(app, _make_env("/api/status"))
     assert code.startswith("401")
 
 
 def test_status_endpoint_returns_json():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/status"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/status", session=session))
     assert code == "200 OK"
     assert headers["Content-Type"] == "application/json"
     payload = json.loads(body.decode("utf-8"))
     assert payload["config_dir"] == "/config"
 
 
+def test_login_sets_cookie():
+    service = DummyService()
+    app = WebUIApp(service)
+    body = b"username=admin&password=pass"
+    code, headers, _ = _run(app, _make_env("/login", method="POST", body=body))
+    assert code == "302 Found"
+    assert "Set-Cookie" in headers
+
+
 def test_config_update_calls_service():
     service = DummyService()
     app = WebUIApp(service)
     payload = json.dumps({"settings_text": "settings: {}", "cachelinks_text": "cachelinks: {}"}).encode("utf-8")
-    code, headers, body = _run(app, _make_env("/api/config", method="POST", body=payload))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/config", method="POST", body=payload, session=session))
     assert code == "200 OK"
     assert service.updated == {"settings_text": "settings: {}", "cachelinks_text": "cachelinks: {}"}
 
@@ -178,7 +225,8 @@ def test_config_update_calls_service():
 def test_degraded_endpoint_returns_list():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/degraded"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/degraded", session=session))
     assert code == "200 OK"
     payload = json.loads(body.decode("utf-8"))
     assert payload["degraded"] == []
@@ -187,7 +235,8 @@ def test_degraded_endpoint_returns_list():
 def test_cachelinks_endpoint_returns_snapshot():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/cachelinks"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/cachelinks", session=session))
     assert code == "200 OK"
     payload = json.loads(body.decode("utf-8"))
     assert payload["cachelinks"][0]["canonical_id"] == "games/psx/cachelink_demo"
@@ -197,15 +246,47 @@ def test_cachelink_create_calls_service():
     service = DummyService()
     app = WebUIApp(service)
     body = json.dumps({"canonical_path": "games/psx/cachelink_new", "url": "https://example.com", "subfolder": "/"}).encode("utf-8")
-    code, headers, resp_body = _run(app, _make_env("/api/cachelinks", method="POST", body=body))
+    session = _add_session(app)
+    code, headers, resp_body = _run(app, _make_env("/api/cachelinks", method="POST", body=body, session=session))
     assert code == "200 OK"
     assert service.created["canonical_path"] == "games/psx/cachelink_new"
+
+
+def test_cachelink_delete_calls_service():
+    service = DummyService()
+    app = WebUIApp(service)
+    session = _add_session(app)
+    code, headers, resp_body = _run(app, _make_env("/api/cachelinks/games%2Fpsx%2Fcachelink_demo", method="DELETE", session=session))
+    assert code == "200 OK"
+    assert service.deleted == "games/psx/cachelink_demo"
+
+
+def test_settings_detail_endpoint_returns_values():
+    service = DummyService()
+    app = WebUIApp(service)
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/settings/detail", session=session))
+    assert code == "200 OK"
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["paths"][0]["name"] == "backend_1"
+    assert service.detail_requested
+
+
+def test_settings_detail_update_calls_service():
+    service = DummyService()
+    app = WebUIApp(service)
+    session = _add_session(app)
+    payload = json.dumps({"paths": [], "staging": {}, "limits": {}, "cookies": [], "shares": [], "tls": {}, "database": {}, "indexing": {}, "auth": {}}).encode("utf-8")
+    code, headers, body = _run(app, _make_env("/api/settings/detail", method="POST", body=payload, session=session))
+    assert code == "200 OK"
+    assert service.detail_updated["paths"] == []
 
 
 def test_users_endpoint_returns_users():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/users"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/users", session=session))
     assert code == "200 OK"
     payload = json.loads(body.decode("utf-8"))
     assert payload["users"][0]["username"] == "admin"
@@ -215,7 +296,8 @@ def test_reindex_endpoint_calls_service():
     service = DummyService()
     app = WebUIApp(service)
     payload = json.dumps({"canonical_id": "games/psx/map0001"}).encode("utf-8")
-    code, headers, body = _run(app, _make_env("/api/reindex", method="POST", body=payload))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/reindex", method="POST", body=payload, session=session))
     assert code == "200 OK"
     assert service.reindexed == "games/psx/map0001"
 
@@ -224,7 +306,8 @@ def test_cookie_refresh_endpoint_calls_service():
     service = DummyService()
     app = WebUIApp(service)
     payload = json.dumps({"domain": "archive.org"}).encode("utf-8")
-    code, headers, body = _run(app, _make_env("/api/cookies", method="POST", body=payload))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/cookies", method="POST", body=payload, session=session))
     assert code == "200 OK"
     assert service.cookie_refreshed == "archive.org"
 
@@ -232,7 +315,8 @@ def test_cookie_refresh_endpoint_calls_service():
 def test_webdav_users_endpoint_returns_shares():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/webdav-users"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/webdav-users", session=session))
     assert code == "200 OK"
     payload = json.loads(body.decode("utf-8"))
     assert payload["shares"][0]["name"] == "share_games"
@@ -244,7 +328,8 @@ def test_webdav_upsert_calls_service():
     payload = json.dumps(
         {"share": "share_games", "username": "demo", "password": "pass", "login": True, "read": True, "write": False, "cache": False, "enabled": True}
     ).encode("utf-8")
-    code, headers, body = _run(app, _make_env("/api/webdav-users", method="POST", body=payload))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/webdav-users", method="POST", body=payload, session=session))
     assert code == "200 OK"
     assert service.webdav_upsert["username"] == "demo"
     assert service.webdav_upsert["share"] == "share_games"
@@ -253,6 +338,7 @@ def test_webdav_upsert_calls_service():
 def test_webdav_delete_calls_service():
     service = DummyService()
     app = WebUIApp(service)
-    code, headers, body = _run(app, _make_env("/api/webdav-users/share_games/demo", method="DELETE"))
+    session = _add_session(app)
+    code, headers, body = _run(app, _make_env("/api/webdav-users/share_games/demo", method="DELETE", session=session))
     assert code == "200 OK"
     assert service.webdav_removed == ("share_games", "demo")
