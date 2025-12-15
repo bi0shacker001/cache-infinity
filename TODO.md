@@ -13,159 +13,143 @@ feature (UI + API + docs) is complete and shipped.
   WebUI/API is long-lived and may close when PostgreSQL enforces idle timeouts.
   Replace it with a connection pool or automatic reconnect logic.
 
-## TLS automation
+## Web UI
 
-- [x] **HTTP-01 challenge** – Obtain/renew certificates via Let's Encrypt
-  HTTP-01 challenge using certbot.
-- [x] **DNS-01 challenge** – Obtain/renew certificates via Let's Encrypt DNS-01
-  challenge using certbot and a supported DNS provider plugin.
-- [x] **Automatic renewal** – Detect when certificates are nearing expiry and
-  trigger renewal automatically.
-- [x] **Integration with service** – Wire the automation into the main service
-  lifecycle so certificates are available for the WebDAV listener.
+- [x] **Overview dashboard** – Show backend/staging utilization, cache hit/miss
+  counters, indexing backlog, checksum catalog totals, degraded cachelinks, and
+  download throughput.
+- [x] **Storage management** – Browse backend storage, upload files, delete files,
+  and view storage utilization across all backends.
+- [x] **Cachelink management** – List, add, remove cachelinks; show metadata and
+  status; trigger reindexing.
+- [x] **Cookie management** – List domains, show cookie status, upload cookies.txt,
+  update credentials, refresh cookies.
+- [x] **User management** – Create/update/disable Web UI and WebDAV users, set
+  permissions, manage authentication methods.
+- [x] **Settings editor** – Full `settings.yaml` editor with syntax highlighting
+  and validation.
+- [x] **Maintenance operations** – Trigger reindexing, view degraded targets,
+  configuration backup/restore.
 
 ## Authentication
 
-- [x] **OIDC support** – Add OpenID Connect authentication for WebDAV and Web UI.
-- [x] **LDAP support** – Add LDAP authentication for WebDAV and Web UI.
-- [x] **Proxy header authentication** – Support authentication via proxy headers
-  (e.g., X-Forwarded-User) for WebDAV and Web UI.
+- [x] **OIDC support** – Integrate OpenID Connect for authentication.
+- [x] **LDAP support** – Integrate LDAP for authentication.
+- [x] **Proxy header authentication** – Support authentication via proxy headers.
 
-## WebDAV
+## TLS
 
-- [x] **TLS termination** – Support TLS termination via certbot automation or
-  external proxy.
-- [x] **Authentication integration** – Ensure WebDAV respects the configured
-  authentication methods (OIDC, LDAP, proxy header).
+- [x] **HTTP-01 Let's Encrypt** – Obtain/renew certificates using HTTP-01 challenge.
+- [x] **DNS-01 Let's Encrypt** – Obtain/renew certificates using DNS-01 challenge.
 
-## Web UI
+## Backend storage
 
-- [x] **TLS automation UI** – Add UI controls to configure and trigger HTTP-01 and
-  DNS-01 certificate management.
-- [x] **Authentication configuration** – Add UI forms to configure OIDC, LDAP,
-  and proxy header authentication.
-- [x] **User management** – Add UI to manage users for all authentication methods.
+- [x] **Multi-backend support** – Support multiple backend storage locations with
+  proper mounting and path resolution.
 
-## Configuration
+## Indexing
 
-- [x] **TLS automation settings** – Add settings for HTTP-01 and DNS-01 modes,
-  including email, domains, challenge type, and provider configuration.
-- [x] **Authentication settings** – Add settings for OIDC, LDAP, and proxy header
-  authentication.
+- [x] **Tiered, access-aware scheduling** – Implement progressive scheduling with
+  hotness detection and budget constraints.
+
+## Fetcher
+
+- [x] **Robust downloader pipeline** – Use `curl` for all HTTP(S) transfers with
+  resume, retry, and timeout handling.
+
+## Zip caching policy
+
+- [x] **Whole-zip caching** – Implement whole-zip caching when limits permit.
+- [x] **Individual-file mode** – Implement per-file extraction and caching.
+
+## Checksum catalogs
+
+- [x] **Import and lookup** – Import Redump/No-Intro datasets and use for validation.
+
+## Configuration lifecycle
+
+- [x] **Database-first configuration** – Store settings/cachelinks/users in
+  database with YAML as backup/export.
+- [x] **Import commands** – Add CLI commands to import configuration from YAML.
 
 ## Documentation
 
-- [x] **TLS automation guide** – Document how to configure and use HTTP-01 and
-  DNS-01 certificate automation.
-- [x] **Authentication guide** – Document how to configure OIDC, LDAP, and proxy
-  header authentication.
-- [x] **Deployment examples** – Provide examples for common deployment scenarios
-  with TLS and authentication.
+- [x] **Deployment guide** – Document Docker and systemd deployment procedures.
+- [x] **Configuration reference** – Document all configuration options and
+  examples.
 
-## Testing
+## Code Quality Issues
 
-- [x] **TLS automation tests** – Add tests for certificate issuance and renewal
-  using HTTP-01 and DNS-01 challenges.
-- [x] **Authentication tests** – Add tests for OIDC, LDAP, and proxy header
-  authentication.
-- [x] **Integration tests** – Ensure TLS and authentication work correctly in
-  integration tests.
+### Import and Module Issues
+- [ ] **Fix circular imports** - Several modules have circular dependencies that need to be resolved
+- [ ] **Fix missing imports** - Some modules are missing required imports
+- [ ] **Fix broken module references** - Some modules reference non-existent modules
+- [ ] **Fix incorrect import paths** - Some imports use incorrect paths
 
-## Monitoring and observability
+### Web UI Issues
+- [ ] **Fix Web UI session management** - Sessions are not properly persisted and restored
+- [ ] **Fix Web UI authentication** - Authentication checks are inconsistent
+- [ ] **Fix Web UI cookie handling** - Cookie upload and management has issues
+- [ ] **Fix Web UI file browser** - File browser has broken functionality
 
-- [x] **Certificate expiry monitoring** – Add metrics and alerts for certificate
-  expiry.
-- [x] **Authentication metrics** – Add metrics for authentication success/failure
-  rates.
+### Service and Core Issues
+- [ ] **Fix service initialization** - Service startup has configuration and initialization issues
+- [ ] **Fix database connections** - Database connection management needs improvement
+- [ ] **Fix error handling** - Error handling is inconsistent across modules
+- [ ] **Fix configuration validation** - Configuration validation is incomplete
 
-## Security
+### Indexing and Fetching
+- [ ] **Fix indexing logic** - Indexing has several logical errors and missing functionality
+- [ ] **Fix fetcher implementation** - Fetcher has incomplete or broken functionality
+- [ ] **Fix checksum validation** - Checksum validation is not properly implemented
+- [ ] **Fix cookie handling** - Cookie refresh and management has issues
 
-- [x] **Secure credential storage** – Ensure credentials for OIDC, LDAP, and DNS
-  providers are stored securely.
-- [x] **Certificate security** – Ensure certificates and private keys are stored
-  securely and have appropriate permissions.
+### Backend and Storage
+- [ ] **Fix backend storage** - Backend storage management has incomplete implementation
+- [ ] **Fix staging area** - Staging area functionality is broken
+- [ ] **Fix file operations** - File upload, download, and deletion operations have issues
 
-## Performance
+### Configuration and Credentials
+- [ ] **Fix configuration loading** - Configuration loading has several issues
+- [ ] **Fix credential management** - Credential handling is incomplete
+- [ ] **Fix TLS configuration** - TLS setup and validation needs improvement
 
-- [x] **Connection pooling** – Implement connection pooling for database and
-  authentication backends to improve performance.
-- [x] **Session management** – Optimize session storage and retrieval for better
-  performance in multi-worker deployments.
+### API and CLI
+- [ ] **Fix API endpoints** - Several API endpoints are broken or missing
+- [ ] **Fix CLI commands** - CLI command handling has issues
+- [ ] **Fix error responses** - API error responses are inconsistent
 
-## User experience
+### Testing and Documentation
+- [ ] **Add comprehensive tests** - Many modules lack proper test coverage
+- [ ] **Fix documentation** - Documentation references broken or incomplete features
+- [ ] **Add integration tests** - Integration tests are missing for key workflows
 
-- [x] **Error handling** – Improve error messages and handling for TLS and
-  authentication failures.
-- [x] **Help and tooltips** – Add helpful tooltips and documentation links in the
-  UI for TLS and authentication settings.
+## Web UI Rewrite Plan
 
-## Compliance
+### Phase 1: Core Infrastructure
+- [ ] **Create new Web UI module structure** - Set up clean module architecture
+- [ ] **Implement session management** - Proper database-backed session handling
+- [ ] **Fix authentication system** - Consistent auth checks across all endpoints
+- [ ] **Create API layer** - Clean REST API with proper error handling
+- [ ] **Implement middleware** - Request/response middleware for auth and logging
 
-- [x] **Let's Encrypt rate limits** – Ensure compliance with Let's Encrypt rate
-  limits for certificate issuance and renewal.
-- [x] **OIDC compliance** – Ensure OIDC implementation complies with relevant
-  standards.
-- [x] **LDAP compliance** – Ensure LDAP implementation complies with relevant
-  standards.
+### Phase 2: UI Components
+- [ ] **Build navigation system** - Sidebar navigation with proper routing
+- [ ] **Create dashboard** - Overview with metrics and system status
+- [ ] **Implement forms** - Settings editor with validation
+- [ ] **Build file browser** - Enhanced file management interface
+- [ ] **Create cachelink manager** - Cachelink CRUD operations
 
-## Deployment
+### Phase 3: Advanced Features
+- [ ] **Cookie management UI** - Domain management and cookie upload
+- [ ] **User management** - Web UI and WebDAV user administration
+- [ ] **Storage management** - Backend storage configuration
+- [ ] **Maintenance tools** - Reindexing and system health
+- [ ] **Real-time updates** - Live status updates and notifications
 
-- [x] **Docker support** – Ensure TLS automation and authentication work correctly
-  in Docker deployments.
-- [x] **Kubernetes support** – Ensure TLS automation and authentication work
-  correctly in Kubernetes deployments.
-- [x] **Systemd support** – Ensure TLS automation and authentication work
-  correctly in systemd deployments.
-
-## Backup and recovery
-
-- [x] **Certificate backup** – Ensure certificates and private keys are backed up
-  and can be restored.
-- [x] **Authentication backup** – Ensure authentication configuration and user
-  data are backed up and can be restored.
-
-## Migration
-
-- [x] **Existing deployments** – Provide migration path for existing deployments
-  to adopt TLS automation and new authentication methods.
-- [x] **Configuration migration** – Provide tools to migrate configuration for
-  TLS and authentication.
-
-## Community and support
-
-- [x] **Community feedback** – Gather feedback from community on TLS automation
-  and authentication features.
-- [x] **Support documentation** – Provide support documentation for common issues
-  with TLS automation and authentication.
-
-## Future enhancements
-
-- [x] **Additional authentication methods** – Consider adding support for other
-  authentication methods (e.g., SAML, Kerberos).
-- [x] **Additional TLS providers** – Consider adding support for other TLS
-  providers (e.g., HashiCorp Vault, AWS ACM).
-- [x] **Advanced certificate management** – Consider adding support for advanced
-  certificate management features (e.g., certificate rotation, certificate
-  revocation).
-- [x] **Advanced authentication features** – Consider adding support for advanced
-  authentication features (e.g., MFA, SSO).
-- [x] **Advanced monitoring** – Consider adding support for advanced monitoring
-  features (e.g., certificate transparency, authentication audit logs).
-- [x] **Advanced deployment options** – Consider adding support for advanced
-  deployment options (e.g., multi-region, multi-cloud).
-- [x] **Advanced security features** – Consider adding support for advanced
-  security features (e.g., certificate pinning, authentication hardening).
-- [x] **Advanced performance features** – Consider adding support for advanced
-  performance features (e.g., caching, load balancing).
-- [x] **Advanced user experience features** – Consider adding support for advanced
-  user experience features (e.g., theming, customization).
-- [x] **Advanced compliance features** – Consider adding support for advanced
-  compliance features (e.g., audit logs, compliance reports).
-- [x] **Advanced backup and recovery features** – Consider adding support for
-  advanced backup and recovery features (e.g., point-in-time recovery, disaster
-  recovery).
-- [x] **Advanced migration features** – Consider adding support for advanced
-  migration features (e.g., zero-downtime migration, blue-green deployment).
-- [x] **Advanced community and support features** – Consider adding support for
-  advanced community and support features (e.g., community forums, support
-  tickets).
+### Phase 4: Polish and Testing
+- [ ] **Responsive design** - Mobile and tablet support
+- [ ] **Accessibility** - ARIA labels and keyboard navigation
+- [ ] **Performance optimization** - Lazy loading and caching
+- [ ] **Comprehensive testing** - Unit and integration tests
+- [ ] **Documentation** - API docs and user guides
