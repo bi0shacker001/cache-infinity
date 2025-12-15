@@ -1019,12 +1019,13 @@ _INDEX_HTML = """<!DOCTYPE html>
     }
 
     // API helpers
+    const apiUrl = (path) => path.startsWith('/') ? path : `/${path}`;
     async function fetchJSON(path, opts = {}) {
-      const options = { credentials: 'same-origin', ...opts };
+      const options = { credentials: 'include', ...opts };
       if (options.body && !options.headers) {
         options.headers = { 'Content-Type': 'application/json' };
       }
-      const resp = await fetch(path, options);
+      const resp = await fetch(apiUrl(path), options);
       if (!resp.ok) throw new Error(await resp.text());
       if (resp.status === 204) return {};
       return await resp.json();
@@ -1099,7 +1100,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       formData.append('relative_path', currentStoragePath || '/');
       formData.append('file', file, file.name);
       try {
-        await fetch('api/storage/upload', { method: 'POST', body: formData, credentials: 'same-origin' });
+        await fetch(apiUrl('api/storage/upload'), { method: 'POST', body: formData, credentials: 'same-origin' });
         alert('File uploaded.');
         loadFileBrowser(currentStoragePath);
       } catch (err) {
@@ -1130,7 +1131,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function deleteFile(path) {
       if (!confirm('Delete this file from backend storage?')) return;
       try {
-        await fetch(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE', credentials: 'same-origin' });
+        await fetch(apiUrl(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`), { method: 'DELETE', credentials: 'same-origin' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -1140,7 +1141,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function deleteFolder(path) {
       if (!confirm('Delete this folder? It must be empty.')) return;
       try {
-        await fetch(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE', credentials: 'same-origin' });
+        await fetch(apiUrl(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`), { method: 'DELETE', credentials: 'same-origin' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Folder deletion failed: ' + err.message);
@@ -2200,7 +2201,7 @@ _INDEX_HTML = """<!DOCTYPE html>
         formData.append('domain', domain);
         formData.append('cookie_file', text);
         try {
-          await fetch('api/cookies/upload', { method: 'POST', body: formData, credentials: 'same-origin' });
+          await fetch(apiUrl('api/cookies/upload'), { method: 'POST', body: formData, credentials: 'same-origin' });
           alert('Cookie file uploaded.');
           loadCookies();
         } catch (err) {

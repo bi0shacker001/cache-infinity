@@ -12,6 +12,8 @@ CacheInfinity exposes a WebDAV filesystem (consumed by Nextcloud and other DAV c
 
 The project is inspired by Infinite Mac’s **Infinite Drive** and adapts that experience to WebDAV environments with extra controls for staging volumes, cookie management, and Docker/systemd deployment.
 
+> **Documentation Note:** `SPEC.md`, `README.md`, `TODO.md`, and `ISSUES.md` are **living documents**. They evolve with the codebase and should be treated as the authoritative description of the current design, outstanding work, and known issues. Always review them together when planning changes.
+
 ## 2. Architecture
 
 * **WebDAV frontend:** WsgiDAV with a custom provider (virtual tree + read-through caching + write-through backend).
@@ -650,7 +652,8 @@ The Users section provides complete user management across all authentication me
 
 * Runs on a **dedicated control port** (separate from WebDAV) for isolation. Default binding is `0.0.0.0:8090`, configurable via CLI flags.
 * Requires authentication; uses WebUI credentials (stored in database). Treat the Web UI as the primary configuration interface—config YAMLs are a synchronized backup/export that the daemon rewrites after each successful change.
-* **API-first design:** All UI operations use RESTful API endpoints. The UI is a single-page application that communicates with backend APIs.
+* **API-first design:** All UI operations use RESTful API endpoints living under `/api/...`. The SPA must always issue absolute `/api/…` requests (never relative to the current path) so reverse proxies or alternate mount points do not break functionality.
+* **Session authentication:** Login uses the dedicated HTML form which sets an HTTP-only session cookie; Basic Auth is not used. The session cookie must be honored across all UI/API requests on the control port.
 * **Responsive design:** UI must work on desktop and tablet devices. Mobile support is optional.
 * **Real-time updates:** Status information refreshes automatically (every 15 seconds for overview, on-demand for other sections).
 

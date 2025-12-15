@@ -19,7 +19,7 @@ COPY app ./app
 COPY tests ./tests
 RUN apk add --no-cache --virtual .build-deps build-base libffi-dev openssl-dev && \
     pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir "WsgiDAV>=4.0" && \
+    pip install --no-cache-dir "WsgiDAV[all]>=4.0" && \
     pip install --no-cache-dir .[dev] && \
     apk del .build-deps && \
     mkdir -p /backend /staging /config && \

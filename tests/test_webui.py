@@ -212,6 +212,21 @@ def test_login_sets_cookie():
     assert "Set-Cookie" in headers
 
 
+def test_login_allows_api_access():
+    service = DummyService()
+    app = WebUIApp(service)
+    body = b"username=admin&password=pass"
+    code, headers, _ = _run(app, _make_env("/login", method="POST", body=body))
+    assert code == "302 Found"
+    cookie_header = headers.get("Set-Cookie", "")
+    token = ""
+    if cookie_header:
+        token = cookie_header.split("ci_session=")[-1].split(";")[0]
+    assert token
+    code, _, _ = _run(app, _make_env("/api/status", session=token))
+    assert code == "200 OK"
+
+
 def test_config_update_calls_service():
     service = DummyService()
     app = WebUIApp(service)
