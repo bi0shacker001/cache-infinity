@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import html
+import logging
 import os
 import secrets
 from urllib.parse import parse_qs, unquote
@@ -10,6 +12,18 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:  # pragma: no cover
     from .service import CacheInfinityService
+    from .webui_file_browser import FileBrowser
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _extract_inline_webui_js(html_text: str) -> str:
+    if "<script>" not in html_text:
+        raise RuntimeError("webui: missing inline <script> block")
+    after = html_text.split("<script>", 1)[1]
+    if "</script>" not in after:
+        raise RuntimeError("webui: missing closing </script> tag")
+    return after.split("</script>", 1)[0].strip() + "\n"
 
 
 class WebUIApp:
@@ -18,10 +32,21 @@ class WebUIApp:
     def __init__(self, service: "CacheInfinityService"):
         self.service = service
         self.sessions: dict[str, dict[str, object]] = {}
+        self._load_persistent_sessions()
+        self.file_browser = FileBrowser(service)
 
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "") or "/"
         method = environ.get("REQUEST_METHOD", "GET").upper()
+        if path == "/favicon.ico" and method == "GET":
+            return self._respond(start_response, "204 No Content", "image/x-icon", b"")
+        if path == "/static/webui.js" and method == "GET":
+            return self._respond(
+                start_response,
+                "200 OK",
+                "application/javascript; charset=utf-8",
+                _extract_inline_webui_js(_INDEX_HTML).encode("utf-8"),
+            )
         if not self.service.has_ui_credentials():
             return self._respond(
                 start_response,
@@ -32,6 +57,9 @@ class WebUIApp:
         if path == "/login":
             if method == "POST":
                 return self._handle_login(environ, start_response)
+            if self._authenticate(environ):
+                headers = [("Location", "/")]
+                return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
             return self._serve_login(start_response)
         if path == "/logout":
             return self._handle_logout(environ, start_response)
@@ -40,27 +68,49 @@ class WebUIApp:
         if not user:
             return self._login_required_response(path, start_response)
 
+        # Update session last used time
+        cookies = self._parse_cookies(environ)
+        token = cookies.get("ci_session")
+        if token:
+            self.service.index_db.update_session_last_used(token)
+
         # Serve main UI
         if path in ("/", "") and method == "GET":
             return self._serve_index(start_response)
         
         # API endpoints
+        if path == "/api/session" and method == "GET":
+            return self._json_response(start_response, {"username": user})
         if path == "/api/status" and method == "GET":
             return self._serve_status(start_response)
         if path == "/api/storage" and method == "GET":
             return self._json_response(start_response, self.service.describe_storage())
         if path == "/api/storage/entries" and method == "GET":
-            params = parse_qs(environ.get("QUERY_STRING", ""))
-            location = params.get("location", ["backend"])[0]
-            relative = params.get("relative", [None])[0]
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            relative = params.get("relative", None)
+            sort_by = params.get("sort_by")
+            sort_order = params.get("sort_order")
+            view_mode = params.get("view_mode")
+            show_hidden = params.get("show_hidden", "false").lower() == "true"
+            search_query = params.get("search_query", "")
             try:
-                return self._json_response(start_response, self.service.list_storage_entries(location, relative))
+                result = self.file_browser.browse(
+                    location=location,
+                    relative_path=relative or "/",
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    view_mode=view_mode,
+                    show_hidden=show_hidden,
+                    search_query=search_query
+                )
+                return self._json_response(start_response, result)
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/storage/entries" and method == "DELETE":
-            params = parse_qs(environ.get("QUERY_STRING", ""))
-            location = params.get("location", ["backend"])[0]
-            relative = params.get("relative", [None])[0]
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            relative = params.get("relative", None)
             try:
                 if relative is None:
                     raise ValueError("relative path required")
@@ -73,14 +123,39 @@ class WebUIApp:
         if path == "/api/storage/folder" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_folder_create)
         if path == "/api/storage/folder" and method == "DELETE":
-            params = parse_qs(environ.get("QUERY_STRING", ""))
-            location = params.get("location", ["backend"])[0]
-            relative = params.get("relative", [None])[0]
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            relative = params.get("relative", None)
             try:
                 if relative is None:
                     raise ValueError("relative path required")
                 self.service.delete_storage_folder(location, relative)
                 return self._json_response(start_response, {"status": "ok"})
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="400 Bad Request")
+        
+        # Enhanced file browser API endpoints
+        if path == "/api/storage/search" and method == "GET":
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            query = params.get("query", "")
+            path_param = params.get("path", "/")
+            try:
+                results = self.file_browser.search_files(location, query, path_param)
+                return self._json_response(start_response, {"results": results})
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="400 Bad Request")
+        
+        if path == "/api/storage/file-details" and method == "GET":
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            file_path = params.get("path", "")
+            try:
+                details = self.file_browser.get_file_details(location, file_path)
+                if details:
+                    return self._json_response(start_response, details)
+                else:
+                    return self._json_error(start_response, "File not found", status="404 Not Found")
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/cookies" and method == "GET":
@@ -109,8 +184,8 @@ class WebUIApp:
         if path == "/api/cachelinks/folder" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_cachelink_folder_add)
         if path == "/api/cachelinks/folder" and method == "DELETE":
-            params = parse_qs(environ.get("QUERY_STRING", ""))
-            folder_path = params.get("path", [None])[0]
+            params = self._parse_query_params(environ)
+            folder_path = params.get("path", None)
             if not folder_path:
                 return self._json_error(start_response, "path parameter required", status="400 Bad Request")
             try:
@@ -171,16 +246,31 @@ class WebUIApp:
             return self._json_error(start_response, "Invalid JSON payload", status="400 Bad Request")
         return handler(payload, start_response)
 
+    def _parse_query_params(self, environ):
+        """Parse query string parameters from URL."""
+        query_string = environ.get("QUERY_STRING", "")
+        params = {}
+        if query_string:
+            for pair in query_string.split("&"):
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    params[unquote(key)] = unquote(value)
+                else:
+                    params[unquote(pair)] = None
+        return params
+
     # Route handlers
     def _serve_index(self, start_response):
         body = _INDEX_HTML.encode("utf-8")
         return self._respond(start_response, "200 OK", "text/html; charset=utf-8", body)
 
     def _serve_login(self, start_response, error: str | None = None):
-        message = f"<p class='error'>{error}</p>" if error else ""
+        message = f"<p class='error'>{html.escape(error)}</p>" if error else ""
         body = f"""
         <html>
           <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>CacheInfinity Login</title>
             <style>
               body {{ font-family: system-ui, sans-serif; background: #0b1220; color: #e0e6ef;
@@ -191,7 +281,7 @@ class WebUIApp:
               input {{ width:100%; padding:0.65rem; margin-top:0.35rem; border-radius:6px; border:1px solid #2a3348;
                        background:#0f1729; color:#fff; }}
               button {{ margin-top:1.25rem; width:100%; padding:0.75rem; border:none; border-radius:6px;
-                        background:#4f46ef; color:#fff; font-size:1rem; cursor:pointer; }}
+                        background:#1f8ceb; color:#fff; font-size:1rem; cursor:pointer; }}
               .error {{ color:#f87171; margin-top:0.75rem; font-size:0.9rem; }}
             </style>
           </head>
@@ -199,9 +289,9 @@ class WebUIApp:
             <form class="card" method="POST" action="/login">
               <h1>CacheInfinity</h1>
               <label>Username</label>
-              <input type="text" name="username" autofocus required />
+              <input type="text" name="username" autocomplete="username" autofocus required />
               <label>Password</label>
-              <input type="password" name="password" required />
+              <input type="password" name="password" autocomplete="current-password" required />
               <button type="submit">Sign in</button>
               {message}
             </form>
@@ -372,9 +462,13 @@ class WebUIApp:
             return self._serve_login(start_response, error="Invalid credentials.")
         token = secrets.token_hex(32)
         self.sessions[token] = {"username": username}
+        self._save_persistent_sessions()  # Save session to database
+        secure = ""
+        if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
+            secure = "; Secure"
         headers = [
             ("Location", "/"),
-            ("Set-Cookie", f"ci_session={token}; Path=/; HttpOnly; SameSite=Lax"),
+            ("Set-Cookie", f"ci_session={token}; Path=/; HttpOnly; SameSite=Lax{secure}"),
         ]
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
@@ -383,9 +477,13 @@ class WebUIApp:
         token = cookies.get("ci_session")
         if token:
             self.sessions.pop(token, None)
+            self._save_persistent_sessions()  # Save session removal to database
+        secure = ""
+        if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
+            secure = "; Secure"
         headers = [
             ("Location", "/login"),
-            ("Set-Cookie", "ci_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+            ("Set-Cookie", f"ci_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}"),
         ]
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
@@ -515,6 +613,34 @@ class WebUIApp:
             return None
         return session.get("username")
 
+    def _get_username_from_session(self, environ) -> str | None:
+        """Extract username from session cookie if valid."""
+        cookies = self._parse_cookies(environ)
+        token = cookies.get("ci_session")
+        if not token:
+            return None
+        session = self.sessions.get(token)
+        if not session:
+            return None
+        return session.get("username")
+
+    def _load_persistent_sessions(self) -> None:
+        """Load sessions from database to restore after restart."""
+        try:
+            sessions = self.service.index_db.load_webui_sessions()
+            for token, session_data in sessions.items():
+                self.sessions[token] = session_data
+            _LOGGER.info("Loaded %d persistent sessions", len(sessions))
+        except Exception:
+            _LOGGER.exception("Failed to load persistent sessions")
+
+    def _save_persistent_sessions(self) -> None:
+        """Save sessions to database for persistence."""
+        try:
+            self.service.index_db.save_webui_sessions(self.sessions)
+        except Exception:
+            _LOGGER.exception("Failed to save persistent sessions")
+
     @staticmethod
     def _parse_cookies(environ) -> dict[str, str]:
         header = environ.get("HTTP_COOKIE", "")
@@ -540,6 +666,10 @@ class WebUIApp:
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
             ("Cache-Control", "no-store"),
+            (
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'",
+            ),
         ]
         if extra_headers:
             headers.extend(extra_headers)
@@ -587,9 +717,14 @@ _INDEX_HTML = """<!DOCTYPE html>
     .content { display: flex; flex-direction: column; min-height: 100vh; }
     .topbar { background: var(--surface-alt); padding: 1.2rem 2rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; box-shadow: var(--shadow); position: sticky; top: 0; z-index: 10; }
     .topbar h1 { margin: 0; font-size: 1.5rem; }
+    .topbar-right { display: flex; align-items: center; gap: 1rem; }
     .topbar-options { display: flex; gap: 0.5rem; }
     .topbar-option { border: 1px solid var(--border); border-radius: 8px; background: #fff; padding: 0.4rem 1rem; font-size: 0.85rem; cursor: pointer; color: var(--text-muted); }
     .topbar-option.active { border-color: var(--accent); background: var(--accent-muted); color: var(--accent); }
+    .session-box { display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.75rem; border: 1px solid var(--border); border-radius: 999px; background: #fff; }
+    .session-user { font-size: 0.85rem; color: var(--text-muted); }
+    .logout-link { font-size: 0.85rem; color: var(--accent); text-decoration: none; font-weight: 600; }
+    .logout-link:hover { text-decoration: underline; }
     main { padding: 1.8rem 2rem 3rem; flex: 1; overflow-y: auto; }
     .section { display: none; flex-direction: column; gap: 1.25rem; }
     .section.active { display: flex; }
@@ -696,7 +831,13 @@ _INDEX_HTML = """<!DOCTYPE html>
         <div>
           <h1 id="page-title">Overview</h1>
         </div>
-        <div class="topbar-options" id="topbar-options"></div>
+        <div class="topbar-right">
+          <div class="topbar-options" id="topbar-options"></div>
+          <div class="session-box">
+            <span class="session-user" id="session-user"></span>
+            <a class="logout-link" href="/logout">Logout</a>
+          </div>
+        </div>
       </header>
       <main>
         <!-- Overview Section -->
@@ -730,16 +871,82 @@ _INDEX_HTML = """<!DOCTYPE html>
             <div id="storage-backends">Loading…</div>
           </div>
           <div class="panel">
-            <h3>File Browser</h3>
-            <div class="file-browser">
-              <div class="file-actions">
-                <button class="btn btn-secondary btn-small" onclick="triggerUpload()">Upload File</button>
-                <button class="btn btn-secondary btn-small" onclick="promptNewFolder()">New Folder</button>
+            <h3>Enhanced File Browser</h3>
+            <!-- Enhanced File Browser Section -->
+            <div class="enhanced-file-browser">
+              <!-- Toolbar -->
+              <div class="file-toolbar">
+                <div class="file-actions">
+                  <button class="btn btn-secondary" id="enhanced-upload-btn" type="button" title="Upload File">
+                    <span class="icon">⬆️</span> Upload
+                  </button>
+                  <button class="btn btn-secondary" id="enhanced-new-folder-btn" type="button" title="New Folder">
+                    <span class="icon">📁</span> New Folder
+                  </button>
+                  <button class="btn btn-secondary" id="enhanced-select-all-btn" type="button" title="Select All">
+                    <span class="icon">✓</span> Select All
+                  </button>
+                  <button class="btn btn-danger" id="enhanced-delete-selected-btn" type="button" title="Delete Selected" disabled>
+                    <span class="icon">🗑️</span> Delete
+                  </button>
+                </div>
+                
+                <div class="file-search">
+                  <input type="text" id="enhanced-search-input" placeholder="Search files and folders..." />
+                  <button class="btn btn-secondary" id="enhanced-search-btn" type="button">Search</button>
+                  <label class="checkbox-inline">
+                    <input type="checkbox" id="enhanced-show-hidden" /> Show hidden files
+                  </label>
+                </div>
+                
+                <div class="file-view-options">
+                  <select id="enhanced-sort-by">
+                    <option value="name">Sort by: Name</option>
+                    <option value="size">Sort by: Size</option>
+                    <option value="modified">Sort by: Modified</option>
+                    <option value="type">Sort by: Type</option>
+                  </select>
+                  <select id="enhanced-sort-order">
+                    <option value="asc">Ascending</option>
+                    <option value="desc">Descending</option>
+                  </select>
+                  <div class="view-mode-buttons">
+                    <button class="btn btn-secondary" data-view="list" title="List View">
+                      <span class="icon">📋</span>
+                    </button>
+                    <button class="btn btn-secondary" data-view="grid" title="Grid View">
+                      <span class="icon">🔲</span>
+                    </button>
+                    <button class="btn btn-secondary" data-view="details" title="Details View">
+                      <span class="icon">📊</span>
+                    </button>
+                  </div>
+                </div>
               </div>
-              <div class="file-breadcrumb" id="file-breadcrumb"></div>
-              <ul class="file-list" id="file-list">Loading…</ul>
-              <input type="file" id="storage-upload-input" style="display:none" />
+
+              <!-- Breadcrumbs -->
+              <div class="file-breadcrumb" id="enhanced-breadcrumb"></div>
+
+              <!-- Directory Stats -->
+              <div class="directory-stats" id="enhanced-stats"></div>
+
+              <!-- File List/Grid -->
+              <div class="file-container" id="enhanced-file-container">
+                <div class="loading-spinner">Loading files...</div>
+              </div>
+
+              <!-- File Details Panel -->
+              <div class="file-details-panel" id="enhanced-details-panel" style="display: none;">
+                <div class="details-header">
+                  <h4>File Details</h4>
+                  <button class="btn btn-secondary" id="enhanced-close-details-btn" type="button">✕</button>
+                </div>
+                <div class="details-content" id="enhanced-details-content"></div>
+              </div>
             </div>
+
+            <!-- Hidden file input for uploads -->
+            <input type="file" id="enhanced-upload-input" style="display: none" multiple />
           </div>
         </section>
 
@@ -751,7 +958,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <div class="panel-subtitle">Virtual organization for cachelinks</div>
               <div class="folder-actions">
                 <input type="text" id="folder-new-path" placeholder="games/psx" />
-                <button class="btn btn-secondary btn-small" onclick="addCachelinkFolder()">Add Folder</button>
+                <button class="btn btn-secondary btn-small" id="cachelink-folder-add-btn" type="button">Add Folder</button>
               </div>
               <div class="folder-list" id="cachelink-folders">Loading…</div>
             </div>
@@ -759,7 +966,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <h3>Cachelinks</h3>
               <div class="panel-subtitle" id="cachelink-folder-label">Select a folder to view entries.</div>
               <div class="entry-list" id="cachelink-entries">Loading…</div>
-              <button class="btn btn-secondary btn-small" onclick="enterCachelinkCreate()">Add Cachelink</button>
+              <button class="btn btn-secondary btn-small" id="cachelink-entry-add-btn" type="button">Add Cachelink</button>
             </div>
             <div class="panel editor-panel">
               <h3 id="cachelink-editor-title">Cachelink Editor</h3>
@@ -767,7 +974,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <div class="table-wrap" id="cachelink-preview">
                 <table><tbody><tr><td style="padding:0.5rem;color:var(--text-muted);">Run “Process” to preview listing.</td></tr></tbody></table>
               </div>
-              <button class="btn btn-secondary btn-small" onclick="processCachelink()">Process</button>
+              <button class="btn btn-secondary btn-small" id="cachelink-process-btn" type="button">Process</button>
               <label>Name</label>
               <input type="text" id="cachelink-entry-name" placeholder="map0001" />
               <label>Source URL</label>
@@ -775,9 +982,9 @@ _INDEX_HTML = """<!DOCTYPE html>
               <label>Subfolder</label>
               <input type="text" id="cachelink-subfolder" value="/" />
               <div class="editor-actions">
-                <button class="btn btn-primary" onclick="saveCachelink()">Save</button>
-                <button class="btn btn-secondary" onclick="revertCachelink()">Revert</button>
-                <button class="btn btn-danger" id="cachelink-delete-btn" onclick="deleteCachelink()" style="display:none;">Delete</button>
+                <button class="btn btn-primary" id="cachelink-save-btn" type="button">Save</button>
+                <button class="btn btn-secondary" id="cachelink-revert-btn" type="button">Revert</button>
+                <button class="btn btn-danger" id="cachelink-delete-btn" type="button" style="display:none;">Delete</button>
               </div>
               <div id="cachelink-status" class="status-msg"></div>
             </div>
@@ -794,7 +1001,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <input type="text" id="cookie-new-jar" placeholder="/config/cookies/example.txt" />
               <input type="text" id="cookie-new-cred" placeholder="/config/credentials/example.txt (optional)" />
               <label class="checkbox-inline"><input type="checkbox" id="cookie-new-credfile" /> Auto-create credfile path</label>
-              <button class="btn btn-secondary btn-small" onclick="addCookieDomain()">Add Domain</button>
+              <button class="btn btn-secondary btn-small" id="cookies-domain-add-btn" type="button">Add Domain</button>
             </div>
             <div class="cookie-list" id="cookie-list">Loading…</div>
           </div>
@@ -817,7 +1024,7 @@ _INDEX_HTML = """<!DOCTYPE html>
                 <label><input type="checkbox" id="user-enabled" checked /> Enabled</label>
                 <label><input type="checkbox" id="user-admin" checked /> Admin</label>
               </div>
-              <button class="btn btn-primary" onclick="saveUser()">Save User</button>
+              <button class="btn btn-primary" id="ui-user-save-btn" type="button">Save User</button>
               <div id="user-status" class="status-msg"></div>
             </div>
           </div>
@@ -841,50 +1048,8 @@ _INDEX_HTML = """<!DOCTYPE html>
                 <label><input type="checkbox" id="webdav-write" checked /> Write</label>
                 <label><input type="checkbox" id="webdav-cache" checked /> Cache</label>
               </div>
-              <button class="btn btn-primary" onclick="saveWebdavUser()">Save Mapping</button>
+              <button class="btn btn-primary" id="webdav-user-save-btn" type="button">Save Mapping</button>
               <div id="webdav-status" class="status-msg"></div>
-            </div>
-          </div>
-          <div id="user-tab-auth" class="user-tab" style="display: none;">
-            <div class="panel">
-              <h3>OIDC Configuration</h3>
-              <label>Enabled</label>
-              <input type="checkbox" id="oidc-enabled" />
-              <label>Issuer</label>
-              <input type="text" id="oidc-issuer" placeholder="https://auth.example.com" />
-              <label>Client ID</label>
-              <input type="text" id="oidc-client-id" />
-              <label>Client Secret</label>
-              <input type="password" id="oidc-client-secret" />
-              <label>Redirect URI</label>
-              <input type="text" id="oidc-redirect-uri" />
-              <button class="btn btn-primary" onclick="saveAuthConfig()">Save OIDC Config</button>
-            </div>
-            <div class="panel">
-              <h3>LDAP Configuration</h3>
-              <label>Enabled</label>
-              <input type="checkbox" id="ldap-enabled" />
-              <label>URI</label>
-              <input type="text" id="ldap-uri" placeholder="ldap://ldap.example.com:389" />
-              <label>Bind DN</label>
-              <input type="text" id="ldap-bind-dn" />
-              <label>Bind Password</label>
-              <input type="password" id="ldap-bind-password" />
-              <label>User Base DN</label>
-              <input type="text" id="ldap-user-base-dn" />
-              <label>User Filter</label>
-              <input type="text" id="ldap-user-filter" placeholder="(uid={})" />
-              <button class="btn btn-primary" onclick="saveAuthConfig()">Save LDAP Config</button>
-            </div>
-            <div class="panel">
-              <h3>Proxy Header Authentication</h3>
-              <label>Enabled</label>
-              <input type="checkbox" id="proxy-enabled" />
-              <label>Header Name</label>
-              <input type="text" id="proxy-header" value="X-Forwarded-User" />
-              <label>Auto-create users</label>
-              <input type="checkbox" id="proxy-auto-create" />
-              <button class="btn btn-primary" onclick="saveAuthConfig()">Save Proxy Config</button>
             </div>
           </div>
         </section>
@@ -897,9 +1062,9 @@ _INDEX_HTML = """<!DOCTYPE html>
               <p class="empty">Loading configuration…</p>
             </div>
             <div class="settings-actions">
-              <button class="btn btn-primary" onclick="saveSettingsDetail()">Save Settings</button>
-              <button class="btn btn-secondary" onclick="exportSettings()">Export YAML</button>
-              <button class="btn btn-secondary" onclick="triggerSettingsImport()">Import YAML</button>
+              <button class="btn btn-primary" id="settings-save-btn" type="button">Save Settings</button>
+              <button class="btn btn-secondary" id="settings-export-btn" type="button">Export YAML</button>
+              <button class="btn btn-secondary" id="settings-import-btn" type="button">Import YAML</button>
               <input type="file" id="settings-import-input" style="display:none" accept=".yaml,.yml,.txt" />
             </div>
             <div id="settings-status" class="status-msg"></div>
@@ -913,7 +1078,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <h3>Trigger Reindex</h3>
               <label>Cachelink ID</label>
               <input type="text" id="reindex-id" placeholder="games/psx/map0001" />
-              <button class="btn btn-primary" onclick="requestReindex()">Queue Reindex</button>
+              <button class="btn btn-primary" id="reindex-btn" type="button">Queue Reindex</button>
             </div>
             <div class="panel">
               <h3>Degraded Targets</h3>
@@ -946,7 +1111,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     const parseList = (value) => {
       if (!value) return [];
       return value
-        .split(/[\n,]/)
+        .split(/[\\n,]/)
         .map((v) => v.trim())
         .filter(Boolean);
     };
@@ -995,7 +1160,6 @@ _INDEX_HTML = """<!DOCTYPE html>
         container.innerHTML = `
           <button class="topbar-option active" data-user-tab="webui">Web UI Users</button>
           <button class="topbar-option" data-user-tab="webdav">WebDAV Users</button>
-          <button class="topbar-option" data-user-tab="auth">Authentication</button>
         `;
         container.querySelectorAll('.topbar-option').forEach((btn) => {
           btn.addEventListener('click', () => {
@@ -1020,15 +1184,33 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     // API helpers
     const apiUrl = (path) => path.startsWith('/') ? path : `/${path}`;
-    async function fetchJSON(path, opts = {}) {
+
+    async function fetchWithAuth(path, opts = {}) {
       const options = { credentials: 'include', ...opts };
+      const resp = await fetch(apiUrl(path), options);
+      if (resp.status === 401) {
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
+      }
+      if (!resp.ok) throw new Error(await resp.text());
+      return resp;
+    }
+
+    async function fetchJSON(path, opts = {}) {
+      const options = { ...opts };
       if (options.body && !options.headers) {
         options.headers = { 'Content-Type': 'application/json' };
       }
-      const resp = await fetch(apiUrl(path), options);
-      if (!resp.ok) throw new Error(await resp.text());
+      const resp = await fetchWithAuth(path, options);
       if (resp.status === 204) return {};
       return await resp.json();
+    }
+
+    async function refreshSession() {
+      const data = await fetchJSON('api/session');
+      const username = data.username || '';
+      const box = document.getElementById('session-user');
+      if (box) box.textContent = username ? `Signed in as ${username}` : '';
     }
 
     // Data loading functions
@@ -1100,7 +1282,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       formData.append('relative_path', currentStoragePath || '/');
       formData.append('file', file, file.name);
       try {
-        await fetch(apiUrl('api/storage/upload'), { method: 'POST', body: formData, credentials: 'same-origin' });
+        await fetchWithAuth('api/storage/upload', { method: 'POST', body: formData });
         alert('File uploaded.');
         loadFileBrowser(currentStoragePath);
       } catch (err) {
@@ -1131,7 +1313,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function deleteFile(path) {
       if (!confirm('Delete this file from backend storage?')) return;
       try {
-        await fetch(apiUrl(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`), { method: 'DELETE', credentials: 'same-origin' });
+        await fetchWithAuth(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -1141,7 +1323,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function deleteFolder(path) {
       if (!confirm('Delete this folder? It must be empty.')) return;
       try {
-        await fetch(apiUrl(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`), { method: 'DELETE', credentials: 'same-origin' });
+        await fetchWithAuth(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Folder deletion failed: ' + err.message);
@@ -1151,9 +1333,10 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function loadFileBrowser(path = '/') {
       try {
         const data = await fetchJSON(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`);
-        const breadcrumbs = data.breadcrumbs.map((b, i) => 
-          `<span class="file-breadcrumb-item ${i === data.breadcrumbs.length - 1 ? 'active' : ''}" onclick="loadFileBrowser('${b.path}')">${b.label}</span>`
-        ).join('');
+        const breadcrumbs = data.breadcrumbs.map((b, i) => {
+          const active = i === data.breadcrumbs.length - 1 ? 'active' : '';
+          return `<button type="button" class="file-breadcrumb-item ${active}" data-action="storage-open" data-path="${escapeHtml(b.path)}">${escapeHtml(b.label)}</button>`;
+        }).join('');
         document.getElementById('file-breadcrumb').innerHTML = breadcrumbs;
         
         const files = data.entries.map((e) => `
@@ -1163,8 +1346,8 @@ _INDEX_HTML = """<!DOCTYPE html>
               <span>${e.name}</span>
             </div>
             <div>
-              ${e.is_dir ? `<button class="btn btn-text btn-small" onclick="loadFileBrowser('${e.path}')">Open</button>` : ''}
-              ${e.is_dir ? `<button class="btn btn-text btn-small" onclick="deleteFolder('${e.path}')">Delete</button>` : `<button class="btn btn-text btn-small" onclick="deleteFile('${e.path}')">Delete</button>`}
+              ${e.is_dir ? `<button class="btn btn-text btn-small" type="button" data-action="storage-open" data-path="${escapeHtml(e.path)}">Open</button>` : ''}
+              ${e.is_dir ? `<button class="btn btn-text btn-small" type="button" data-action="storage-delete-folder" data-path="${escapeHtml(e.path)}">Delete</button>` : `<button class="btn btn-text btn-small" type="button" data-action="storage-delete-file" data-path="${escapeHtml(e.path)}">Delete</button>`}
               <span style="font-size: 0.85rem; color: var(--text-muted);">${e.size ? `${(e.size / 1024).toFixed(2)} KB` : ''}</span>
             </div>
           </li>
@@ -1190,9 +1373,9 @@ _INDEX_HTML = """<!DOCTYPE html>
               <div class="cookie-header">
                 <div class="cookie-domain">${c.domain}</div>
                 <div class="cookie-actions">
-                  ${c.supports_generation ? `<button class="btn btn-secondary btn-small" onclick="showCredentialDialog('${c.domain}')">Update Credentials</button>` : ''}
-                  <button class="btn btn-secondary btn-small" onclick="showCookieUpload('${c.domain}')">Upload cookies.txt</button>
-                  ${c.configured ? `<button class="btn btn-primary btn-small" onclick="refreshCookie('${c.domain}')">Refresh</button>` : ''}
+                  ${c.supports_generation ? `<button class="btn btn-secondary btn-small" type="button" data-action="cookie-credentials" data-domain="${escapeHtml(c.domain)}">Update Credentials</button>` : ''}
+                  <button class="btn btn-secondary btn-small" type="button" data-action="cookie-upload" data-domain="${escapeHtml(c.domain)}">Upload cookies.txt</button>
+                  ${c.configured ? `<button class="btn btn-primary btn-small" type="button" data-action="cookie-refresh" data-domain="${escapeHtml(c.domain)}">Refresh</button>` : ''}
                 </div>
               </div>
               <div class="cookie-info">
@@ -1237,7 +1420,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       try {
         const data = await fetchJSON('api/users');
         const rows = data.users.map((u) =>
-          `<tr><td>${u.username}</td><td>${u.enabled ? 'Enabled' : 'Disabled'}</td><td>${u.is_admin ? 'Admin' : 'Viewer'}</td><td><button class="btn btn-secondary" onclick="deleteUiUser('${u.username}')">Disable</button></td></tr>`
+          `<tr><td>${u.username}</td><td>${u.enabled ? 'Enabled' : 'Disabled'}</td><td>${u.is_admin ? 'Admin' : 'Viewer'}</td><td><button class="btn btn-secondary" type="button" data-action="ui-user-disable" data-username="${escapeHtml(u.username)}">Disable</button></td></tr>`
         ).join('');
         container.innerHTML = rows ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No Web UI users.</p>';
       } catch (err) {
@@ -1260,7 +1443,7 @@ _INDEX_HTML = """<!DOCTYPE html>
               <td>${user.read ? 'Read' : '—'}</td>
               <td>${user.write ? 'Write' : '—'}</td>
               <td>${user.cache ? 'Cache' : '—'}</td>
-              <td><button class="btn btn-text" data-share="${share.name}" data-user="${user.username}" onclick="handleDeleteWebdavUser(this)">Remove</button></td>
+              <td><button class="btn btn-text" type="button" data-action="webdav-user-remove" data-share="${escapeHtml(share.name)}" data-user="${escapeHtml(user.username)}">Remove</button></td>
             </tr>`;
           }).join('');
           return `<div class="share-block"><h4>${share.name} <span class="badge">${share.frontend}</span></h4>${rows ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Login</th><th>Read</th><th>Write</th><th>Cache</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No users assigned.</p>'}</div>`;
@@ -1303,7 +1486,7 @@ _INDEX_HTML = """<!DOCTYPE html>
         <div class="settings-block">
           <h4>Backends</h4>
           <div id="backend-blocks"></div>
-          <button class="btn btn-secondary btn-small" onclick="addBackendBlock()">Add Backend</button>
+          <button class="btn btn-secondary btn-small" type="button" data-action="settings-backend-add">Add Backend</button>
         </div>
         <div class="settings-block">
           <h4>Staging</h4>
@@ -1333,12 +1516,12 @@ _INDEX_HTML = """<!DOCTYPE html>
         <div class="settings-block">
           <h4>Cookies</h4>
           <div id="cookie-configs"></div>
-          <button class="btn btn-secondary btn-small" onclick="addCookieConfig()">Add Cookie Domain</button>
+          <button class="btn btn-secondary btn-small" type="button" data-action="settings-cookie-add">Add Cookie Domain</button>
         </div>
         <div class="settings-block">
           <h4>Shares</h4>
           <div id="share-blocks"></div>
-          <button class="btn btn-secondary btn-small" onclick="addShareBlock()">Add Share</button>
+          <button class="btn btn-secondary btn-small" type="button" data-action="settings-share-add">Add Share</button>
         </div>
         <div class="settings-block">
           <h4>TLS</h4>
@@ -1533,7 +1716,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           <label>Mounted?<input type="checkbox" class="backend-mounted" ${data.backend_mounted ? 'checked' : ''}></label>
           <label>Mount Root<input type="text" class="backend-mount" value="${esc(data.backend_mount_root || '')}" placeholder="/mnt/backend"></label>
         </div>
-        ${removable ? '<div class="editor-actions"><button class="btn btn-text" onclick="removeBackendBlock(this)">Remove</button></div>' : ''}
+        ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-backend-remove">Remove</button></div>' : ''}
       </div>`;
     }
 
@@ -1565,7 +1748,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           <label>Cookie Jar<input type="text" class="cookie-path" value="${esc(data.cookie_jar || '')}" placeholder="/config/cookies/example.txt"></label>
           <label>Credfile<input type="text" class="cookie-cred" value="${esc(data.credfile || '')}" placeholder="/config/credentials/example.txt"></label>
         </div>
-        <div class="editor-actions"><button class="btn btn-text" onclick="removeCookieConfig(this)">Remove</button></div>
+        <div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-cookie-remove">Remove</button></div>
       </div>`;
     }
 
@@ -1599,7 +1782,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           <label>Writable<input type="checkbox" class="share-writable" ${data.writable ? 'checked' : ''}></label>
           <label>Cache Overlay<input type="checkbox" class="share-overlay" ${data.cachelink_overlay ? 'checked' : ''}></label>
         </div>
-        <div class="editor-actions"><button class="btn btn-text" onclick="removeShareBlock(this)">Remove</button></div>
+        <div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-share-remove">Remove</button></div>
       </div>`;
     }
 
@@ -1857,9 +2040,9 @@ _INDEX_HTML = """<!DOCTYPE html>
         const active = folder.path === selectedCachelinkFolder ? 'active' : '';
         const indent = folder.depth * 12;
         const removable = folder.path && folder.path !== '';
-        return `<div class="folder-item ${active}" style="padding-left:${indent}px" onclick="selectCachelinkFolder('${folder.path}')">
-          <span>${folder.label}</span>
-          ${removable ? `<button class="btn btn-text btn-small" onclick="event.stopPropagation(); removeCachelinkFolder('${folder.path}')">Remove</button>` : ''}
+        return `<div class="folder-item ${active}" style="padding-left:${indent}px" data-action="cachelinks-folder-select" data-path="${escapeHtml(folder.path)}">
+          <span>${escapeHtml(folder.label)}</span>
+          ${removable ? `<button class="btn btn-text btn-small" type="button" data-action="cachelinks-folder-remove" data-path="${escapeHtml(folder.path)}">Remove</button>` : ''}
         </div>`;
       }).join('');
     }
@@ -1875,9 +2058,9 @@ _INDEX_HTML = """<!DOCTYPE html>
       }
       container.innerHTML = entries.map((entry) => {
         const active = selectedCachelinkEntry && entry.canonical_id === selectedCachelinkEntry.canonical_id ? 'active' : '';
-        return `<div class="entry-item ${active}" onclick="selectCachelinkEntry('${entry.canonical_id}')">
+        return `<div class="entry-item ${active}" data-action="cachelinks-entry-select" data-id="${escapeHtml(entry.canonical_id)}">
           <div>
-            <div><strong>${entry.name}</strong></div>
+            <div><strong>${escapeHtml(entry.name)}</strong></div>
             <div style="font-size:0.8rem; color:var(--text-muted);">${entry.files_total} files · ${entry.cached_files} cached</div>
           </div>
           <div style="font-size:0.78rem; color:var(--text-muted);">${entry.mode}</div>
@@ -1935,8 +2118,8 @@ _INDEX_HTML = """<!DOCTYPE html>
         deleteBtn.style.display = 'inline-flex';
       } else if (editorMode === 'create') {
         title.textContent = selectedCachelinkFolder ? `New cachelink in /${selectedCachelinkFolder}` : 'New cachelink in ROOT';
-        nameInput.value = 'map' + Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        nameInput.disabled = false;
+        nameInput.value = '(auto)';
+        nameInput.disabled = true;
         urlInput.value = '';
         subfolderInput.value = '/';
       } else {
@@ -1960,13 +2143,20 @@ _INDEX_HTML = """<!DOCTYPE html>
       }
       try {
         if (editorMode === 'create') {
-          const payload = {
-            parent_path: selectedCachelinkFolder || '',
-            name: document.getElementById('cachelink-entry-name').value.trim() || null,
-            url,
-            subfolder,
-          };
-          await fetchJSON('api/cachelinks', { method: 'POST', body: JSON.stringify(payload) });
+          if (!selectedCachelinkFolder) {
+            alert('Select or create a folder first (cachelinks cannot be added at ROOT).');
+            return;
+          }
+          const payload = { parent_path: selectedCachelinkFolder, url, subfolder };
+          const created = await fetchJSON('api/cachelinks', { method: 'POST', body: JSON.stringify(payload) });
+          await loadCachelinks();
+          if (created?.cachelink?.canonical_id) {
+            selectCachelinkFolder(selectedCachelinkFolder);
+            selectCachelinkEntry(created.cachelink.canonical_id);
+          }
+          document.getElementById('cachelink-status').textContent = 'Saved.';
+          document.getElementById('cachelink-status').className = 'status-msg success';
+          return;
         } else if (editorMode === 'edit' && selectedCachelinkEntry) {
           const payload = {
             canonical_id: selectedCachelinkEntry.canonical_id,
@@ -2189,7 +2379,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
-    function showCookieUpload(domain) {
+    async function showCookieUpload(domain) {
       const input = document.createElement('input');
       input.type = 'file';
       input.accept = '.txt';
@@ -2201,7 +2391,7 @@ _INDEX_HTML = """<!DOCTYPE html>
         formData.append('domain', domain);
         formData.append('cookie_file', text);
         try {
-          await fetch(apiUrl('api/cookies/upload'), { method: 'POST', body: formData, credentials: 'same-origin' });
+          await fetchWithAuth('api/cookies/upload', { method: 'POST', body: formData });
           alert('Cookie file uploaded.');
           loadCookies();
         } catch (err) {
@@ -2211,15 +2401,70 @@ _INDEX_HTML = """<!DOCTYPE html>
       input.click();
     }
 
-    async function saveAuthConfig() {
-      // This would need to update settings.yaml with auth config
-      alert('Auth configuration save not yet implemented - use Settings tab to edit settings.yaml directly');
-    }
-
     // Initialize
     document.addEventListener('DOMContentLoaded', () => {
+      const bindClick = (id, handler) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('click', (event) => {
+          event.preventDefault();
+          handler();
+        });
+      };
+
+      bindClick('storage-upload-btn', triggerUpload);
+      bindClick('storage-new-folder-btn', promptNewFolder);
+      bindClick('cachelink-folder-add-btn', addCachelinkFolder);
+      bindClick('cachelink-entry-add-btn', enterCachelinkCreate);
+      bindClick('cachelink-process-btn', processCachelink);
+      bindClick('cachelink-save-btn', saveCachelink);
+      bindClick('cachelink-revert-btn', revertCachelink);
+      bindClick('cachelink-delete-btn', deleteCachelink);
+      bindClick('cookies-domain-add-btn', addCookieDomain);
+      bindClick('ui-user-save-btn', saveUser);
+      bindClick('webdav-user-save-btn', saveWebdavUser);
+      bindClick('settings-save-btn', saveSettingsDetail);
+      bindClick('settings-export-btn', exportSettings);
+      bindClick('settings-import-btn', triggerSettingsImport);
+      bindClick('reindex-btn', requestReindex);
+
+      document.body.addEventListener('click', (event) => {
+        const target = event.target?.closest?.('[data-action]');
+        if (!target) return;
+        const action = target.dataset.action;
+        const path = target.dataset.path;
+        const domain = target.dataset.domain;
+        const username = target.dataset.username;
+        const share = target.dataset.share;
+        const user = target.dataset.user;
+        const canonicalId = target.dataset.id;
+        if (!action) return;
+        event.preventDefault();
+        if (action === 'storage-open' && path) return void loadFileBrowser(path);
+        if (action === 'storage-delete-file' && path) return void deleteFile(path);
+        if (action === 'storage-delete-folder' && path) return void deleteFolder(path);
+        if (action === 'cookie-refresh' && domain) return void refreshCookie(domain);
+        if (action === 'cookie-upload' && domain) return void showCookieUpload(domain);
+        if (action === 'cookie-credentials' && domain) return void showCredentialDialog(domain);
+        if (action === 'ui-user-disable' && username) return void deleteUiUser(username);
+        if (action === 'webdav-user-remove' && share && user) return void deleteWebdavUser(share, user);
+        if (action === 'settings-backend-add') return void addBackendBlock();
+        if (action === 'settings-cookie-add') return void addCookieConfig();
+        if (action === 'settings-share-add') return void addShareBlock();
+        if (action === 'settings-backend-remove') return void removeBackendBlock(target);
+        if (action === 'settings-cookie-remove') return void removeCookieConfig(target);
+        if (action === 'settings-share-remove') return void removeShareBlock(target);
+        if (action === 'cachelinks-folder-select' && path !== undefined) return void selectCachelinkFolder(path);
+        if (action === 'cachelinks-folder-remove' && path !== undefined) {
+          event.stopPropagation();
+          return void removeCachelinkFolder(path);
+        }
+        if (action === 'cachelinks-entry-select' && canonicalId) return void selectCachelinkEntry(canonicalId);
+      });
+
       initNavigation();
       setActiveSection(currentSection);
+      refreshSession();
       refreshStatus();
       setInterval(refreshStatus, 15000);
       const importInput = document.getElementById('settings-import-input');
@@ -2227,7 +2472,584 @@ _INDEX_HTML = """<!DOCTYPE html>
         importInput.addEventListener('change', handleSettingsImport);
       }
     });
+
+    // Enhanced File Browser JavaScript
+    let enhancedFileBrowser = {
+      currentLocation: 'backend',
+      currentPath: '/',
+      sortOptions: {
+        sortBy: 'name',
+        sortOrder: 'asc',
+        viewMode: 'list',
+        showHidden: false,
+        searchQuery: ''
+      },
+      selectedItems: [],
+      
+      init() {
+        this.bindEvents();
+        this.loadDirectory();
+      },
+      
+      bindEvents() {
+        // Upload button
+        document.getElementById('enhanced-upload-btn').addEventListener('click', () => this.triggerUpload());
+        
+        // New folder button
+        document.getElementById('enhanced-new-folder-btn').addEventListener('click', () => this.promptNewFolder());
+        
+        // Select all button
+        document.getElementById('enhanced-select-all-btn').addEventListener('click', () => this.selectAll());
+        
+        // Delete selected button
+        document.getElementById('enhanced-delete-selected-btn').addEventListener('click', () => this.deleteSelected());
+        
+        // Search
+        document.getElementById('enhanced-search-btn').addEventListener('click', () => this.performSearch());
+        document.getElementById('enhanced-search-input').addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') this.performSearch();
+        });
+        
+        // Show hidden files
+        document.getElementById('enhanced-show-hidden').addEventListener('change', (e) => {
+          this.sortOptions.showHidden = e.target.checked;
+          this.loadDirectory();
+        });
+        
+        // Sort options
+        document.getElementById('enhanced-sort-by').addEventListener('change', (e) => {
+          this.sortOptions.sortBy = e.target.value;
+          this.loadDirectory();
+        });
+        
+        document.getElementById('enhanced-sort-order').addEventListener('change', (e) => {
+          this.sortOptions.sortOrder = e.target.value;
+          this.loadDirectory();
+        });
+        
+        // View mode buttons
+        document.querySelectorAll('.view-mode-buttons .btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            this.sortOptions.viewMode = btn.dataset.view;
+            this.updateViewModeButtons();
+            this.loadDirectory();
+          });
+        });
+        
+        // Hidden file input
+        document.getElementById('enhanced-upload-input').addEventListener('change', (e) => {
+          this.handleFileUpload(e.target.files);
+          e.target.value = '';
+        });
+      },
+      
+      async loadDirectory() {
+        try {
+          const params = new URLSearchParams({
+            location: this.currentLocation,
+            relative: this.currentPath,
+            sort_by: this.sortOptions.sortBy,
+            sort_order: this.sortOptions.sortOrder,
+            view_mode: this.sortOptions.viewMode,
+            show_hidden: this.sortOptions.showHidden ? 'true' : 'false',
+            search_query: this.sortOptions.searchQuery
+          });
+          
+          const response = await fetch(`/api/storage/entries?${params}`);
+          if (!response.ok) throw new Error('Failed to load directory');
+          const data = await response.json();
+          
+          this.renderDirectory(data);
+        } catch (error) {
+          console.error('Error loading directory:', error);
+          this.showError('Failed to load directory');
+        }
+      },
+      
+      renderDirectory(data) {
+        // Render breadcrumbs
+        this.renderBreadcrumbs(data.breadcrumbs);
+        
+        // Render stats
+        this.renderStats(data.stats);
+        
+        // Render files based on view mode
+        const container = document.getElementById('enhanced-file-container');
+        container.innerHTML = '';
+        
+        if (data.error) {
+          container.innerHTML = `<div class="empty-state">Error: ${data.error}</div>`;
+          return;
+        }
+        
+        if (!data.entries || data.entries.length === 0) {
+          container.innerHTML = `<div class="empty-state">This directory is empty</div>`;
+          return;
+        }
+        
+        switch (this.sortOptions.viewMode) {
+          case 'grid':
+            this.renderGrid(data.entries);
+            break;
+          case 'details':
+            this.renderDetails(data.entries);
+            break;
+          default:
+            this.renderList(data.entries);
+        }
+        
+        // Update delete button state
+        this.updateDeleteButton();
+      },
+      
+      renderBreadcrumbs(breadcrumbs) {
+        const container = document.getElementById('enhanced-breadcrumb');
+        container.innerHTML = breadcrumbs.map((crumb, index) => {
+          const active = crumb.active ? 'active' : '';
+          return `<button class="file-breadcrumb-item ${active}"
+                          data-path="${crumb.path}"
+                          onclick="enhancedFileBrowser.navigateTo('${crumb.path}')">
+                    ${crumb.label}
+                  </button>`;
+        }).join('');
+      },
+      
+      renderStats(stats) {
+        const container = document.getElementById('enhanced-stats');
+        container.innerHTML = `
+          <div class="stat-card">
+            <h5>Files</h5>
+            <div class="value">${stats.files}</div>
+          </div>
+          <div class="stat-card">
+            <h5>Directories</h5>
+            <div class="value">${stats.directories}</div>
+          </div>
+          <div class="stat-card">
+            <h5>Total Size</h5>
+            <div class="value">${this.formatBytes(stats.total_size)}</div>
+          </div>
+          <div class="stat-card">
+            <h5>File Types</h5>
+            <div class="value">${Object.keys(stats.file_types).length}</div>
+          </div>
+        `;
+      },
+      
+      renderList(entries) {
+        const container = document.getElementById('enhanced-file-container');
+        const list = document.createElement('ul');
+        list.className = 'file-list';
+        
+        entries.forEach(entry => {
+          const item = document.createElement('li');
+          item.className = `file-item ${entry.is_dir ? 'directory' : ''} ${this.isSelected(entry.path) ? 'selected' : ''}`;
+          item.dataset.path = entry.path;
+          item.dataset.type = entry.type;
+          
+          const fileInfo = document.createElement('div');
+          fileInfo.className = 'file-info';
+          
+          const icon = document.createElement('span');
+          icon.className = 'file-icon';
+          icon.textContent = entry.icon;
+          
+          const name = document.createElement('div');
+          name.className = 'file-name';
+          name.textContent = entry.name;
+          name.title = entry.name;
+          
+          const meta = document.createElement('div');
+          meta.className = 'file-meta';
+          
+          const size = document.createElement('span');
+          size.className = 'file-size';
+          size.textContent = entry.is_dir ? this.formatBytes(entry.directory_size) : this.formatBytes(entry.size);
+          
+          const modified = document.createElement('span');
+          modified.className = 'file-modified';
+          modified.textContent = this.formatDate(entry.modified);
+          
+          const actions = document.createElement('div');
+          actions.className = 'file-actions-menu';
+          
+          if (entry.is_dir) {
+            const openBtn = document.createElement('button');
+            openBtn.className = 'btn btn-secondary';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = (e) => {
+              e.stopPropagation();
+              this.navigateTo(entry.relative_path);
+            };
+            actions.appendChild(openBtn);
+          } else {
+            const previewBtn = document.createElement('button');
+            previewBtn.className = 'btn btn-secondary';
+            previewBtn.textContent = 'Preview';
+            previewBtn.onclick = (e) => {
+              e.stopPropagation();
+              this.showFileDetails(entry.path);
+            };
+            actions.appendChild(previewBtn);
+          }
+          
+          const deleteBtn = document.createElement('button');
+          deleteBtn.className = 'btn btn-danger';
+          deleteBtn.textContent = entry.is_dir ? 'Delete Folder' : 'Delete';
+          deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.deleteItem(entry);
+          };
+          actions.appendChild(deleteBtn);
+          
+          fileInfo.appendChild(icon);
+          fileInfo.appendChild(name);
+          fileInfo.appendChild(actions);
+          
+          meta.appendChild(size);
+          meta.appendChild(modified);
+          
+          item.appendChild(fileInfo);
+          item.appendChild(meta);
+          
+          item.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.toggleSelect(entry.path);
+            }
+          });
+          
+          item.addEventListener('dblclick', () => {
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.showFileDetails(entry.path);
+            }
+          });
+          
+          list.appendChild(item);
+        });
+        
+        container.appendChild(list);
+      },
+      
+      renderGrid(entries) {
+        const container = document.getElementById('enhanced-file-container');
+        const grid = document.createElement('div');
+        grid.className = 'file-grid';
+        
+        entries.forEach(entry => {
+          const card = document.createElement('div');
+          card.className = `file-card ${this.isSelected(entry.path) ? 'selected' : ''}`;
+          card.dataset.path = entry.path;
+          card.dataset.type = entry.type;
+          
+          card.innerHTML = `
+            <div class="icon">${entry.icon}</div>
+            <div class="name">${entry.name}</div>
+            <div class="meta">${entry.is_dir ? 'Folder' : this.formatBytes(entry.size)} • ${this.formatDate(entry.modified)}</div>
+          `;
+          
+          card.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.toggleSelect(entry.path);
+            }
+          });
+          
+          card.addEventListener('dblclick', () => {
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.showFileDetails(entry.path);
+            }
+          });
+          
+          grid.appendChild(card);
+        });
+        
+        container.appendChild(grid);
+      },
+      
+      renderDetails(entries) {
+        const container = document.getElementById('enhanced-file-container');
+        const details = document.createElement('div');
+        
+        // Header
+        const header = document.createElement('div');
+        header.className = 'file-details file-details-header';
+        header.innerHTML = `
+          <div>Name</div>
+          <div>Type</div>
+          <div>Size</div>
+          <div>Modified</div>
+        `;
+        details.appendChild(header);
+        
+        // Items
+        entries.forEach(entry => {
+          const item = document.createElement('div');
+          item.className = `file-details ${this.isSelected(entry.path) ? 'selected' : ''}`;
+          item.dataset.path = entry.path;
+          item.dataset.type = entry.type;
+          
+          item.innerHTML = `
+            <div>
+              <span class="file-icon">${entry.icon}</span>
+              <span class="file-name">${entry.name}</span>
+            </div>
+            <div><span class="file-type-badge ${entry.file_type}">${entry.file_type}</span></div>
+            <div>${entry.is_dir ? this.formatBytes(entry.directory_size) : this.formatBytes(entry.size)}</div>
+            <div>${this.formatDate(entry.modified)}</div>
+          `;
+          
+          item.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.toggleSelect(entry.path);
+            }
+          });
+          
+          item.addEventListener('dblclick', () => {
+            if (entry.is_dir) {
+              this.navigateTo(entry.relative_path);
+            } else {
+              this.showFileDetails(entry.path);
+            }
+          });
+          
+          details.appendChild(item);
+        });
+        
+        container.appendChild(details);
+      },
+      
+      renderFileDetails(details) {
+        const container = document.getElementById('enhanced-details-content');
+        container.innerHTML = `
+          <div class="detail-item">
+            <h6>General</h6>
+            <div class="value">${details.name}</div>
+            <div class="value">${details.is_dir ? 'Directory' : 'File'}</div>
+            <div class="value">${details.is_dir ? this.formatBytes(details.directory_size) : this.formatBytes(details.size)}</div>
+          </div>
+          <div class="detail-item">
+            <h6>Location</h6>
+            <div class="value">${details.path}</div>
+          </div>
+          <div class="detail-item">
+            <h6>Timestamps</h6>
+            <div class="value">Modified: ${this.formatDate(details.modified)}</div>
+            <div class="value">Created: ${this.formatDate(details.created)}</div>
+          </div>
+          <div class="detail-item">
+            <h6>Permissions</h6>
+            <div class="value">${details.permissions}</div>
+          </div>
+          ${details.preview ? `
+          <div class="detail-item">
+            <h6>Preview</h6>
+            <div class="preview-content">${this.escapeHtml(details.preview)}</div>
+          </div>
+          ` : ''}
+        `;
+        
+        document.getElementById('enhanced-details-panel').style.display = 'block';
+      },
+      
+      async showFileDetails(filePath) {
+        try {
+          const response = await fetch(`/api/storage/file-details?location=${this.currentLocation}&path=${encodeURIComponent(filePath)}`);
+          if (!response.ok) throw new Error('Failed to get file details');
+          const details = await response.json();
+          this.renderFileDetails(details);
+        } catch (error) {
+          console.error('Error getting file details:', error);
+          alert('Failed to get file details');
+        }
+      },
+      
+      navigateTo(path) {
+        this.currentPath = path;
+        this.selectedItems = [];
+        this.loadDirectory();
+      },
+      
+      toggleSelect(path) {
+        const index = this.selectedItems.indexOf(path);
+        if (index > -1) {
+          this.selectedItems.splice(index, 1);
+        } else {
+          this.selectedItems.push(path);
+        }
+        this.loadDirectory();
+        this.updateDeleteButton();
+      },
+      
+      isSelected(path) {
+        return this.selectedItems.includes(path);
+      },
+      
+      selectAll() {
+        // This would need to be implemented based on current view
+        // For now, just clear selection
+        this.selectedItems = [];
+        this.loadDirectory();
+        this.updateDeleteButton();
+      },
+      
+      updateDeleteButton() {
+        const button = document.getElementById('enhanced-delete-selected-btn');
+        button.disabled = this.selectedItems.length === 0;
+      },
+      
+      updateViewModeButtons() {
+        document.querySelectorAll('.view-mode-buttons .btn').forEach(btn => {
+          btn.style.background = btn.dataset.view === this.sortOptions.viewMode ? 'var(--accent)' : '#fff';
+          btn.style.color = btn.dataset.view === this.sortOptions.viewMode ? '#fff' : 'var(--text-main)';
+        });
+      },
+      
+      async performSearch() {
+        this.sortOptions.searchQuery = document.getElementById('enhanced-search-input').value;
+        this.loadDirectory();
+      },
+      
+      triggerUpload() {
+        document.getElementById('enhanced-upload-input').click();
+      },
+      
+      async handleFileUpload(files) {
+        if (!files || files.length === 0) return;
+        
+        for (const file of files) {
+          await this.uploadFile(file);
+        }
+        
+        this.loadDirectory();
+      },
+      
+      async uploadFile(file) {
+        const formData = new FormData();
+        formData.append('location', this.currentLocation);
+        formData.append('relative_path', this.currentPath);
+        formData.append('file', file, file.name);
+        
+        try {
+          const response = await fetch('/api/storage/upload', {
+            method: 'POST',
+            body: formData
+          });
+          
+          if (!response.ok) throw new Error('Upload failed');
+          
+          alert(`File ${file.name} uploaded successfully`);
+        } catch (error) {
+          console.error('Upload error:', error);
+          alert(`Failed to upload ${file.name}: ${error.message}`);
+        }
+      },
+      
+      promptNewFolder() {
+        const name = prompt('Enter folder name:');
+        if (!name) return;
+        this.createFolder(name);
+      },
+      
+      async createFolder(name) {
+        const payload = {
+          location: this.currentLocation,
+          relative_path: this.currentPath,
+          name: name
+        };
+        
+        try {
+          const response = await fetch('/api/storage/folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          
+          if (!response.ok) throw new Error('Failed to create folder');
+          
+          this.loadDirectory();
+        } catch (error) {
+          console.error('Create folder error:', error);
+          alert(`Failed to create folder: ${error.message}`);
+        }
+      },
+      
+      async deleteItem(entry) {
+        const type = entry.is_dir ? 'folder' : 'file';
+        if (!confirm(`Delete this ${type}: ${entry.name}?`)) return;
+        
+        try {
+          const response = await fetch(`/api/storage/entries?location=${this.currentLocation}&relative=${encodeURIComponent(entry.relative_path)}`, {
+            method: 'DELETE'
+          });
+          
+          if (!response.ok) throw new Error('Failed to delete');
+          
+          this.loadDirectory();
+        } catch (error) {
+          console.error('Delete error:', error);
+          alert(`Failed to delete: ${error.message}`);
+        }
+      },
+      
+      async deleteSelected() {
+        if (this.selectedItems.length === 0) return;
+        
+        if (!confirm(`Delete ${this.selectedItems.length} selected items?`)) return;
+        
+        for (const path of this.selectedItems) {
+          await this.deleteItem({ is_dir: false, relative_path: path });
+        }
+        
+        this.selectedItems = [];
+        this.loadDirectory();
+      },
+      
+      showError(message) {
+        const container = document.getElementById('enhanced-file-container');
+        container.innerHTML = `<div class="empty-state">${message}</div>`;
+      },
+      
+      // Utility functions
+      formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+      },
+      
+      formatDate(timestamp) {
+        if (!timestamp) return '';
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleString();
+      },
+      
+      escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+    };
+
+    // Initialize enhanced file browser when storage section is active
+    document.addEventListener('DOMContentLoaded', () => {
+      // Initialize when DOM is loaded
+      enhancedFileBrowser.init();
+    });
   </script>
+  <script defer src="/static/webui.js"></script>
 </body>
 </html>
 """

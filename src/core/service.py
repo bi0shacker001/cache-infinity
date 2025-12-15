@@ -18,6 +18,8 @@ import yaml
 from wsgidav.dc.simple_dc import SimpleDomainController
 from wsgidav.wsgidav_app import WsgiDAVApp
 
+from .tls_automation import TLSAutomationService, create_tls_automation_service
+
 from .backend import BackendRegistry
 from .cachelinks import (
     CachelinkDescriptor,
@@ -56,6 +58,7 @@ class CacheInfinityService:
         self._background_running = False
         self._state_store = state_store
         self._preview_fetcher = RemoteListingFetcher()
+        self._tls_automation: Optional[TLSAutomationService] = None
         self.apply_settings(settings, credentials)
 
     @classmethod
@@ -102,6 +105,9 @@ class CacheInfinityService:
         fetcher = Fetcher(settings.cookies)
 
         self._validate_tls_requirements(settings)
+
+        # Initialize TLS automation service
+        self._tls_automation = create_tls_automation_service(settings.config_dir, settings.tls)
 
         with self._lock:
             self.settings = settings
@@ -156,19 +162,6 @@ class CacheInfinityService:
             )
             provider_mapping[share.frontend_folder.as_posix()] = CacheInfinityProvider(context)
         user_mapping = self._build_user_mapping()
-        middleware_stack = _filter_available_middleware(
-            [
-                "wsgidav.middleware.LoggerMiddleware",
-                "wsgidav.middleware.ErrorPrinter",
-                "wsgidav.middleware.DebugFilter",
-                "wsgidav.middleware.RequestResolver",
-                "wsgidav.middleware.CoreMiddleware",
-                "wsgidav.middleware.PropertyManager",
-                "wsgidav.middleware.LockManager",
-                "wsgidav.middleware.DirBrowser",
-                "wsgidav.middleware.AuthMiddleware",
-            ]
-        )
         config = {
             "provider_mapping": provider_mapping,
             "verbose": 1,
@@ -176,7 +169,6 @@ class CacheInfinityService:
                 "domain_controller": SimpleDomainController,
             },
             "simple_dc": {"user_mapping": user_mapping},
-            "middleware_stack": middleware_stack,
         }
         return WsgiDAVApp(config)
 
@@ -187,12 +179,43 @@ class CacheInfinityService:
             for username, policy in share.users.items():
                 if not policy.login:
                     continue
+                
+                # Check proxy header auth first - no password needed
+                if self.settings.auth.proxy_header.enabled:
+                    share_users[username] = {"password": ""}
+                    continue
+                
+                # Check LDAP auth
+                if self.settings.auth.ldap.enabled:
+                    if self.index_db.validate_ldap_credentials(username, purpose="webdav"):
+                        share_users[username] = {"password": ""}
+                    continue
+                
+                # Check OIDC auth
+                if self.settings.auth.oidc.enabled:
+                    share_users[username] = {"password": ""}
+                    continue
+                
+                # Fallback to local credentials
                 password = self.index_db.get_user_password_plain(username, purpose="webdav")
                 if not password:
                     continue
                 share_users[username] = {"password": password}
             mapping[share.frontend_folder.as_posix()] = share_users
         return mapping
+
+    def validate_ui_credentials(self, username: str, password: str) -> bool:
+        # Proxy auth not supported for UI - must use direct auth method
+        if self.settings.auth.proxy_header.enabled:
+            return False
+        
+        if self.settings.auth.ldap.enabled:
+            return self.index_db.validate_ldap_credentials(username, password)
+        
+        if self.settings.auth.oidc.enabled:
+            return self.index_db.validate_oidc_credentials(username, password)
+        
+        return self.index_db.validate_credentials(username, password, purpose="webui", require_admin=True)
 
     def _validate_tls_requirements(self, settings: Settings) -> None:
         if not self._auth_required(settings):
@@ -202,7 +225,7 @@ class CacheInfinityService:
             return
         if not tls.enabled:
             raise ConfigError("Authenticated access requires TLS; enable TLS or set tls.mode: external")
-        if tls.mode != TLSMode.MANUAL:
+        if tls.mode not in (TLSMode.MANUAL, TLSMode.HTTP, TLSMode.DNS01):
             raise ConfigError(f"TLS mode '{tls.mode.value}' is not supported for authenticated users in this build")
 
     @staticmethod
@@ -223,6 +246,64 @@ class CacheInfinityService:
         self._background_running = True
         if getattr(self, "indexer", None):
             self.indexer.start()
+        # Start session cleanup background task
+        self._start_session_cleanup_task()
+        # Start TLS automation background task
+        self._start_tls_automation_task()
+    
+    def _start_session_cleanup_task(self) -> None:
+        """Start a background thread to periodically clean up expired sessions."""
+        def cleanup_loop():
+            while getattr(self, "_background_running", False):
+                try:
+                    # Clean up sessions older than 24 hours
+                    deleted = self.index_db.cleanup_expired_sessions(max_age_hours=24)
+                    if deleted > 0:
+                        _LOGGER.info("Cleaned up %d expired WebUI sessions", deleted)
+                except Exception as exc:
+                    _LOGGER.warning("Session cleanup failed: %s", exc)
+                
+                # Wait 1 hour before next cleanup
+                import time
+                time.sleep(3600)  # 1 hour
+        
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        cleanup_thread.start()
+
+    def _start_tls_automation_task(self) -> None:
+        """Start a background thread to manage TLS certificates."""
+        if not self._tls_automation:
+            return
+        
+        def tls_loop():
+            while getattr(self, "_background_running", False):
+                try:
+                    # Check if certificate needs renewal
+                    domains = []
+                    if self.settings.tls.mode == "http":
+                        domains = list(self.settings.tls.http.domains)
+                    elif self.settings.tls.mode == "dns-01":
+                        domains = list(self.settings.tls.dns01.domains)
+                    
+                    if domains:
+                        cert = self._tls_automation._get_existing_certificate(domains)
+                        if cert and not self._tls_automation._is_certificate_valid(cert):
+                            _LOGGER.info("Certificate needs renewal for domains: %s", ", ".join(domains))
+                            success = self._tls_automation.renew_certificate()
+                            if success:
+                                _LOGGER.info("Certificate renewed successfully")
+                            else:
+                                _LOGGER.warning("Certificate renewal failed")
+                
+                except Exception as exc:
+                    _LOGGER.warning("TLS automation failed: %s", exc)
+                
+                # Wait 6 hours before next check
+                import time
+                time.sleep(21600)  # 6 hours
+        
+        tls_thread = threading.Thread(target=tls_loop, daemon=True)
+        tls_thread.start()
 
     # Web UI helpers ------------------------------------------------------
     def describe_status(self) -> dict[str, object]:
@@ -903,6 +984,98 @@ class CacheInfinityService:
         self.ensure_filesystems()
         self._persist_state_snapshot()
 
+    def import_config_from_file(self, config_file: Path) -> None:
+        """Import settings.yaml configuration from a file."""
+        if not config_file.exists():
+            raise ConfigError(f"Configuration file not found: {config_file}")
+        
+        # Validate the configuration first
+        self._validate_config_edit(config_file, config_file.read_text(encoding="utf-8"))
+        
+        # Backup the current settings
+        self._backup_file(self.settings.settings_path, "settings")
+        
+        # Copy the new configuration
+        self.settings.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(config_file, self.settings.settings_path)
+        
+        # Reload the configuration
+        new_settings = load_settings(self.settings.config_dir)
+        self.apply_settings(new_settings, self.credentials)
+        self.ensure_filesystems()
+        self._persist_state_snapshot()
+
+    def import_cachelinks_from_file(self, cachelinks_file: Path) -> None:
+        """Import cachelinks from a YAML file."""
+        if not cachelinks_file.exists():
+            raise ConfigError(f"Cachelinks file not found: {cachelinks_file}")
+        
+        # Load and validate the cachelinks document
+        doc = self._load_cachelinks_document(cachelinks_file)
+        cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
+        
+        # Backup the current cachelinks
+        self._backup_file(cachelinks_path, "cachelinks")
+        
+        # Write the new cachelinks
+        cachelinks_path.parent.mkdir(parents=True, exist_ok=True)
+        cachelinks_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+        
+        # Reload the configuration
+        new_settings = load_settings(self.settings.config_dir)
+        self.apply_settings(new_settings, self.credentials)
+        self.ensure_filesystems()
+        self._persist_state_snapshot()
+
+    def import_users_from_file(self, users_file: Path) -> None:
+        """Import users from a YAML file."""
+        if not users_file.exists():
+            raise ConfigError(f"Users file not found: {users_file}")
+        
+        # Load and validate the users document
+        doc = yaml.safe_load(users_file.read_text(encoding="utf-8")) or {}
+        if not isinstance(doc, dict):
+            raise ConfigError("Users file must contain a mapping at the root")
+        
+        users_doc = doc.get("users")
+        if not isinstance(users_doc, dict):
+            raise ConfigError("Users file must contain a 'users' mapping")
+        
+        # Apply users to the database
+        for username, user_data in users_doc.items():
+            if not isinstance(user_data, dict):
+                raise ConfigError(f"User '{username}' must be a mapping")
+            
+            password_plain = user_data.get("password_plain")
+            password_hash = user_data.get("password_hash")
+            digest_ha1 = user_data.get("digest_ha1")
+            
+            if not (password_plain or password_hash or digest_ha1):
+                raise ConfigError(f"User '{username}' must have at least one password method")
+            
+            enabled = bool(user_data.get("enabled", True))
+            is_admin = bool(user_data.get("is_admin", False))
+            
+            self.index_db.upsert_auth_user(
+                username,
+                password_plain=password_plain,
+                password_hash=password_hash,
+                digest_ha1=digest_ha1,
+                enabled=enabled,
+                is_admin=is_admin,
+            )
+        
+        # Reload the configuration to pick up any credential changes
+        # For now, we'll reload the existing credentials file if it exists
+        credentials_path = self.settings.config_dir / "credentials" / "users.yaml"
+        if credentials_path.exists():
+            new_credentials = load_credentials(credentials_path)
+        else:
+            new_credentials = None
+        self.apply_settings(self.settings, new_credentials)
+        self.ensure_filesystems()
+        self._persist_state_snapshot()
+
     def create_cachelink_from_webui(
         self,
         *,
@@ -972,6 +1145,74 @@ class CacheInfinityService:
             )
             backends.append(summary)
         return {"backends": backends, "staging": summarize_path(self.staging.base_path)}
+
+    def describe_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
+        """Alias for list_storage_entries to match frontend expectations."""
+        return self.list_storage_entries(location, relative)
+
+    def list_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
+        normalized_location, segments, target = self._resolve_storage_directory(location, relative)
+        entries: list[dict[str, object]] = []
+        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            try:
+                metadata = child.stat()
+            except OSError:
+                continue
+            rel_path = segments + (child.name,)
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": "/" + "/".join(rel_path) if rel_path else "/",
+                    "is_dir": child.is_dir(),
+                    "size": metadata.st_size,
+                    "modified": metadata.st_mtime,
+                }
+            )
+
+        breadcrumbs: list[dict[str, object]] = []
+        breadcrumbs.append({"label": normalized_location.upper(), "path": "/"})
+        accum: list[str] = []
+        for segment in segments:
+            accum.append(segment)
+            breadcrumbs.append({"label": segment, "path": "/" + "/".join(accum)})
+        return {
+            "location": normalized_location,
+            "path": "/" + "/".join(segments) if segments else "/",
+            "entries": entries,
+            "breadcrumbs": breadcrumbs,
+        }
+
+    def list_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
+        normalized_location, segments, target = self._resolve_storage_directory(location, relative)
+        entries: list[dict[str, object]] = []
+        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            try:
+                metadata = child.stat()
+            except OSError:
+                continue
+            rel_path = segments + (child.name,)
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": "/" + "/".join(rel_path) if rel_path else "/",
+                    "is_dir": child.is_dir(),
+                    "size": metadata.st_size,
+                    "modified": metadata.st_mtime,
+                }
+            )
+
+        breadcrumbs: list[dict[str, object]] = []
+        breadcrumbs.append({"label": normalized_location.upper(), "path": "/"})
+        accum: list[str] = []
+        for segment in segments:
+            accum.append(segment)
+            breadcrumbs.append({"label": segment, "path": "/" + "/".join(accum)})
+        return {
+            "location": normalized_location,
+            "path": "/" + "/".join(segments) if segments else "/",
+            "entries": entries,
+            "breadcrumbs": breadcrumbs,
+        }
 
     def list_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
         normalized_location, segments, target = self._resolve_storage_directory(location, relative)
@@ -1449,6 +1690,70 @@ def _looks_like_auth_error(message: str) -> bool:
 
     lowered = message.lower()
     return "401" in lowered or "403" in lowered or "unauthorized" in lowered or "forbidden" in lowered
+
+
+    # TLS Automation Management -----------------------------------------------
+    def obtain_tls_certificate(self) -> bool:
+        """Obtain TLS certificate using configured automation."""
+        if not self._tls_automation:
+            raise ConfigError("TLS automation not configured")
+        try:
+            cert = self._tls_automation.get_certificate()
+            if cert:
+                _LOGGER.info("TLS certificate obtained for domains: %s", ", ".join(cert.domains))
+                return True
+            return False
+        except Exception as exc:
+            _LOGGER.error("Failed to obtain TLS certificate: %s", exc)
+            raise
+
+    def renew_tls_certificate(self) -> bool:
+        """Renew TLS certificate if needed."""
+        if not self._tls_automation:
+            raise ConfigError("TLS automation not configured")
+        try:
+            return self._tls_automation.renew_certificate()
+        except Exception as exc:
+            _LOGGER.error("Failed to renew TLS certificate: %s", exc)
+            raise
+
+    def get_tls_certificate_status(self) -> dict[str, object]:
+        """Get TLS certificate status information."""
+        result = {
+            "enabled": self.settings.tls.enabled,
+            "mode": self.settings.tls.mode.value,
+            "automation_available": self._tls_automation is not None,
+            "certificate": None,
+        }
+        
+        if not self._tls_automation:
+            return result
+        
+        domains = []
+        if self.settings.tls.mode == "http":
+            domains = list(self.settings.tls.http.domains)
+        elif self.settings.tls.mode == "dns-01":
+            domains = list(self.settings.tls.dns01.domains)
+        
+        if domains:
+            cert = self._tls_automation._get_existing_certificate(domains)
+            if cert:
+                result["certificate"] = {
+                    "domains": cert.domains,
+                    "cert_path": str(cert.cert_path),
+                    "key_path": str(cert.key_path),
+                    "expires_at": cert.expires_at,
+                    "issuer": cert.issuer,
+                    "valid": self._tls_automation._is_certificate_valid(cert),
+                }
+        
+        return result
+
+    def cleanup_tls_certificates(self, keep_days: int = 90) -> None:
+        """Clean up old TLS certificates."""
+        if not self._tls_automation:
+            raise ConfigError("TLS automation not configured")
+        self._tls_automation.cleanup_old_certificates(keep_days)
 
 
 __all__ = ["CacheInfinityService"]

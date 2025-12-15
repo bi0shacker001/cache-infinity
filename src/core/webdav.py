@@ -24,7 +24,7 @@ from wsgidav.dav_error import (
 )
 from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
 
-from .backend import BackendRegistry
+from .backend import BackendRegistry, BackendStorage
 from .cachelinks import CachelinkDescriptor, CachelinkIndex
 from .config import ShareDefinition, ShareUserPolicy
 from .fetcher import FetchError, Fetcher
@@ -43,6 +43,35 @@ class ProviderContext:
     index_db: IndexDatabase
     fetcher: Fetcher
     on_descriptor_access: Optional[Callable[[CachelinkDescriptor], None]] = None
+
+
+_CI_PROP_STATE = "{urn:cacheinfinity}cache-state"
+_CI_PROP_SIZE = "{urn:cacheinfinity}size-on-disk"
+
+
+class _CacheInfoMixin:
+    """Adds CacheInfinity live properties to DAV resources."""
+
+    def get_property_names(self, *, is_allprop):
+        names = list(super().get_property_names(is_allprop=is_allprop))  # type: ignore[misc]
+        for prop in (_CI_PROP_STATE, _CI_PROP_SIZE):
+            if prop not in names:
+                names.append(prop)
+        return names
+
+    def get_property_value(self, name):
+        if name == _CI_PROP_STATE:
+            return self._ci_cache_state()
+        if name == _CI_PROP_SIZE:
+            return str(self._ci_size_on_disk())
+        return super().get_property_value(name)  # type: ignore[misc]
+
+    # Subclasses must implement the helpers below.
+    def _ci_cache_state(self) -> str:
+        raise NotImplementedError
+
+    def _ci_size_on_disk(self) -> int:
+        return 0
 
 
 class CacheInfinityProvider(DAVProvider):
@@ -138,6 +167,9 @@ class CacheInfinityProvider(DAVProvider):
     def fetcher(self) -> Fetcher:
         return self.context.fetcher
 
+    def backend_checksum_record(self, backend_rel: PurePosixPath) -> dict[str, object] | None:
+        return _lookup_backend_record(self.backend, self.index_db, backend_rel)
+
     def notify_access(self, descriptor: CachelinkDescriptor, subpath: str | None = None) -> None:
         hook = self.context.on_descriptor_access
         if not hook:
@@ -189,7 +221,7 @@ class CacheInfinityProvider(DAVProvider):
 
 
 # Resource implementations ------------------------------------------------
-class CacheInfinityCollection(DAVCollection):
+class CacheInfinityCollection(_CacheInfoMixin, DAVCollection):
     """Directory that merges backend content with cachelink overlays."""
 
     def __init__(
@@ -216,6 +248,22 @@ class CacheInfinityCollection(DAVCollection):
             rel = descriptor_match.relative_path.as_posix()
             rel_value = "" if rel in (".", "") else rel
             self.provider.notify_access(descriptor_match.descriptor, rel_value or None)
+
+    def get_used_bytes(self):
+        backend_root = self.provider.backend.definition.backend_cache_root
+        try:
+            usage = shutil.disk_usage(backend_root)
+            return usage.used
+        except OSError:
+            return None
+
+    def get_available_bytes(self):
+        backend_root = self.provider.backend.definition.backend_cache_root
+        try:
+            usage = shutil.disk_usage(backend_root)
+            return usage.free
+        except OSError:
+            return None
 
     def get_member_names(self) -> Iterable[str]:  # type: ignore[override]
         self._access.require_read()
@@ -267,8 +315,23 @@ class CacheInfinityCollection(DAVCollection):
             )
         raise DAVError(HTTP_NOT_FOUND, context_info="Directory not found")
 
+    def _ci_cache_state(self) -> str:
+        if self._backend_path.exists():
+            return "cached"
+        if self._descriptor_match or self._virtual_children:
+            return "remote"
+        return "local-only"
 
-class BackendFileResource(DAVNonCollection):
+    def _ci_size_on_disk(self) -> int:
+        if self._backend_path.exists() and self._backend_path.is_file():
+            try:
+                return self._backend_path.stat().st_size
+            except OSError:
+                return 0
+        return 0
+
+
+class BackendFileResource(_CacheInfoMixin, DAVNonCollection):
     """Regular backend file."""
 
     def __init__(
@@ -322,8 +385,24 @@ class BackendFileResource(DAVNonCollection):
         else:
             raise DAVError(HTTP_NOT_FOUND, context_info="File not found")
 
+    def _ci_cache_state(self) -> str:
+        if not self._backend_path.exists():
+            return "remote"
+        record = self.provider.backend_checksum_record(self._backend_rel)
+        if record and record.get("source") == "download":
+            return "cached"
+        return "local-only"
 
-class CachelinkFileResource(DAVNonCollection):
+    def _ci_size_on_disk(self) -> int:
+        if not self._backend_path.exists():
+            return 0
+        try:
+            return self._backend_path.stat().st_size
+        except OSError:
+            return 0
+
+
+class CachelinkFileResource(_CacheInfoMixin, DAVNonCollection):
     """Virtual file backed by a cachelink descriptor."""
 
     def __init__(
@@ -400,6 +479,24 @@ class CachelinkFileResource(DAVNonCollection):
                 HTTP_NOT_FOUND,
                 context_info="Remote entries can only be deleted once cached locally",
             )
+
+    def _ci_cache_state(self) -> str:
+        backend_path = self._backend_path()
+        if backend_path.exists():
+            record = self.provider.backend_checksum_record(self._backend_rel)
+            if record and record.get("source") == "download":
+                return "cached"
+            return "local-only"
+        return "remote"
+
+    def _ci_size_on_disk(self) -> int:
+        backend_path = self._backend_path()
+        if backend_path.exists():
+            try:
+                return backend_path.stat().st_size
+            except OSError:
+                return 0
+        return 0
 
     def _download_to_staging(self) -> Path:
         staged = self.provider.staging.reserve_tempfile("fetch")
@@ -692,6 +789,35 @@ class _CachelinkTree:
             current = parent
             if current == parent:
                 break
+
+
+def _lookup_backend_record(
+    storage: BackendStorage,
+    index_db: IndexDatabase,
+    backend_rel: PurePosixPath,
+) -> dict[str, object] | None:
+    """Return backend checksum metadata for a relative path, if known."""
+
+    backend_path = storage.resolve(backend_rel)  # type: ignore[call-arg]
+    backend_root = storage.definition.backend_cache_root  # type: ignore[attr-defined]
+    candidates: list[str] = []
+    try:
+        rel = backend_path.relative_to(backend_root).as_posix()
+        rel = rel.lstrip("/")
+        if rel:
+            candidates.append(rel)
+    except ValueError:
+        pass
+    fallback = backend_rel.as_posix().lstrip("/")
+    if fallback and fallback not in candidates:
+        candidates.append(fallback)
+    if not candidates:
+        candidates.append(".")
+    for key in candidates:
+        record = index_db.lookup_backend_checksum(key)
+        if record:
+            return record
+    return None
 
 
 def _backend_relative_path(share: ShareDefinition, request_path: str) -> PurePosixPath:

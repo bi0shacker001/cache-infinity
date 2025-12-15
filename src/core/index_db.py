@@ -214,6 +214,17 @@ class IndexDatabase:
                 )
                 """
             )
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS webui_sessions (
+                    token TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    FOREIGN KEY (username) REFERENCES auth_users(username)
+                )
+                """
+            )
             self._db.commit()
             try:
                 self._db.execute("ALTER TABLE auth_users ADD COLUMN purpose TEXT NOT NULL DEFAULT 'webui'")
@@ -315,7 +326,7 @@ class IndexDatabase:
             self._db.execute("DELETE FROM indexing_files WHERE target_id = ?", (target_id,))
             self._db.executemany(
                 """
-                INSERT OR REPLACE INTO indexing_files
+                INSERT INTO indexing_files
                 (target_id, path, remote_url, is_dir, logical_size, modified, checksum, protocol, indexed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -571,6 +582,26 @@ class IndexDatabase:
                 (rel, algorithm, digest, source, ts),
             )
             self._db.commit()
+
+    def lookup_backend_checksum(self, relative_path: PurePosixPath | str) -> dict[str, object] | None:
+        """Return checksum metadata for a cached backend file, if known."""
+
+        if isinstance(relative_path, PurePosixPath):
+            rel = relative_path.as_posix()
+        else:
+            rel = str(relative_path)
+        rel = rel.lstrip("/")
+        rel = rel or "."
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT path, algorithm, digest, source, updated_at
+                FROM backend_checksums
+                WHERE path = ?
+                """,
+                (rel,),
+            )
+        return row
 
     def refresh_catalog(self, entries: Sequence[CatalogChecksum]) -> None:
         """Replace catalog entries with the provided snapshot."""
@@ -912,6 +943,81 @@ class IndexDatabase:
 
     def list_webdav_credentials(self) -> list[dict[str, object]]:
         return self.list_users(purpose="webdav")
+
+    # WebUI Session Management -------------------------------------------------
+    def load_webui_sessions(self) -> dict[str, dict[str, object]]:
+        """Load all active WebUI sessions from the database."""
+        with self._lock:
+            rows = self._db.fetchall(
+                "SELECT token, username, created_at, last_used_at FROM webui_sessions"
+            )
+        sessions: dict[str, dict[str, object]] = {}
+        for row in rows:
+            sessions[row["token"]] = {
+                "username": row["username"],
+                "created_at": row["created_at"],
+                "last_used_at": row["last_used_at"],
+            }
+        return sessions
+
+    def save_webui_sessions(self, sessions: dict[str, dict[str, object]]) -> None:
+        """Save WebUI sessions to the database."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            # Clear existing sessions
+            self._db.execute("DELETE FROM webui_sessions")
+            # Insert current sessions
+            if sessions:
+                self._db.executemany(
+                    """
+                    INSERT INTO webui_sessions (token, username, created_at, last_used_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            token,
+                            session_data["username"],
+                            session_data.get("created_at", now),
+                            session_data.get("last_used_at", now),
+                        )
+                        for token, session_data in sessions.items()
+                    ],
+                )
+            self._db.commit()
+
+    def update_session_last_used(self, token: str) -> None:
+        """Update the last used timestamp for a session."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                "UPDATE webui_sessions SET last_used_at = ? WHERE token = ?",
+                (now, token),
+            )
+            self._db.commit()
+
+    def cleanup_expired_sessions(self, max_age_hours: int = 24) -> int:
+        """Remove sessions older than the specified age in hours."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        with self._lock:
+            row = self._db.fetchone(
+                "SELECT COUNT(*) as count FROM webui_sessions WHERE last_used_at < ?",
+                (cutoff,)
+            )
+            deleted_count = row["count"] if row else 0
+            self._db.execute(
+                "DELETE FROM webui_sessions WHERE last_used_at < ?",
+                (cutoff,)
+            )
+            self._db.commit()
+            return deleted_count
+
+    def get_active_sessions_count(self) -> int:
+        """Get the number of active sessions."""
+        with self._lock:
+            row = self._db.fetchone(
+                "SELECT COUNT(*) as count FROM webui_sessions"
+            )
+            return row["count"] if row else 0
 
 
 class _DBAdapter:

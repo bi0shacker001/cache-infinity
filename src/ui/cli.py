@@ -100,6 +100,39 @@ def build_parser() -> argparse.ArgumentParser:
     admin_cachelinks_add.add_argument("--url", required=True)
     admin_cachelinks_add.add_argument("--subfolder", default="/")
 
+    admin_db = admin_sub.add_parser("db", help="Database management")
+    admin_db_sub = admin_db.add_subparsers(dest="db_command", required=True)
+    admin_db.add_parser("health", help="Check database connection health")
+    admin_db.add_parser("pool-stats", help="Show connection pool statistics")
+    admin_db.add_parser("cleanup-pool", help="Clean up broken connections in pool")
+
+    admin_sessions = admin_sub.add_parser("sessions", help="WebUI session management")
+    admin_sessions_sub = admin_sessions.add_subparsers(dest="sessions_command", required=True)
+    admin_sessions.add_parser("list", help="List active WebUI sessions")
+    admin_sessions.add_parser("cleanup", help="Clean up expired sessions")
+    admin_sessions_cleanup = admin_sessions_sub.add_parser("cleanup-age", help="Clean up sessions older than specified hours")
+    admin_sessions_cleanup.add_argument("--hours", type=int, default=24, help="Age in hours (default: 24)")
+
+    admin_tls = admin_sub.add_parser("tls", help="TLS certificate management")
+    admin_tls_sub = admin_tls.add_subparsers(dest="tls_command", required=True)
+    admin_tls.add_parser("obtain", help="Obtain TLS certificate using configured automation")
+    admin_tls.add_parser("renew", help="Renew TLS certificate if needed")
+    admin_tls.add_parser("status", help="Show TLS certificate status")
+    admin_tls.add_parser("cleanup", help="Clean up old certificates")
+
+    # Import commands
+    admin_import = admin_sub.add_parser("import", help="Import configuration from YAML files")
+    admin_import_sub = admin_import.add_subparsers(dest="import_command", required=True)
+    
+    admin_import_config = admin_import_sub.add_parser("config", help="Import settings.yaml configuration")
+    admin_import_config.add_argument("--file", required=True, help="Path to settings.yaml file to import")
+    
+    admin_import_cachelinks = admin_import_sub.add_parser("cachelinks", help="Import cachelinks from YAML file")
+    admin_import_cachelinks.add_argument("--file", required=True, help="Path to cachelinks.yaml file to import")
+    
+    admin_import_users = admin_import_sub.add_parser("users", help="Import users from YAML file")
+    admin_import_users.add_argument("--file", required=True, help="Path to users.yaml file to import")
+
     return parser
 
 
@@ -189,19 +222,25 @@ def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings) -> None:
     if not tls.enabled or tls.mode == TLSMode.EXTERNAL:
         server.ssl_adapter = None
         return
-    if tls.mode != TLSMode.MANUAL:
+    if tls.mode == TLSMode.MANUAL:
+        cert_path = tls.manual.cert_path
+        key_path = tls.manual.key_path
+        if not cert_path or not key_path:
+            raise ConfigError("TLS manual mode requires cert_path and key_path")
+        if not cert_path.exists() or not key_path.exists():
+            raise ConfigError("TLS certificate files do not exist at the provided paths")
+        server.ssl_adapter = pyopenssl.pyOpenSSLAdapter(
+            certificate=str(cert_path),
+            private_key=str(key_path),
+            certificate_chain=None,
+        )
+    elif tls.mode in (TLSMode.HTTP, TLSMode.DNS01):
+        # For automated TLS, we'll handle certificate management separately
+        # The server will be configured with certificates when they're available
+        server.ssl_adapter = None
+        _LOGGER.info("TLS automation enabled - certificates will be managed automatically")
+    else:
         raise ConfigError(f"TLS mode '{tls.mode.value}' is not implemented in this build")
-    cert_path = tls.manual.cert_path
-    key_path = tls.manual.key_path
-    if not cert_path or not key_path:
-        raise ConfigError("TLS manual mode requires cert_path and key_path")
-    if not cert_path.exists() or not key_path.exists():
-        raise ConfigError("TLS certificate files do not exist at the provided paths")
-    server.ssl_adapter = pyopenssl.pyOpenSSLAdapter(
-        certificate=str(cert_path),
-        private_key=str(key_path),
-        certificate_chain=None,
-    )
 
 
 def _trigger_reload(
@@ -271,6 +310,93 @@ def cmd_admin(args) -> None:
             subfolder=args.subfolder,
         )
         print(json.dumps(snapshot, indent=2))
+    elif args.admin_command == "import":
+        if args.import_command == "config":
+            service.import_config_from_file(Path(args.file))
+            print(f"Successfully imported configuration from {args.file}")
+        elif args.import_command == "cachelinks":
+            service.import_cachelinks_from_file(Path(args.file))
+            print(f"Successfully imported cachelinks from {args.file}")
+        elif args.import_command == "users":
+            service.import_users_from_file(Path(args.file))
+            print(f"Successfully imported users from {args.file}")
+        else:
+            raise SystemExit("Unknown import command")
+    elif args.admin_command == "db":
+        if args.db_command == "health":
+            health = service.index_db.health_check()
+            print(f"Database health: {'HEALTHY' if health else 'UNHEALTHY'}")
+        elif args.db_command == "pool-stats":
+            stats = service.index_db.get_pool_stats()
+            print(json.dumps(stats, indent=2))
+        elif args.db_command == "cleanup-pool":
+            service.index_db.close_idle_connections()
+            print("Connection pool cleaned up")
+        else:
+            raise SystemExit("Unknown db command")
+    elif args.admin_command == "sessions":
+        if args.sessions_command == "list":
+            count = service.index_db.get_active_sessions_count()
+            print(f"Active WebUI sessions: {count}")
+        elif args.sessions_command == "cleanup":
+            deleted = service.index_db.cleanup_expired_sessions()
+            print(f"Cleaned up {deleted} expired sessions")
+        elif args.sessions_command == "cleanup-age":
+            deleted = service.index_db.cleanup_expired_sessions(args.hours)
+            print(f"Cleaned up {deleted} sessions older than {args.hours} hours")
+        else:
+            raise SystemExit("Unknown sessions command")
+    elif args.admin_command == "tls":
+        if args.tls_command == "obtain":
+            if service._tls_automation:
+                cert = service._tls_automation.get_certificate()
+                if cert:
+                    print(f"Certificate obtained for domains: {', '.join(cert.domains)}")
+                    print(f"Certificate path: {cert.cert_path}")
+                    print(f"Key path: {cert.key_path}")
+                else:
+                    print("Failed to obtain certificate")
+            else:
+                print("TLS automation not configured")
+        elif args.tls_command == "renew":
+            if service._tls_automation:
+                success = service._tls_automation.renew_certificate()
+                print(f"Certificate renewal: {'Success' if success else 'Failed/Not needed'}")
+            else:
+                print("TLS automation not configured")
+        elif args.tls_command == "status":
+            if service._tls_automation:
+                # Try to get certificate status
+                domains = []
+                if service.settings.tls.mode == "http":
+                    domains = list(service.settings.tls.http.domains)
+                elif service.settings.tls.mode == "dns-01":
+                    domains = list(service.settings.tls.dns01.domains)
+                
+                if domains:
+                    cert = service._tls_automation._get_existing_certificate(domains)
+                    if cert:
+                        print(f"Certificate for domains: {', '.join(cert.domains)}")
+                        print(f"Certificate path: {cert.cert_path}")
+                        print(f"Key path: {cert.key_path}")
+                        if cert.expires_at:
+                            print(f"Expires: {cert.expires_at}")
+                        if cert.issuer:
+                            print(f"Issuer: {cert.issuer}")
+                    else:
+                        print("No certificate found")
+                else:
+                    print("No domains configured")
+            else:
+                print("TLS automation not configured")
+        elif args.tls_command == "cleanup":
+            if service._tls_automation:
+                service._tls_automation.cleanup_old_certificates()
+                print("Old certificates cleaned up")
+            else:
+                print("TLS automation not configured")
+        else:
+            raise SystemExit("Unknown TLS command")
     else:
         raise SystemExit("Unknown admin command")
 

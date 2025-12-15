@@ -290,7 +290,17 @@ def load_settings(config_dir: Path) -> Settings:
         auth=auth,
     )
     _validate_multi_backends(settings)
+    _validate_auth_methods(settings)
     return settings
+
+def _validate_auth_methods(settings: Settings) -> None:
+    enabled_methods = [
+        settings.auth.oidc.enabled,
+        settings.auth.ldap.enabled,
+        settings.auth.proxy_header.enabled
+    ]
+    if sum(enabled_methods) > 1:
+        raise ConfigError("Only one authentication method (OIDC, LDAP, or Proxy Header) can be enabled at a time")
 
 
 def _read_yaml(path: Path) -> MutableMapping[str, object]:
