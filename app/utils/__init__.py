@@ -1,19 +1,7 @@
-"""Utilities module for CacheInfinity."""
+"""Utility functions for CacheInfinity."""
 
-from .cachelinks import CachelinkDescriptor, CachelinkIndex, CachelinkMode, CachelinkRecord, load_cachelinks, records_for_file, render_cachelink_records
-from .checksum_catalog import ChecksumCatalog
-from ..db.adapter import DBAdapter
-from .logging_setup import configure_logging
+from __future__ import annotations
 
-__all__ = [
-    "CachelinkDescriptor",
-    "CachelinkIndex",
-    "CachelinkMode",
-    "CachelinkRecord",
-    "load_cachelinks",
-    "records_for_file",
-    "render_cachelink_records",
-    "ChecksumCatalog",
-    "DBAdapter",
-    "configure_logging",
-]
+import logging
+
+_logger = logging.getLogger(__name__)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, Optional
+
+from ..core.errors import ConfigError
 
 
 @dataclass
@@ -93,6 +95,3 @@ def _normalize_relative(value: PurePosixPath | str) -> tuple[str, ...]:
             raise ValueError("Relative paths may not traverse upward")
         filtered.append(part)
     return tuple(filtered)
-
-
-__all__ = ["BackendRegistry", "BackendStorage"]

@@ -18,10 +18,10 @@ import yaml
 from wsgidav.dc.simple_dc import SimpleDomainController
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from ..auth.tls_automation import TLSAutomationService, create_tls_automation_service
+from ..auth.tls import TLSAutomationService, create_tls_automation_service
 
 from ..storage.backend import BackendRegistry
-from ..utils.cachelinks import (
+from ..cache.cachelinks import (
     CachelinkDescriptor,
     CachelinkIndex,
     CachelinkRecord,
@@ -31,14 +31,14 @@ from ..utils.cachelinks import (
     records_for_file,
     render_cachelink_records,
 )
-from ..utils.checksum_catalog import ChecksumCatalog
+from ..cache.checksum import ChecksumCatalog
 from ..core.config import ConfigError, Settings, load_settings
 from ..auth.credentials import CredentialStore, load_credentials
-from .fetcher import Fetcher
+from ..net.fetcher import Fetcher
 from ..db.index import IndexDatabase, IndexedEntry
-from .indexer import Indexer, RemoteListingFetcher
+from ..net.indexer import Indexer, RemoteListingFetcher
 from ..storage.staging import StagingArea
-from .webdav import CacheInfinityProvider, ProviderContext
+from ..hosting.webdav import CacheInfinityProvider, ProviderContext
 from ..ui.webui import WebUIApp
 
 _LOGGER = logging.getLogger(__name__)

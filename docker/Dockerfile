@@ -20,7 +20,7 @@ RUN apk add --no-cache --virtual .build-deps build-base libffi-dev openssl-dev &
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir "WsgiDAV[all]>=4.0" && \
     apk del .build-deps
-COPY src/ ./
+COPY app/ ./
 COPY tests ./tests
 RUN pip install --no-cache-dir \
         PyYAML>=6.0 \
@@ -33,5 +33,5 @@ RUN pip install --no-cache-dir \
 
 USER cacheinfinity
 EXPOSE 8080
-ENTRYPOINT ["python", "/app/ui/cli.py"]
+ENTRYPOINT ["python", "/app/cacheinfinity.py"]
 CMD ["serve", "--config-dir", "/config", "--credentials", "/config/credentials/users.yaml"]

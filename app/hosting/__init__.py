@@ -1,4 +1,4 @@
-"""Storage utilities for CacheInfinity."""
+"""Hosting utilities for CacheInfinity."""
 
 from __future__ import annotations
 

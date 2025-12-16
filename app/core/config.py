@@ -16,11 +16,10 @@ import yaml
 from wsgidav.dav_provider import DAVProvider
 
 from ..storage.backend import BackendDefinition
-from ..utils.cachelinks import CachelinkIndex, load_cachelinks
+from ..cache.cachelinks import CachelinkIndex, load_cachelinks
 from ..auth.credentials import CredentialStore, load_credentials
-from ..core.fetcher import CookieJarDefinition
+from ..net.fetcher import CookieJarDefinition
 from ..db.index import DatabaseSettings
-from .indexing import IndexingSettings
 from ..storage.staging import StagingDefinition
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +30,23 @@ _DEFAULT_CREDENTIALS_RELATIVE = "credentials/users.yaml"
 
 
 from .errors import ConfigError
+
+
+@dataclass
+class IndexingSettings:
+    """Settings for the indexer."""
+
+    min_full_reindex_days: int = 30
+    max_full_reindex_days: int = 90
+    hot_window_days: int = 7
+    hot_radius: int = 10
+    daily_full_reindex_budget: int = 5
+    daily_cheap_check_budget: int = 10
+    max_full_reindex_per_14d: int = 10
+    max_cheap_checks_per_day: int = 50
+    allow_early_full_on_change: bool = True
+    early_full_requires_hot: bool = True
+    score_weights: Optional[dict[str, float]] = None
 
 
 @dataclass
@@ -359,6 +375,16 @@ def _parse_limits(limits_raw: dict) -> LimitsDefinition:
 
 def _parse_indexing(indexing_raw: dict) -> IndexingSettings:
     """Parse indexing settings."""
+    score_weights_raw = indexing_raw.get("score_weights", {})
+    score_weights = None
+    if score_weights_raw:
+        score_weights = {}
+        for key, value in score_weights_raw.items():
+            try:
+                score_weights[str(key)] = float(value)
+            except (ValueError, TypeError):
+                pass
+    
     return IndexingSettings(
         min_full_reindex_days=int(indexing_raw.get("min_full_reindex_days", 30)),
         max_full_reindex_days=int(indexing_raw.get("max_full_reindex_days", 90)),
@@ -370,14 +396,8 @@ def _parse_indexing(indexing_raw: dict) -> IndexingSettings:
         max_cheap_checks_per_day=int(indexing_raw.get("max_cheap_checks_per_day", 100)),
         allow_early_full_on_change=bool(indexing_raw.get("allow_early_full_on_change", True)),
         early_full_requires_hot=bool(indexing_raw.get("early_full_requires_hot", True)),
-        score_weights=_parse_score_weights(indexing_raw.get("score_weights", {})),
+        score_weights=score_weights,
     )
-
-
-def _parse_score_weights(weights_raw: dict) -> Any:
-    """Parse score weights."""
-    # This would need to be implemented based on the actual IndexingSettings structure
-    return weights_raw
 
 
 def _parse_database(database_raw: dict, config_dir: Path) -> DatabaseSettings:
@@ -497,6 +517,7 @@ __all__ = [
     "TLSDNS01Settings",
     "TLSManualSettings",
     "TLSSettings",
+    "IndexingSettings",
     "Settings",
     "load_settings",
 ]

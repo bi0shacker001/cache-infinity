@@ -6,6 +6,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,3 @@ class StagingArea:
         staged = Path(path)
         staged.chmod(0o600)
         return staged
-
-
-__all__ = ["StagingArea"]

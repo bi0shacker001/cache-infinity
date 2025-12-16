@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from ..core.errors import ConfigError
-from .database import DatabaseSettings
+from .dbmanage import DatabaseSettings
 
 
 class DBAdapter:

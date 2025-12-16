@@ -15,10 +15,9 @@ from cheroot.ssl import pyopenssl
 
 from .core.config import ConfigError, TLSSettings, load_settings
 from .core.service import CacheInfinityService
-from .utils.logging_setup import configure_logging
+from .core.logging import configure_logging
+from .core.config_manager import ConfigManager, ensure_default_config
 
-# TODO: These imports need to be fixed - config_manager and default_config modules don't exist
-# ConfigManager and ensure_default_config need to be implemented or imported from the correct location
 
 _DEFAULT_CONFIG_DIR = "/config"
 _DEFAULT_CREDENTIALS_RELATIVE = "credentials/users.yaml"
@@ -160,6 +159,7 @@ class ConfigManager:
 # TODO: Implement ensure_default_config function
 def ensure_default_config(config_dir: Path) -> None:
     # TODO: Implement default config creation
+    # TODO: Create default settings.yaml, credentials directory structure, and example files
     pass
 
 def _start_server_async(server: cheroot_wsgi.Server, label: str) -> threading.Thread:

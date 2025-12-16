@@ -1,4 +1,4 @@
-"""Automated TLS certificate management using Certbot/Let's Encrypt."""
+"""TLS certificate management for CacheInfinity."""
 
 from __future__ import annotations
 
@@ -32,11 +32,12 @@ class TLSCertificate:
 class TLSAutomationError(Exception):
     """Raised when TLS automation fails."""
     
+    # TODO: Add specific error codes and detailed error messages
     pass
 
 
-class TLSAutomationService:
-    """Handles automated certificate management using Certbot."""
+class TLSService:
+    """Handles TLS certificate management using Certbot."""
     
     def __init__(self, config_dir: Path, tls_settings: TLSSettings):
         self.config_dir = config_dir
@@ -367,8 +368,8 @@ class TLSAutomationService:
             _LOGGER.warning("Failed to cleanup old certificates: %s", e)
 
 
-def create_tls_automation_service(config_dir: Path, tls_settings: TLSSettings) -> Optional[TLSAutomationService]:
-    """Create TLS automation service if TLS automation is enabled."""
+def create_tls_service(config_dir: Path, tls_settings: TLSSettings) -> Optional[TLSService]:
+    """Create TLS service if TLS automation is enabled."""
     if tls_settings.enabled and tls_settings.mode in ("http", "dns-01"):
-        return TLSAutomationService(config_dir, tls_settings)
+        return TLSService(config_dir, tls_settings)
     return None

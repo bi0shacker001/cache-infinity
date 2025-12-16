@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 
-from ..utils.cachelinks import CachelinkDescriptor
+from ..cache.cachelinks import CachelinkDescriptor
 from ..core.errors import ConfigError
-from ..db.database import DatabaseSettings
+from ..db.dbmanage import DatabaseSettings
 from .adapter import DBAdapter
 from ..auth.credentials import CredentialStore
 
