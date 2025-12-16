@@ -14,9 +14,9 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
 
-def setup_logging(
-    log_level: str = 'INFO',
+def configure_logging(
     log_file: Optional[Path] = None,
+    log_level: str = 'INFO',
     max_log_size: int = 10 * 1024 * 1024,  # 10MB
     backup_count: int = 5
 ) -> None:

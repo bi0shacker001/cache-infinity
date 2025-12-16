@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request
 
+from .management import ManagementLayer
+
 _logger = logging.getLogger(__name__)
 
 
@@ -19,7 +21,7 @@ class WebUIAPI:
         Args:
             service: Reference to the main CacheInfinity service
         """
-        self.service = service
+        self.management = ManagementLayer(service)
         _logger.info("WebUI API initialized")
     
     def register_routes(self, app: Flask) -> None:
@@ -116,7 +118,7 @@ class WebUIAPI:
         def list_users():
             """List all users."""
             try:
-                users = self.service.list_admin_users()
+                users = self.management.list_users()
                 return jsonify({'users': users})
             except Exception as exc:
                 _logger.error(f"Failed to list users: {exc}")
@@ -132,11 +134,12 @@ class WebUIAPI:
                 enabled = data.get('enabled', True)
                 is_admin = data.get('is_admin', False)
                 
-                self.service.upsert_admin_user(
+                self.management.upsert_user(
                     username=username,
                     password=password,
                     enabled=enabled,
-                    is_admin=is_admin
+                    is_admin=is_admin,
+                    purpose="webui"
                 )
                 
                 return jsonify({'message': f'User {username} updated successfully'})

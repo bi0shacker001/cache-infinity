@@ -10,6 +10,66 @@ from typing import Optional
 _logger = logging.getLogger(__name__)
 
 
+class ChecksumCatalog:
+    """Catalog for managing checksums of files."""
+    
+    def __init__(self, config_dir: Path, index_db):
+        """Initialize checksum catalog.
+        
+        Args:
+            config_dir: Configuration directory path
+            index_db: Database instance for storing checksums
+        """
+        self.config_dir = config_dir
+        self.index_db = index_db
+        self.calculator = ChecksumCalculator()
+        _logger.info("Checksum catalog initialized")
+    
+    def get_file_checksum(self, file_path: Path) -> Optional[str]:
+        """Get stored checksum for a file.
+        
+        Args:
+            file_path: Path to file
+             
+        Returns:
+            Stored checksum if found, None otherwise
+        """
+        # TODO: Implement database lookup for stored checksums
+        return None
+    
+    def store_file_checksum(self, file_path: Path, checksum: str) -> bool:
+        """Store checksum for a file.
+        
+        Args:
+            file_path: Path to file
+            checksum: Calculated checksum
+             
+        Returns:
+            True if stored successfully, False otherwise
+        """
+        # TODO: Implement database storage for checksums
+        return True
+    
+    def verify_file_integrity(self, file_path: Path) -> bool:
+        """Verify file integrity using stored checksum.
+        
+        Args:
+            file_path: Path to file
+             
+        Returns:
+            True if file is valid, False otherwise
+        """
+        stored_checksum = self.get_file_checksum(file_path)
+        if not stored_checksum:
+            return False
+        
+        current_checksum = self.calculator.calculate_sha256(file_path)
+        if not current_checksum:
+            return False
+        
+        return stored_checksum == current_checksum
+
+
 class ChecksumCalculator:
     """Calculates checksums for files."""
     

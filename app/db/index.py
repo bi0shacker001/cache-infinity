@@ -11,7 +11,6 @@ from typing import Iterable, Sequence
 
 from ..cache.cachelinks import CachelinkDescriptor
 from ..core.errors import ConfigError
-from ..db.dbmanage import DatabaseSettings
 from .adapter import DBAdapter
 from ..auth.credentials import CredentialStore
 
@@ -67,7 +66,7 @@ class CatalogChecksum:
 class IndexDatabase:
     """Persistent storage for indexing state."""
 
-    def __init__(self, settings: DatabaseSettings):
+    def __init__(self, settings: 'DatabaseSettings'):
         self._db = DBAdapter(settings)
         self._lock = threading.RLock()
         self._init_schema()
@@ -1019,83 +1018,6 @@ class IndexDatabase:
                 "SELECT COUNT(*) as count FROM webui_sessions"
             )
             return row["count"] if row else 0
-
-
-class _DBAdapter:
-    """Abstraction that supports sqlite or postgres connections."""
-
-    def __init__(self, settings: DatabaseSettings):
-        engine = settings.engine or "sqlite"
-        self.engine = engine
-        if engine == "sqlite":
-            sqlite_path = settings.sqlite_path or Path("cacheinfinity.db")
-            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(sqlite_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-        elif engine == "postgres":
-            dsn = settings.postgres_dsn
-            if not dsn:
-                raise ConfigError("postgres engine requires postgres_dsn")
-            try:
-                import psycopg
-            except ImportError as exc:  # pragma: no cover - optional dependency
-                raise ConfigError("psycopg package is required for postgres engine") from exc
-            self._psycopg = psycopg
-            self._conn = psycopg.connect(dsn)
-            self._conn.autocommit = False
-        else:
-            raise ConfigError(f"Unsupported database engine '{engine}'")
-
-    def execute(self, sql: str, params: tuple | list | None = None):
-        cur = self._conn.cursor()
-        cur.execute(self._convert_sql(sql), params or ())
-        return cur
-
-    def executemany(self, sql: str, seq: list[tuple]):
-        cur = self._conn.cursor()
-        cur.executemany(self._convert_sql(sql), seq)
-        cur.close()
-
-    def fetchone(self, sql: str, params: tuple | list | None = None) -> dict | None:
-        cur = self.execute(sql, params)
-        row = cur.fetchone()
-        description = cur.description
-        cur.close()
-        return self._row_to_dict(row, description)
-
-    def fetchall(self, sql: str, params: tuple | list | None = None) -> list[dict]:
-        cur = self.execute(sql, params)
-        description = cur.description
-        rows = cur.fetchall()
-        cur.close()
-        return [self._row_to_dict(row, description) for row in rows]
-
-    def commit(self) -> None:
-        self._conn.commit()
-
-    def rollback(self) -> None:
-        try:
-            self._conn.rollback()
-        except Exception:
-            pass
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def _convert_sql(self, sql: str) -> str:
-        if self.engine != "postgres":
-            return sql
-        converted = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
-        converted = converted.replace("AUTOINCREMENT", "")
-        return converted.replace("?", "%s")
-
-    def _row_to_dict(self, row, description) -> dict | None:
-        if row is None:
-            return None
-        if self.engine == "sqlite":
-            return dict(row)
-        columns = [col.name for col in description]
-        return {col: value for col, value in zip(columns, row)}
 
 
 def _parse_ts(value: str | None) -> datetime | None:

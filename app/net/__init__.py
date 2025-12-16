@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from ..core.config import CookieJarDefinition
 
 _logger = logging.getLogger(__name__)
 

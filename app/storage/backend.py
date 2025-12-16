@@ -63,6 +63,224 @@ class BackendStorage:
         path.parent.mkdir(parents=True, exist_ok=True)
         mode = "wb" if binary else "w"
         return path.open(mode)
+    
+    def get_usage(self) -> Dict[str, Any]:
+        """Get storage usage information.
+        
+        Returns:
+            Dictionary with usage statistics
+        """
+        import shutil
+        
+        try:
+            total, used, free = shutil.disk_usage(self.definition.backend_cache_root)
+            
+            return {
+                'total_bytes': total,
+                'used_bytes': used,
+                'free_bytes': free,
+                'total_gb': total / (1024**3),
+                'used_gb': used / (1024**3),
+                'free_gb': free / (1024**3),
+                'usage_percent': (used / total) * 100
+            }
+        except Exception as e:
+            return {
+                'error': str(e),
+                'total_bytes': 0,
+                'used_bytes': 0,
+                'free_bytes': 0,
+                'total_gb': 0,
+                'used_gb': 0,
+                'free_gb': 0,
+                'usage_percent': 0
+            }
+    
+    def atomic_move(self, src: Path, dst_relative: PurePosixPath | str) -> bool:
+        """Perform atomic file move to backend storage.
+        
+        Args:
+            src: Source file path
+            dst_relative: Destination relative path
+            
+        Returns:
+            True if move was successful
+        """
+        try:
+            dst = self.resolve(dst_relative)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Perform atomic move
+            src.rename(dst)
+            return True
+            
+        except Exception as e:
+            _logger.error(f"Atomic move failed from {src} to {dst_relative}: {e}")
+            return False
+    
+    def atomic_write(self, relative_path: PurePosixPath | str, data: bytes) -> bool:
+        """Perform atomic file write using temporary file.
+        
+        Args:
+            relative_path: Relative path in backend
+            data: Data to write
+            
+        Returns:
+            True if write was successful
+        """
+        import tempfile
+        
+        try:
+            # Write to temporary file first
+            temp_path = self.definition.backend_cache_root / f".tmp_{id(data)}_{int(time.time())}"
+            
+            with open(temp_path, 'wb') as f:
+                f.write(data)
+            
+            # Atomic move to final location
+            return self.atomic_move(temp_path, relative_path)
+            
+        except Exception as e:
+            _logger.error(f"Atomic write failed for {relative_path}: {e}")
+            # Clean up temp file if it exists
+            try:
+                if 'temp_path' in locals() and temp_path.exists():
+                    temp_path.unlink()
+            except:
+                pass
+            return False
+    
+    def get_file_info(self, relative_path: PurePosixPath | str) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a file.
+        
+        Args:
+            relative_path: Relative path to the file
+            
+        Returns:
+            Dictionary with file information or None if file doesn't exist
+        """
+        import time
+        
+        try:
+            path = self.resolve(relative_path)
+            if not path.exists():
+                return None
+            
+            stat = path.stat()
+            
+            return {
+                'path': str(path),
+                'size': stat.st_size,
+                'modified': stat.st_mtime,
+                'created': stat.st_ctime,
+                'is_file': path.is_file(),
+                'is_dir': path.is_dir(),
+                'name': path.name,
+                'relative_path': str(relative_path)
+            }
+            
+        except Exception as e:
+            _logger.error(f"Failed to get file info for {relative_path}: {e}")
+            return None
+    
+    def list_directory(self, relative_path: PurePosixPath | str,
+                      recursive: bool = False) -> List[Dict[str, Any]]:
+        """List files and directories in a path.
+        
+        Args:
+            relative_path: Relative path to list
+            recursive: Whether to list recursively
+            
+        Returns:
+            List of file/directory information
+        """
+        try:
+            path = self.resolve(relative_path)
+            if not path.exists() or not path.is_dir():
+                return []
+            
+            items = []
+            
+            if recursive:
+                for item in path.rglob('*'):
+                    if item.is_file() or item.is_dir():
+                        rel_path = item.relative_to(self.definition.backend_cache_root)
+                        items.append({
+                            'path': str(item),
+                            'relative_path': str(rel_path),
+                            'is_file': item.is_file(),
+                            'is_dir': item.is_dir(),
+                            'name': item.name,
+                            'size': item.stat().st_size if item.is_file() else 0,
+                            'modified': item.stat().st_mtime
+                        })
+            else:
+                for item in path.iterdir():
+                    rel_path = item.relative_to(self.definition.backend_cache_root)
+                    items.append({
+                        'path': str(item),
+                        'relative_path': str(rel_path),
+                        'is_file': item.is_file(),
+                        'is_dir': item.is_dir(),
+                        'name': item.name,
+                        'size': item.stat().st_size if item.is_file() else 0,
+                        'modified': item.stat().st_mtime
+                    })
+            
+            return items
+            
+        except Exception as e:
+            _logger.error(f"Failed to list directory {relative_path}: {e}")
+            return []
+    
+    def delete_file(self, relative_path: PurePosixPath | str) -> bool:
+        """Delete a file from backend storage.
+        
+        Args:
+            relative_path: Relative path to the file
+            
+        Returns:
+            True if deletion was successful
+        """
+        try:
+            path = self.resolve(relative_path)
+            if path.exists() and path.is_file():
+                path.unlink()
+                return True
+            return False
+            
+        except Exception as e:
+            _logger.error(f"Failed to delete file {relative_path}: {e}")
+            return False
+    
+    def delete_directory(self, relative_path: PurePosixPath | str, recursive: bool = False) -> bool:
+        """Delete a directory from backend storage.
+        
+        Args:
+            relative_path: Relative path to the directory
+            recursive: Whether to delete recursively
+            
+        Returns:
+            True if deletion was successful
+        """
+        import shutil
+        
+        try:
+            path = self.resolve(relative_path)
+            if not path.exists() or not path.is_dir():
+                return False
+            
+            if recursive:
+                shutil.rmtree(path)
+            else:
+                # Only delete if empty
+                path.rmdir()
+            
+            return True
+            
+        except Exception as e:
+            _logger.error(f"Failed to delete directory {relative_path}: {e}")
+            return False
 
 
 @dataclass

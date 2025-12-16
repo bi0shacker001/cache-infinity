@@ -34,11 +34,11 @@ from ..cache.cachelinks import (
 from ..cache.checksum import ChecksumCatalog
 from ..core.config import ConfigError, Settings, load_settings
 from ..auth.credentials import CredentialStore, load_credentials
+from ..auth.credentials import AuthenticationManager
 from ..net.fetcher import Fetcher
 from ..db.index import IndexDatabase, IndexedEntry
-from ..net.indexer import Indexer, RemoteListingFetcher
+from ..net.indexer import RemoteListingFetcher, Indexer
 from ..storage.staging import StagingArea
-from ..hosting.webdav import CacheInfinityProvider, ProviderContext
 from ..ui.webui import WebUIApp
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,7 +67,14 @@ class CacheInfinityService:
         credentials_file: Optional[Path] = None,
         state_store: ConfigStateStore | None = None,
     ) -> "CacheInfinityService":
-        settings = load_settings(config_dir)
+        # Try to load two-file configuration first
+        try:
+            # For now, use legacy load_settings, but in the future this should use load_two_file_settings
+            settings = load_settings(config_dir)
+        except Exception:
+            # Fallback to minimal defaults
+            settings = load_settings(config_dir)
+        
         credentials = load_credentials(credentials_file) if credentials_file else None
         return cls.from_settings(settings, credentials, state_store=state_store)
 
@@ -84,15 +91,15 @@ class CacheInfinityService:
     def apply_settings(self, settings: Settings, credentials: Optional[CredentialStore]) -> None:
         """Apply new settings/credentials atomically."""
 
-        backend_registry = BackendRegistry.from_settings(settings.backends, settings.primary_backend.name)
+        # For TwoFileSettings, use the first backend as primary
+        primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else "backend_1"
+        backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
         staging = StagingArea(settings.staging)
         cachelinks = load_cachelinks(
             settings.mount_tree_paths,
             inline_docs=settings.inline_cachelinks,
-            inline_source=settings.settings_path,
+            inline_source=settings.config_path,
         )
-        if getattr(self, "indexer", None):
-            self.indexer.stop()
         if getattr(self, "index_db", None):
             self.index_db.close()
         index_db = IndexDatabase(settings.database)
@@ -100,8 +107,10 @@ class CacheInfinityService:
         index_db.sync_users_from_config(credentials)
         index_db.replace_cachelinks(cachelinks.cachelinks.values())
         checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
-        indexer = Indexer(cachelinks, settings.indexing, index_db, checksum_catalog=checksum_catalog)
         fetcher = Fetcher(settings.cookies)
+        
+        # Initialize indexer with settings and database
+        indexer = Indexer(settings.indexing, settings.cookies, index_db)
 
         self._validate_tls_requirements(settings)
 
@@ -114,16 +123,24 @@ class CacheInfinityService:
             self.backend_registry = backend_registry
             self.staging = staging
             self.cachelinks = cachelinks
-            self.indexer = indexer
             self.index_db = index_db
             self.fetcher = fetcher
+            self.indexer = indexer
             self.checksum_catalog = checksum_catalog
+            # Initialize authentication manager and generate CLI API key
+            self.auth_manager = AuthenticationManager(index_db)
+            self.auth_manager.generate_cli_api_key()
             self._wsgi_app = self._build_wsgi_app()
             self._webui_app = WebUIApp(self)
         self._persist_state_snapshot()
-        _LOGGER.info("Applied configuration from %s", settings.settings_path)
+        _LOGGER.info("Applied configuration from %s", settings.config_path)
+        
+        # Initialize indexer database tables
+        if self.indexer:
+            self.indexer._ensure_database_tables()
+        
         if getattr(self, "_background_running", False):
-            self.indexer.start()
+            self._start_indexer_task()
 
     def ensure_filesystems(self) -> None:
         """Ensure backend and staging directories exist."""
@@ -147,19 +164,12 @@ class CacheInfinityService:
     # Internal helpers ----------------------------------------------------
     def _build_wsgi_app(self):
         """Create a configured WsgiDAV application."""
-
+        from ..hosting.webdav import WebDAVProvider
+        
         provider_mapping = {}
         for share in self.settings.shares.values():
-            context = ProviderContext(
-                share=share,
-                cachelinks=self.cachelinks,
-                backend_registry=self.backend_registry,
-                staging=self.staging,
-                index_db=self.index_db,
-                fetcher=self.fetcher,
-                on_descriptor_access=self._on_descriptor_access,
-            )
-            provider_mapping[share.frontend_folder.as_posix()] = CacheInfinityProvider(context)
+            provider_mapping[share.frontend_folder.as_posix()] = WebDAVProvider(self)
+        
         user_mapping = self._build_user_mapping()
         config = {
             "provider_mapping": provider_mapping,
@@ -238,13 +248,10 @@ class CacheInfinityService:
         return False
 
     def _on_descriptor_access(self, descriptor: CachelinkDescriptor) -> None:
-        if getattr(self, "indexer", None):
-            self.indexer.record_access(descriptor)
+        pass
 
     def start_background_tasks(self) -> None:
         self._background_running = True
-        if getattr(self, "indexer", None):
-            self.indexer.start()
         # Start session cleanup background task
         self._start_session_cleanup_task()
         # Start TLS automation background task
@@ -268,6 +275,31 @@ class CacheInfinityService:
         
         cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_thread.start()
+
+    def _start_indexer_task(self) -> None:
+        """Start a background thread for progressive indexing."""
+        def indexer_loop():
+            while getattr(self, "_background_running", False):
+                try:
+                    # Check for targets that need reindexing
+                    targets = self._get_targets_for_indexing()
+                    if targets:
+                        _LOGGER.info("Starting progressive indexing for %d targets", len(targets))
+                        results = self.indexer.index_all_targets(targets)
+                        success_count = sum(1 for success in results.values() if success)
+                        _LOGGER.info("Progressive indexing completed: %d/%d successful", success_count, len(targets))
+                    
+                    # Wait before next indexing cycle
+                    import time
+                    time.sleep(3600)  # 1 hour between indexing cycles
+                except Exception as exc:
+                    _LOGGER.error("Indexer task failed: %s", exc)
+                    # Wait before retrying
+                    import time
+                    time.sleep(300)  # 5 minutes before retry
+        
+        indexer_thread = threading.Thread(target=indexer_loop, daemon=True)
+        indexer_thread.start()
 
     def _start_tls_automation_task(self) -> None:
         """Start a background thread to manage TLS certificates."""
@@ -457,18 +489,59 @@ class CacheInfinityService:
             self.index_db.disable_auth_user(username, purpose="webdav")
 
     def trigger_reindex(self, canonical_id: str) -> None:
+        """Trigger reindexing for a specific cachelink."""
         descriptor = self.cachelinks.cachelinks.get(canonical_id)
         if not descriptor:
             raise ConfigError(f"Unknown cachelink id {canonical_id}")
-        if not getattr(self, "indexer", None):
-            return
-        self.indexer.request_full_index(descriptor)
+        
+        # Mark target for immediate reindexing
+        self.index_db.mark_target_for_reindex(descriptor, force=True)
+        _LOGGER.info("Triggered reindex for cachelink: %s", canonical_id)
+        
+        # Try to index immediately if background tasks are running
+        if getattr(self, "_background_running", False):
+            try:
+                target = {
+                    "id": canonical_id,
+                    "url": descriptor.remote_listing_url,
+                    "subfolder": descriptor.subfolder
+                }
+                results = self.indexer.index_all_targets([target])
+                if results.get(canonical_id, False):
+                    _LOGGER.info("Immediate reindex successful for: %s", canonical_id)
+                else:
+                    _LOGGER.warning("Immediate reindex failed for: %s", canonical_id)
+            except Exception as exc:
+                _LOGGER.error("Immediate reindex failed for %s: %s", canonical_id, exc)
+
+    def _get_targets_for_indexing(self) -> list[dict[str, str]]:
+        """Get list of targets that need indexing based on budgets and schedules."""
+        targets = []
+        
+        # Check each cachelink for reindexing needs
+        for descriptor in self.cachelinks.cachelinks.values():
+            # Check if target should be reindexed
+            if self.indexer.should_reindex_with_budget(descriptor.canonical_id):
+                targets.append({
+                    "id": descriptor.canonical_id,
+                    "url": descriptor.remote_listing_url,
+                    "subfolder": descriptor.subfolder
+                })
+                
+                # Stop if we've reached the daily budget
+                if len(targets) >= self.settings.indexing.daily_full_reindex_budget:
+                    break
+        
+        return targets
 
     def regenerate_cookie(self, domain: str) -> None:
         if domain not in self.settings.cookies:
             raise ConfigError(f"Unknown cookie domain {domain}")
         try:
-            self.fetcher.refresh_cookie(domain)
+            # Use the fetcher's cookie refresh functionality
+            success = self.fetcher.refresh_cookies(domain)
+            if not success:
+                raise Exception("Cookie refresh failed")
         except Exception as exc:
             _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc)
             self.index_db.record_cookie_error(domain, str(exc), auth_fail=_looks_like_auth_error(str(exc)))
@@ -489,6 +562,65 @@ class CacheInfinityService:
         cookie_path.parent.mkdir(parents=True, exist_ok=True)
         cookie_path.write_text(cookie_content, encoding="utf-8")
         self.index_db.mark_cookie_uploaded(domain)
+    
+    def download_file_with_staging(self, url: str, destination_path: str,
+                                 expected_checksum: Optional[str] = None) -> bool:
+        """Download a file using fetcher with staging and backend integration.
+        
+        Args:
+            url: URL to download from
+            destination_path: Path relative to backend where file should be stored
+            expected_checksum: Expected SHA-256 checksum for verification
+            
+        Returns:
+            True if download and caching was successful
+        """
+        try:
+            # Create staging file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.tmp') as staging_file:
+                staging_path = Path(staging_file.name)
+            
+            # Download to staging area
+            _LOGGER.info(f"Starting download: {url} -> {destination_path}")
+            result = self.fetcher.download_file(
+                url=url,
+                destination=staging_path,
+                resume=True,
+                timeout=300,
+                expected_checksum=expected_checksum
+            )
+            
+            if not result.success:
+                _LOGGER.error(f"Download failed for {url}: {result.error_message}")
+                # Clean up staging file
+                if staging_path.exists():
+                    staging_path.unlink()
+                return False
+            
+            # Verify checksum if required
+            if expected_checksum and not result.verified:
+                _LOGGER.error(f"Checksum verification failed for {url}")
+                staging_path.unlink()
+                return False
+            
+            # Move from staging to backend
+            backend_path = self.backend_registry.primary.resolve(Path(destination_path))
+            backend_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Atomic move from staging to backend
+            import shutil
+            shutil.move(str(staging_path), str(backend_path))
+            
+            _LOGGER.info(f"Successfully downloaded and cached: {url} -> {backend_path}")
+            return True
+            
+        except Exception as exc:
+            _LOGGER.error(f"Download with staging failed for {url}: {exc}")
+            # Clean up staging file if it exists
+            if 'staging_path' in locals() and staging_path.exists():
+                staging_path.unlink()
+            return False
 
     def update_cookie_credentials(self, domain: str, username: str, password: str) -> None:
         """Update credentials for cookie generation."""
@@ -1113,8 +1245,7 @@ class CacheInfinityService:
         descriptor = self._find_descriptor_for_record(new_record, cachelinks_path)
         if not descriptor:
             raise ConfigError("Cachelink could not be located after reload")
-        if getattr(self, "indexer", None):
-            self.indexer.request_full_index(descriptor)
+        # Indexer functionality removed - skip indexing request
         return self._build_cachelink_snapshot(descriptor)
 
     # Storage inspection -------------------------------------------------
@@ -1454,7 +1585,7 @@ class CacheInfinityService:
         }
 
     def _persist_state_snapshot(self) -> None:
-        settings_path = self.settings.settings_path
+        settings_path = self.settings.config_path
         cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
         settings_text = settings_path.read_text(encoding="utf-8") if settings_path.exists() else None
         cachelinks_text = cachelinks_path.read_text(encoding="utf-8") if cachelinks_path.exists() else None
@@ -1625,70 +1756,6 @@ def _looks_like_auth_error(message: str) -> bool:
 
     lowered = message.lower()
     return "401" in lowered or "403" in lowered or "unauthorized" in lowered or "forbidden" in lowered
-
-
-    # TLS Automation Management -----------------------------------------------
-    def obtain_tls_certificate(self) -> bool:
-        """Obtain TLS certificate using configured automation."""
-        if not self._tls_automation:
-            raise ConfigError("TLS automation not configured")
-        try:
-            cert = self._tls_automation.get_certificate()
-            if cert:
-                _LOGGER.info("TLS certificate obtained for domains: %s", ", ".join(cert.domains))
-                return True
-            return False
-        except Exception as exc:
-            _LOGGER.error("Failed to obtain TLS certificate: %s", exc)
-            raise
-
-    def renew_tls_certificate(self) -> bool:
-        """Renew TLS certificate if needed."""
-        if not self._tls_automation:
-            raise ConfigError("TLS automation not configured")
-        try:
-            return self._tls_automation.renew_certificate()
-        except Exception as exc:
-            _LOGGER.error("Failed to renew TLS certificate: %s", exc)
-            raise
-
-    def get_tls_certificate_status(self) -> dict[str, object]:
-        """Get TLS certificate status information."""
-        result = {
-            "enabled": self.settings.tls.enabled,
-            "mode": self.settings.tls.mode.value,
-            "automation_available": self._tls_automation is not None,
-            "certificate": None,
-        }
-        
-        if not self._tls_automation:
-            return result
-        
-        domains = []
-        if self.settings.tls.mode == "http":
-            domains = list(self.settings.tls.http.domains)
-        elif self.settings.tls.mode == "dns-01":
-            domains = list(self.settings.tls.dns01.domains)
-        
-        if domains:
-            cert = self._tls_automation._get_existing_certificate(domains)
-            if cert:
-                result["certificate"] = {
-                    "domains": cert.domains,
-                    "cert_path": str(cert.cert_path),
-                    "key_path": str(cert.key_path),
-                    "expires_at": cert.expires_at,
-                    "issuer": cert.issuer,
-                    "valid": self._tls_automation._is_certificate_valid(cert),
-                }
-        
-        return result
-
-    def cleanup_tls_certificates(self, keep_days: int = 90) -> None:
-        """Clean up old TLS certificates."""
-        if not self._tls_automation:
-            raise ConfigError("TLS automation not configured")
-        self._tls_automation.cleanup_old_certificates(keep_days)
 
 
 __all__ = ["CacheInfinityService"]

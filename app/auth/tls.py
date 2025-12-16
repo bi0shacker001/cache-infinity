@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings
+from ..core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings, TwoFileSettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class TLSAutomationError(Exception):
     pass
 
 
-class TLSService:
+class TLSAutomationService:
     """Handles TLS certificate management using Certbot."""
     
     def __init__(self, config_dir: Path, tls_settings: TLSSettings):
@@ -368,8 +368,27 @@ class TLSService:
             _LOGGER.warning("Failed to cleanup old certificates: %s", e)
 
 
-def create_tls_service(config_dir: Path, tls_settings: TLSSettings) -> Optional[TLSService]:
-    """Create TLS service if TLS automation is enabled."""
-    if tls_settings.enabled and tls_settings.mode in ("http", "dns-01"):
-        return TLSService(config_dir, tls_settings)
+class TLSService:
+    """Basic TLS service for certificate management."""
+    
+    def __init__(self, config_dir: Path, tls_settings: TLSSettings):
+        self.config_dir = config_dir
+        self.tls_settings = tls_settings
+        # TODO: Implement basic TLS service functionality
+    
+    def get_certificate_path(self) -> Optional[Path]:
+        """Get the path to the certificate file."""
+        # TODO: Implement certificate path retrieval
+        return None
+    
+    def get_key_path(self) -> Optional[Path]:
+        """Get the path to the private key file."""
+        # TODO: Implement key path retrieval
+        return None
+
+
+def create_tls_service(config_dir: Path, settings: TwoFileSettings) -> Optional[TLSAutomationService]:
+    """Create TLS service using consolidated settings."""
+    if settings.tls.enabled and settings.tls.mode in ("http", "dns-01"):
+        return TLSAutomationService(config_dir, settings.tls)
     return None

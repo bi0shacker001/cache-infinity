@@ -1,0 +1,11 @@
+# CacheInfinity Basic Configuration (config.yml)
+# This file contains ONLY database configuration with lower priority
+# All other configuration must be in bootstrap.yml
+
+# Database Configuration (ONLY)
+database:
+  engine: sqlite  # or postgres
+  # For PostgreSQL (uncomment and configure if using PostgreSQL):
+  # database_url: postgresql://username:password@localhost:5432/cacheinfinity
+  # db_user: username
+  # db_password: password

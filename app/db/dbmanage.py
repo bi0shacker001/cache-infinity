@@ -8,8 +8,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dataclasses import dataclass
+from pathlib import Path
+
 from .adapter import DBAdapter
-from .dbmanage import DatabaseSettings
+
+
+# TODO: Implement DatabaseSettings class
 
 _logger = logging.getLogger(__name__)
 

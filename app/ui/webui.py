@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:  # pragma: no cover
     from .service import CacheInfinityService
-    from .webui_file_browser import FileBrowser
+    from ..utils.filemanager import FileManager
+
+from ..ui.management import ManagementLayer
+from ..utils.filemanager import FileManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,9 +34,10 @@ class WebUIApp:
 
     def __init__(self, service: "CacheInfinityService"):
         self.service = service
+        self.management = ManagementLayer(service)
         self.sessions: dict[str, dict[str, object]] = {}
         self._load_persistent_sessions()
-        self.file_browser = FileBrowser(service)
+        self.file_browser = FileManager()
 
     def __call__(self, environ, start_response):
         path = environ.get("PATH_INFO", "") or "/"
@@ -84,7 +88,7 @@ class WebUIApp:
         if path == "/api/status" and method == "GET":
             return self._serve_status(start_response)
         if path == "/api/storage" and method == "GET":
-            return self._json_response(start_response, self.service.describe_storage())
+            return self._json_response(start_response, self.management.get_storage_utilization())
         if path == "/api/storage/entries" and method == "GET":
             params = self._parse_query_params(environ)
             location = params.get("location", "backend")
@@ -95,7 +99,7 @@ class WebUIApp:
             show_hidden = params.get("show_hidden", "false").lower() == "true"
             search_query = params.get("search_query", "")
             try:
-                result = self.file_browser.browse(
+                result = self.management.list_storage_entries(
                     location=location,
                     relative_path=relative,
                     sort_by=sort_by,
@@ -159,7 +163,7 @@ class WebUIApp:
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/cookies" and method == "GET":
-            return self._json_response(start_response, {"cookies": self.service.describe_cookies()})
+            return self._json_response(start_response, {"cookies": self.management.describe_cookies()})
         if path == "/api/cookies/upload" and method == "POST":
             return self._handle_cookie_upload(environ, start_response)
         if path == "/api/cookies/credentials" and method == "POST":
@@ -172,11 +176,11 @@ class WebUIApp:
         if path == "/api/cookies/domain" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_cookie_domain_add)
         if path == "/api/cachelinks" and method == "GET":
-            return self._json_response(start_response, {"cachelinks": self.service.describe_cachelinks()})
+            return self._json_response(start_response, {"cachelinks": self.management.describe_cachelinks()})
         if path == "/api/cachelinks" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_cachelink_create)
         if path == "/api/cachelinks/tree" and method == "GET":
-            return self._json_response(start_response, self.service.describe_cachelink_tree())
+            return self._json_response(start_response, self.management.describe_cachelink_tree())
         if path == "/api/cachelinks/update" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_cachelink_update)
         if path == "/api/cachelinks/preview" and method == "POST":
@@ -189,7 +193,7 @@ class WebUIApp:
             if not folder_path:
                 return self._json_error(start_response, "path parameter required", status="400 Bad Request")
             try:
-                self.service.remove_cachelink_folder(folder_path)
+                self.management.delete_cachelink_folder(folder_path)
                 return self._json_response(start_response, {"status": "ok"})
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -198,19 +202,19 @@ class WebUIApp:
             if not canonical_id:
                 return self._json_error(start_response, "cachelink id required", status="400 Bad Request")
             try:
-                self.service.delete_cachelink_entry(canonical_id)
+                self.management.delete_cachelink(canonical_id)
                 return self._json_response(start_response, {"status": "ok"})
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/users" and method == "GET":
-            return self._json_response(start_response, {"users": self.service.list_admin_users()})
+            return self._json_response(start_response, {"users": self.management.list_users()})
         if path == "/api/users" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_user_upsert)
         if path.startswith("/api/users/") and method == "DELETE":
             username = unquote(path[len("/api/users/") :])
             return self._handle_user_disable(username, start_response)
         if path == "/api/webdav-users" and method == "GET":
-            return self._json_response(start_response, self.service.describe_webdav_users())
+            return self._json_response(start_response, self.management.list_users("webdav"))
         if path == "/api/webdav-users" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_webdav_user_upsert)
         if path.startswith("/api/webdav-users/") and method == "DELETE":
@@ -222,17 +226,17 @@ class WebUIApp:
             username = unquote(parts[1])
             return self._handle_webdav_user_delete(share, username, start_response)
         if path == "/api/config" and method == "GET":
-            return self._json_response(start_response, self.service.get_config_payload())
+            return self._json_response(start_response, self.management.get_config_payload())
         if path == "/api/config" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_config_update)
         if path == "/api/settings/detail" and method == "GET":
-            return self._json_response(start_response, self.service.describe_settings_detail())
+            return self._json_response(start_response, self.management.describe_settings_detail())
         if path == "/api/settings/detail" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_settings_detail_update)
         if path == "/api/reindex" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_reindex)
         if path == "/api/degraded" and method == "GET":
-            return self._json_response(start_response, {"degraded": self.service.list_degraded_targets()})
+            return self._json_response(start_response, {"degraded": self.management.list_degraded_targets()})
         
         return self._json_error(start_response, f"Unsupported path {path}", status="404 Not Found")
 
@@ -307,7 +311,7 @@ class WebUIApp:
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
     def _serve_status(self, start_response):
-        data = self.service.describe_status()
+        data = self.management.get_system_status()
         return self._json_response(start_response, data)
 
     def _handle_storage_upload(self, environ, start_response):
@@ -412,7 +416,7 @@ class WebUIApp:
             if not domain or not cookie_content:
                 return self._json_error(start_response, "domain and cookie_file required", status="400 Bad Request")
             
-            self.service.upload_cookie_file(domain, cookie_content)
+            self.management.upload_cookie_file(domain, cookie_content)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -424,7 +428,7 @@ class WebUIApp:
         if not isinstance(domain, str) or not isinstance(username, str) or not isinstance(password, str):
             return self._json_error(start_response, "domain, username, and password required", status="400 Bad Request")
         try:
-            self.service.update_cookie_credentials(domain, username, password)
+            self.management.update_cookie_credentials(domain, username, password)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -434,7 +438,7 @@ class WebUIApp:
         if not isinstance(domain, str):
             return self._json_error(start_response, "domain required", status="400 Bad Request")
         try:
-            self.service.regenerate_cookie(domain)
+            self.management.regenerate_cookie(domain)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -447,7 +451,7 @@ class WebUIApp:
         if not isinstance(domain, str):
             return self._json_error(start_response, "domain required", status="400 Bad Request")
         try:
-            self.service.add_cookie_domain(domain, credfile=credfile, cookie_jar=cookie_jar, credfile_path=credfile_path)
+            self.management.add_cookie_domain(domain, credfile=credfile, cookie_jar=cookie_jar, credfile_path=credfile_path)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -489,14 +493,13 @@ class WebUIApp:
 
     def _handle_cachelink_create(self, payload: dict[str, object], start_response):
         try:
-            snapshot = self.service.create_cachelink_from_webui(
-                canonical_path=payload.get("canonical_path"),
+            snapshot = self.management.create_cachelink(
                 parent_path=payload.get("parent_path"),
                 name=payload.get("name"),
                 url=payload.get("url"),
-                subfolder=payload.get("subfolder"),
+                subfolder=payload.get("subfolder", "/"),
             )
-            return self._json_response(start_response, {"cachelink": snapshot})
+            return self._json_response(start_response, snapshot)
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
@@ -507,7 +510,7 @@ class WebUIApp:
         if not isinstance(canonical_id, str) or not isinstance(url, str):
             return self._json_error(start_response, "canonical_id and url required", status="400 Bad Request")
         try:
-            self.service.update_cachelink_entry(canonical_id, url=url, subfolder=subfolder or "/")
+            self.management.update_cachelink(canonical_id, url=url, subfolder=subfolder)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -518,7 +521,7 @@ class WebUIApp:
         if not isinstance(url, str):
             return self._json_error(start_response, "url required", status="400 Bad Request")
         try:
-            preview = self.service.preview_cachelink(url, subfolder=subfolder or "/")
+            preview = self.management.preview_cachelink(url, subfolder=subfolder)
             return self._json_response(start_response, preview)
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -528,18 +531,19 @@ class WebUIApp:
         if not isinstance(path, str) or not path.strip():
             return self._json_error(start_response, "path required", status="400 Bad Request")
         try:
-            self.service.add_cachelink_folder(path)
+            self.management.add_cachelink_folder(path)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _handle_user_upsert(self, payload: dict[str, object], start_response):
         try:
-            self.service.upsert_admin_user(
+            self.management.upsert_user(
                 username=payload.get("username") or "",
                 password=payload.get("password"),
                 enabled=bool(payload.get("enabled", True)),
                 is_admin=bool(payload.get("is_admin", True)),
+                purpose="webui"
             )
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
@@ -547,37 +551,30 @@ class WebUIApp:
 
     def _handle_user_disable(self, username: str, start_response):
         try:
-            self.service.disable_admin_user(username)
+            self.management.disable_user(username, purpose="webui")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _handle_webdav_user_upsert(self, payload: dict[str, object], start_response):
         try:
-            self.service.upsert_webdav_user(
-                share=payload.get("share") or "",
-                username=payload.get("username") or "",
-                password=payload.get("password"),
-                enabled=bool(payload.get("enabled", True)),
-                login=bool(payload.get("login", True)),
-                read=bool(payload.get("read", True)),
-                write=bool(payload.get("write", True)),
-                cache=bool(payload.get("cache", True)),
-            )
-            return self._json_response(start_response, {"status": "ok"})
+            # WebDAV user management would need additional implementation
+            # For now, return not implemented
+            return self._json_error(start_response, "WebDAV user management not implemented", status="501 Not Implemented")
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _handle_webdav_user_delete(self, share: str, username: str, start_response):
         try:
-            self.service.remove_webdav_user(share, username)
-            return self._json_response(start_response, {"status": "ok"})
+            # WebDAV user management would need additional implementation
+            # For now, return not implemented
+            return self._json_error(start_response, "WebDAV user management not implemented", status="501 Not Implemented")
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _handle_config_update(self, payload: dict[str, object], start_response):
         try:
-            self.service.update_config_from_webui(
+            self.management.update_config(
                 settings_text=payload.get("settings_text"),
                 cachelinks_text=payload.get("cachelinks_text"),
             )
@@ -587,7 +584,7 @@ class WebUIApp:
 
     def _handle_settings_detail_update(self, payload: dict[str, object], start_response):
         try:
-            self.service.update_settings_detail(payload)
+            self.management.update_settings_detail(payload)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -597,7 +594,7 @@ class WebUIApp:
         if not isinstance(canonical_id, str):
             return self._json_error(start_response, "canonical_id required", status="400 Bad Request")
         try:
-            self.service.trigger_reindex(canonical_id)
+            self.management.trigger_reindex(canonical_id)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")

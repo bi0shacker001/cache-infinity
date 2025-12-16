@@ -3,43 +3,131 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
-
-from .sqlite import SQLiteBackend
+import threading
+from typing import Any, Optional, Iterable
 
 _logger = logging.getLogger(__name__)
 
 
-class PostgreSQLBackend(SQLiteBackend):
+class PostgreSQLBackend:
     """PostgreSQL backend implementation.
     
-    This class extends SQLiteBackend to provide PostgreSQL-specific functionality.
-    Most operations are handled by the parent class, but PostgreSQL-specific
-    optimizations and features can be added here.
+    This class handles all PostgreSQL-specific database operations.
+    It provides a clean interface for the database adapter to use.
     """
     
     def __init__(self, dsn: str):
         """Initialize PostgreSQL backend with connection string.
         
         Args:
-            dsn: PostgreSQL connection string
+            dsn: PostgreSQL connection string (Data Source Name)
         """
-        super().__init__(None)  # Don't initialize SQLite connection
         self._dsn = dsn
         self._conn = None
+        self._lock = threading.RLock()
         
     def connect(self):
         """Establish PostgreSQL connection."""
+        if not self._dsn:
+            raise ValueError("PostgreSQL DSN is required")
+            
         try:
             import psycopg
-            self._conn = psycopg.connect(self._dsn)
-            self._conn.autocommit = False
-            _logger.info("Connected to PostgreSQL database")
         except ImportError as exc:
             raise ImportError("psycopg package is required for PostgreSQL support") from exc
             
+        self._conn = psycopg.connect(self._dsn)
+        self._conn.autocommit = False
+        _logger.info("Connected to PostgreSQL database")
+        
     def close(self):
         """Close PostgreSQL connection."""
         if self._conn:
             self._conn.close()
             self._conn = None
+            
+    def execute(self, sql: str, params: tuple = ()):
+        """Execute a SQL statement.
+        
+        Args:
+            sql: SQL statement to execute
+            params: Parameters for the SQL statement
+            
+        Returns:
+            Cursor object
+        """
+        if not self._conn:
+            raise RuntimeError("Database connection not established")
+            
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params)
+        return cursor
+        
+    def executemany(self, sql: str, params_list: list[tuple]):
+        """Execute a SQL statement with multiple parameter sets.
+        
+        Args:
+            sql: SQL statement to execute
+            params_list: List of parameter tuples
+        """
+        if not self._conn:
+            raise RuntimeError("Database connection not established")
+            
+        cursor = self._conn.cursor()
+        cursor.executemany(sql, params_list)
+        cursor.close()
+        
+    def fetchone(self, sql: str, params: tuple = ()):
+        """Execute a query and return a single row.
+        
+        Args:
+            sql: SQL query to execute
+            params: Parameters for the SQL query
+            
+        Returns:
+            Single row as a dict, or None if no rows
+        """
+        cursor = self.execute(sql, params)
+        row = cursor.fetchone()
+        description = cursor.description
+        cursor.close()
+        if row is None:
+            return None
+        
+        # Convert to dict using column names
+        columns = [col.name for col in description]
+        return {col: value for col, value in zip(columns, row)}
+        
+    def fetchall(self, sql: str, params: tuple = ()):
+        """Execute a query and return all rows.
+        
+        Args:
+            sql: SQL query to execute
+            params: Parameters for the SQL query
+            
+        Returns:
+            List of rows as dicts
+        """
+        cursor = self.execute(sql, params)
+        rows = cursor.fetchall()
+        description = cursor.description
+        cursor.close()
+        
+        # Convert to list of dicts using column names
+        columns = [col.name for col in description]
+        return [{col: value for col, value in zip(columns, row)} for row in rows]
+        
+    def commit(self):
+        """Commit the current transaction."""
+        if self._conn:
+            self._conn.commit()
+            
+    def rollback(self):
+        """Rollback the current transaction."""
+        if self._conn:
+            self._conn.rollback()
+            
+    @property
+    def dsn(self) -> str:
+        """Get the PostgreSQL connection string."""
+        return self._dsn
