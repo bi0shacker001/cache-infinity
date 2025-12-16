@@ -16,19 +16,315 @@ from typing import Any, Dict, Optional, Sequence
 import yaml
 from wsgidav.dav_provider import DAVProvider
 
-from ..storage.backend import BackendDefinition
-from ..cache.cachelinks import CachelinkIndex, load_cachelinks
-from ..auth.credentials import CredentialStore, load_credentials, CookieJarDefinition
-from ..storage.staging import StagingDefinition
+from storage.backend import BackendDefinition
+from cache.cachelinks import CachelinkIndex, load_cachelinks
+from auth.credentials import CredentialStore, load_credentials, CookieJarDefinition
+from storage.staging import StagingDefinition
 
 _LOGGER = logging.getLogger(__name__)
 
 _CONFIG_ENV = "CACHEINFINITY_CONFIG_DIR"
-_DEFAULT_CONFIG_DIR = "/config"
-_DEFAULT_CREDENTIALS_RELATIVE = "credentials/users.yaml"
 
 
 from .errors import ConfigError
+
+
+class ConfigMigrationError(Exception):
+    """Raised when configuration migration fails."""
+    pass
+
+
+class ConfigMigration:
+    """Handles migration of configuration from files to database."""
+    
+    def __init__(self, config_dir: Path, index_db):
+        """Initialize configuration migration.
+        
+        Args:
+            config_dir: Path to the configuration directory
+            index_db: IndexDatabase instance
+        """
+        self.config_dir = config_dir
+        self.index_db = index_db
+        self._logger = logging.getLogger(__name__)
+    
+    def needs_migration(self) -> bool:
+        """Check if migration is needed (database is empty)."""
+        try:
+            # Check if any configuration tables have data
+            tables = [
+                "config_backends",
+                "config_staging",
+                "config_limits",
+                "config_indexing",
+                "config_cookies",
+                "config_shares",
+                "config_auth",
+                "config_tls",
+                "config_users",
+                "config_cachelinks"
+            ]
+            
+            for table in tables:
+                row = self.index_db._db.fetchone(f"SELECT 1 FROM {table} LIMIT 1")
+                if row:
+                    return False  # Database has data, no migration needed
+            
+            return True  # Database is empty, migration needed
+        except Exception as exc:
+            self._logger.error("Failed to check migration status: %s", exc)
+            return False
+    
+    def migrate_from_bootstrap(self, bootstrap_path: Path) -> bool:
+        """Migrate configuration from bootstrap.yml to database.
+        
+        Args:
+            bootstrap_path: Path to bootstrap.yml file
+            
+        Returns:
+            True if migration was successful
+            
+        Raises:
+            ConfigMigrationError: If migration fails
+        """
+        if not bootstrap_path.exists():
+            self._logger.info("No bootstrap.yml file found, skipping migration")
+            return True
+        
+        try:
+            # Load and validate bootstrap configuration
+            with bootstrap_path.open("r", encoding="utf-8") as f:
+                bootstrap_data = yaml.safe_load(f) or {}
+            
+            # Check for forbidden database configuration
+            if "database" in bootstrap_data:
+                raise ConfigMigrationError(
+                    "bootstrap.yml must not contain database configuration. "
+                    "Database settings should be in config.yml only."
+                )
+            
+            # Migrate configuration to database
+            self._migrate_configuration(bootstrap_data)
+            
+            # Save snapshot to database
+            self._save_snapshot(bootstrap_data, bootstrap_path)
+            
+            self._logger.info("Configuration migrated from bootstrap.yml to database")
+            return True
+            
+        except Exception as exc:
+            self._logger.error("Failed to migrate from bootstrap.yml: %s", exc)
+            raise ConfigMigrationError(f"Migration failed: {exc}")
+    
+    def _migrate_configuration(self, bootstrap_data: dict) -> None:
+        """Migrate all configuration sections to database."""
+        
+        # Migrate backends
+        paths = bootstrap_data.get("paths", {})
+        for name, backend_raw in paths.items():
+            if name.startswith("backend_"):
+                backend = self._parse_backend_for_migration(name, backend_raw)
+                self.index_db.save_backend(backend)
+        
+        # Migrate staging
+        staging_raw = paths.get("staging", {})
+        if staging_raw:
+            staging = {
+                "staging_mounted": bool(staging_raw.get("staging_mounted", False)),
+                "staging_mount_root": str(staging_raw.get("staging_mount_root")) if staging_raw.get("staging_mount_root") else None,
+                "size_gb": int(staging_raw.get("size_gb", 50))
+            }
+            self.index_db.save_staging(staging)
+        
+        # Migrate limits
+        limits_raw = bootstrap_data.get("limits", {})
+        if limits_raw:
+            limits = {
+                "max_zip_total_gb": int(limits_raw.get("max_zip_total_gb", 100)),
+                "one_zip_cache_at_a_time": bool(limits_raw.get("one_zip_cache_at_a_time", False))
+            }
+            self.index_db.save_limits(limits)
+        
+        # Migrate indexing
+        indexing_raw = bootstrap_data.get("indexing", {})
+        if indexing_raw:
+            score_weights = indexing_raw.get("score_weights", {})
+            indexing = {
+                "min_full_reindex_days": int(indexing_raw.get("min_full_reindex_days", 30)),
+                "max_full_reindex_days": int(indexing_raw.get("max_full_reindex_days", 90)),
+                "hot_window_days": int(indexing_raw.get("hot_window_days", 7)),
+                "hot_radius": int(indexing_raw.get("hot_radius", 10)),
+                "daily_full_reindex_budget": int(indexing_raw.get("daily_full_reindex_budget", 5)),
+                "daily_cheap_check_budget": int(indexing_raw.get("daily_cheap_check_budget", 10)),
+                "max_full_reindex_per_14d": int(indexing_raw.get("max_full_reindex_per_14d", 10)),
+                "max_cheap_checks_per_day": int(indexing_raw.get("max_cheap_checks_per_day", 50)),
+                "allow_early_full_on_change": bool(indexing_raw.get("allow_early_full_on_change", True)),
+                "early_full_requires_hot": bool(indexing_raw.get("early_full_requires_hot", True)),
+                "score_weights": json.dumps(score_weights) if score_weights else None
+            }
+            self.index_db.save_indexing(indexing)
+        
+        # Migrate cookies
+        cookies_raw = bootstrap_data.get("cookies", {})
+        for domain, cookie_raw in cookies_raw.items():
+            # Cookie jar content should be stored as string directly
+            cookie_content = ""
+            if cookie_raw.get("cookie_jar"):
+                # If cookie_jar is a path, read the content
+                cookie_jar_value = cookie_raw["cookie_jar"]
+                if isinstance(cookie_jar_value, str):
+                    # Check if it looks like a file path (contains / or .txt)
+                    if "/" in cookie_jar_value or cookie_jar_value.endswith(".txt"):
+                        # Try to read from file
+                        cookie_path = Path(cookie_jar_value)
+                        if not cookie_path.is_absolute():
+                            cookie_path = self.config_dir / cookie_path
+                        if cookie_path.exists():
+                            cookie_content = cookie_path.read_text(encoding="utf-8")
+                    else:
+                        # Treat as direct cookie content string
+                        cookie_content = cookie_jar_value
+            
+            cookie = {
+                "domain": domain.lower(),
+                "cookie_content": cookie_content,
+                "credfile_path": str(cookie_raw.get("credfile")) if cookie_raw.get("credfile") else None
+            }
+            self.index_db.save_cookie(cookie)
+        
+        # Migrate shares
+        webdav_raw = bootstrap_data.get("webdav", {})
+        for name, share_raw in webdav_raw.items():
+            users_config = json.dumps(share_raw.get("users", {}))
+            share = {
+                "name": name,
+                "backend_folder": str(share_raw.get("backend_folder", "")),
+                "frontend_folder": str(share_raw.get("frontend_folder", "")),
+                "writable": bool(share_raw.get("writable", True)),
+                "cachelink_overlay": bool(share_raw.get("cachelink_overlay", True)),
+                "users_config": users_config
+            }
+            self.index_db.save_share(share)
+        
+        # Migrate auth
+        auth_raw = bootstrap_data.get("auth", {})
+        auth = {
+            "oidc_config": json.dumps(auth_raw.get("oidc", {})),
+            "ldap_config": json.dumps(auth_raw.get("ldap", {})),
+            "proxy_config": json.dumps(auth_raw.get("proxy_header", {}))
+        }
+        self.index_db.save_auth(auth)
+        
+        # Migrate TLS
+        tls_raw = bootstrap_data.get("tls", {})
+        tls = {
+            "enabled": bool(tls_raw.get("enabled", False)),
+            "mode": tls_raw.get("mode", "manual"),
+            "manual_config": json.dumps(tls_raw.get("manual", {})),
+            "http_config": json.dumps(tls_raw.get("http", {})),
+            "dns01_config": json.dumps(tls_raw.get("dns01", {}))
+        }
+        self.index_db.save_tls(tls)
+        
+        # Migrate users
+        users_raw = bootstrap_data.get("users", {})
+        for username, user_raw in users_raw.items():
+            user = {
+                "username": username,
+                "password_plain": user_raw.get("password_plain"),
+                "password_hash": user_raw.get("password_hash"),
+                "enabled": bool(user_raw.get("enabled", True)),
+                "is_admin": bool(user_raw.get("is_admin", False)),
+                "purpose": user_raw.get("purpose", "webui")
+            }
+            self.index_db.save_user(user)
+        
+        # Migrate cachelinks
+        cachelinks_raw = bootstrap_data.get("cachelinks", {})
+        cachelinks = self._parse_cachelinks_for_migration(cachelinks_raw, bootstrap_path)
+        if cachelinks:
+            self.index_db.save_cachelinks(cachelinks)
+    
+    def _parse_backend_for_migration(self, name: str, backend_raw: dict) -> dict:
+        """Parse backend configuration for migration."""
+        return {
+            "name": name,
+            "backend_mounted": bool(backend_raw.get("backend_mounted", False)),
+            "backend_cache_root": str(backend_raw.get("backend_cache_root", "")),
+            "backend_mount_root": str(backend_raw.get("backend_mount_root")) if backend_raw.get("backend_mount_root") else None
+        }
+    
+    def _parse_cachelinks_for_migration(self, cachelinks_raw: dict, bootstrap_path: Optional[Path] = None) -> list[dict]:
+        """Parse cachelink configuration for migration."""
+        cachelinks = []
+        
+        def _parse_node(node: dict, path_segments: list[str], source_file: str):
+            for key, value in node.items():
+                current_path = path_segments + [key]
+                
+                if isinstance(value, dict) and "url" in value:
+                    # This is a cachelink leaf
+                    cachelinks.append({
+                        "canonical_id": "/".join(current_path),
+                        "backend_path": "/".join(current_path[:-1]),  # Parent path
+                        "url": value.get("url", ""),
+                        "subfolder": value.get("subfolder", "/"),
+                        "mode": value.get("mode", "directory"),
+                        "source_file": source_file
+                    })
+                elif isinstance(value, dict):
+                    # This is a folder, recurse
+                    _parse_node(value, current_path, source_file)
+        
+        source_file = str(bootstrap_path) if bootstrap_path else str(self.config_dir / "bootstrap.yml")
+        _parse_node(cachelinks_raw, [], source_file)
+        return cachelinks
+    
+    def _save_snapshot(self, bootstrap_data: dict, bootstrap_path: Optional[Path] = None) -> None:
+        """Save configuration snapshot to database."""
+        # Load config.yml for settings snapshot
+        config_path = self.config_dir / "config.yml"
+        settings_text = ""
+        if config_path.exists():
+            settings_text = config_path.read_text(encoding="utf-8")
+        
+        # Convert bootstrap data to YAML string
+        bootstrap_text = yaml.safe_dump(bootstrap_data, default_flow_style=False, indent=2)
+        
+        # Save to database
+        self.index_db.save_full_settings_snapshot(settings_text, bootstrap_text)
+    
+    def validate_bootstrap_file(self, bootstrap_path: Path) -> list[str]:
+        """Validate bootstrap.yml file for migration.
+        
+        Args:
+            bootstrap_path: Path to bootstrap.yml file
+            
+        Returns:
+            List of validation errors (empty if valid)
+        """
+        errors = []
+        
+        if not bootstrap_path.exists():
+            return errors
+        
+        try:
+            with bootstrap_path.open("r", encoding="utf-8") as f:
+                bootstrap_data = yaml.safe_load(f) or {}
+            
+            # Check for forbidden database configuration
+            if "database" in bootstrap_data:
+                errors.append("bootstrap.yml must not contain database configuration")
+            
+            # Validate other sections if present
+            # (Add more validation as needed)
+            
+        except yaml.YAMLError as exc:
+            errors.append(f"Invalid YAML in bootstrap.yml: {exc}")
+        except Exception as exc:
+            errors.append(f"Error reading bootstrap.yml: {exc}")
+        
+        return errors
 
 
 @dataclass
@@ -500,16 +796,18 @@ def validate_settings(settings: TwoFileSettings) -> list[str]:
     return errors
 
 
-def load_two_file_settings(config_dir: Path, args, env) -> TwoFileSettings:
+def load_two_file_settings(config_dir: Path, args, env, bootstrap_path: Optional[Path] = None) -> TwoFileSettings:
     """Load complete settings with two-file structure and priority chain."""
     # Load and validate config.yml (database only)
     config_path = config_dir / 'config.yml'
     basic_config = validate_config_yml(config_path)
     
-    # Load and validate bootstrap.yml if --bootstrap flag is provided
-    bootstrap_path = config_dir / 'bootstrap.yml'
+    # Load and validate bootstrap.yml if bootstrap file is provided
     bootstrap_config = {}
-    if hasattr(args, 'bootstrap') and args.bootstrap:
+    if bootstrap_path is not None:
+        bootstrap_config = validate_bootstrap_yml(bootstrap_path)
+    elif hasattr(args, 'bootstrap') and args.bootstrap:
+        bootstrap_path = config_dir / 'bootstrap.yml'
         bootstrap_config = validate_bootstrap_yml(bootstrap_path)
     
     # Merge configurations with priority: bootstrap > config > env > args
@@ -562,6 +860,309 @@ def load_two_file_settings(config_dir: Path, args, env) -> TwoFileSettings:
         mount_tree_paths=mount_tree_paths,
         bootstrap_config=bootstrap_settings
     )
+
+
+def load_database_backed_settings(config_dir: Path, args, env, bootstrap_path: Optional[Path] = None) -> TwoFileSettings:
+    """Load settings with database-backed configuration and migration support.
+    
+    This function implements the new configuration flow:
+    1. Load database settings from config.yml
+    2. Check if migration is needed (empty database)
+    3. If migration needed or bootstrap file provided, migrate from bootstrap file
+    4. Load all configuration from database
+    
+    Args:
+        config_dir: Path to configuration directory
+        args: Command line arguments
+        env: Environment variables
+        bootstrap_path: Optional path to bootstrap file (defaults to bootstrap.yml in config_dir)
+        
+    Returns:
+        TwoFileSettings loaded from database
+        
+    Raises:
+        ConfigError: If configuration loading fails
+    """
+    try:
+        # Load database settings first (from config.yml)
+        database_settings = load_database_settings(config_dir, args, env)
+        
+        # Initialize database
+        from db.index import IndexDatabase
+        index_db = IndexDatabase(database_settings)
+        
+        # Initialize migration system
+        migration = ConfigMigration(config_dir, index_db)
+        
+        # Check if migration is needed or bootstrap file is provided
+        needs_migration = migration.needs_migration()
+        bootstrap_requested = bootstrap_path is not None
+        
+        if needs_migration or bootstrap_requested:
+            # Use provided bootstrap path or default to bootstrap.yml in config_dir
+            if bootstrap_path is None:
+                bootstrap_path = config_dir / 'bootstrap.yml'
+            
+            # Validate bootstrap file if it exists
+            if bootstrap_path.exists():
+                validation_errors = migration.validate_bootstrap_file(bootstrap_path)
+                if validation_errors:
+                    index_db.close()
+                    raise ConfigError(f"Bootstrap file validation failed: {'; '.join(validation_errors)}")
+            
+            # Perform migration
+            migration.migrate_from_bootstrap(bootstrap_path)
+        
+        # Load configuration from database
+        settings = _load_settings_from_database(config_dir, database_settings, index_db)
+        
+        # Close database connection (settings are now self-contained)
+        index_db.close()
+        
+        return settings
+        
+    except Exception as exc:
+        _LOGGER.error("Failed to load database-backed settings: %s", exc)
+        raise ConfigError(f"Configuration loading failed: {exc}")
+
+
+def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSettings, index_db) -> TwoFileSettings:
+    """Load settings from database configuration.
+    
+    Args:
+        config_dir: Path to configuration directory
+        database_settings: Database configuration
+        index_db: IndexDatabase instance
+        
+    Returns:
+        TwoFileSettings populated from database
+    """
+    # Load backends from database
+    backends = {}
+    backend_data = index_db.get_all_backends()
+    for backend_raw in backend_data:
+        backend = BackendDefinition(
+            name=backend_raw["name"],
+            backend_mounted=backend_raw["backend_mounted"],
+            backend_cache_root=Path(backend_raw["backend_cache_root"]),
+            backend_mount_root=Path(backend_raw["backend_mount_root"]) if backend_raw["backend_mount_root"] else None
+        )
+        backends[backend.name] = backend
+    
+    # Load staging from database
+    staging_raw = index_db.get_staging()
+    if staging_raw:
+        staging = StagingDefinition(
+            staging_mounted=staging_raw["staging_mounted"],
+            staging_mount_root=Path(staging_raw["staging_mount_root"]) if staging_raw["staging_mount_root"] else None,
+            size_gb=staging_raw["size_gb"]
+        )
+    else:
+        staging = StagingDefinition(
+            staging_mounted=False,
+            staging_mount_root=None,
+            size_gb=50
+        )
+    
+    # Load limits from database
+    limits_raw = index_db.get_limits()
+    if limits_raw:
+        limits = LimitsDefinition(
+            max_zip_total_gb=limits_raw["max_zip_total_gb"],
+            one_zip_cache_at_a_time=limits_raw["one_zip_cache_at_a_time"]
+        )
+    else:
+        limits = LimitsDefinition(
+            max_zip_total_gb=100,
+            one_zip_cache_at_a_time=False
+        )
+    
+    # Load indexing from database
+    indexing_raw = index_db.get_indexing()
+    if indexing_raw:
+        score_weights = json.loads(indexing_raw["score_weights"]) if indexing_raw["score_weights"] else None
+        indexing = IndexingSettings(
+            min_full_reindex_days=indexing_raw["min_full_reindex_days"],
+            max_full_reindex_days=indexing_raw["max_full_reindex_days"],
+            hot_window_days=indexing_raw["hot_window_days"],
+            hot_radius=indexing_raw["hot_radius"],
+            daily_full_reindex_budget=indexing_raw["daily_full_reindex_budget"],
+            daily_cheap_check_budget=indexing_raw["daily_cheap_check_budget"],
+            max_full_reindex_per_14d=indexing_raw["max_full_reindex_per_14d"],
+            max_cheap_checks_per_day=indexing_raw["max_cheap_checks_per_day"],
+            allow_early_full_on_change=indexing_raw["allow_early_full_on_change"],
+            early_full_requires_hot=indexing_raw["early_full_requires_hot"],
+            score_weights=score_weights
+        )
+    else:
+        indexing = IndexingSettings()
+    
+    # Load cookies from database
+    cookies = {}
+    cookie_data = index_db.get_all_cookies()
+    for cookie_raw in cookie_data:
+        # Write cookie content to file for backward compatibility
+        cookie_jar_path = config_dir / "cookies" / f"{cookie_raw['domain'].replace('.', '_')}.txt"
+        cookie_jar_path.parent.mkdir(parents=True, exist_ok=True)
+        cookie_jar_path.write_text(cookie_raw["cookie_content"], encoding="utf-8")
+        
+        cookies[cookie_raw["domain"]] = CookieJarDefinition(
+            domain=cookie_raw["domain"],
+            cookie_jar=cookie_jar_path,
+            credfile=Path(cookie_raw["credfile_path"]) if cookie_raw["credfile_path"] else None
+        )
+    
+    # Load shares from database
+    shares = {}
+    share_data = index_db.get_all_shares()
+    for share_raw in share_data:
+        users_raw = json.loads(share_raw["users_config"])
+        users = {}
+        for username, user_raw in users_raw.items():
+            users[username] = ShareUserPolicy(
+                login=bool(user_raw.get("login", True)),
+                read=bool(user_raw.get("read", True)),
+                write=bool(user_raw.get("write", False)),
+                cache=bool(user_raw.get("cache", True))
+            )
+        
+        share = ShareDefinition(
+            name=share_raw["name"],
+            backend_folder=Path(share_raw["backend_folder"]),
+            frontend_folder=Path(share_raw["frontend_folder"]),
+            users=users,
+            writable=share_raw["writable"],
+            cachelink_overlay=share_raw["cachelink_overlay"]
+        )
+        shares[share.name] = share
+    
+    # Load auth from database
+    auth_raw = index_db.get_auth()
+    if auth_raw:
+        oidc_raw = json.loads(auth_raw["oidc_config"]) if auth_raw["oidc_config"] else {}
+        ldap_raw = json.loads(auth_raw["ldap_config"]) if auth_raw["ldap_config"] else {}
+        proxy_raw = json.loads(auth_raw["proxy_config"]) if auth_raw["proxy_config"] else {}
+        
+        auth = AuthSettings(
+            oidc=OIDCSettings(
+                enabled=bool(oidc_raw.get("enabled", False)),
+                issuer=oidc_raw.get("issuer"),
+                client_id=oidc_raw.get("client_id"),
+                client_secret=oidc_raw.get("client_secret"),
+                redirect_uri=oidc_raw.get("redirect_uri"),
+                scopes=oidc_raw.get("scopes", ["openid", "profile", "email"]),
+                allow_insecure_http=bool(oidc_raw.get("allow_insecure_http", False))
+            ),
+            ldap=LDAPSettings(
+                enabled=bool(ldap_raw.get("enabled", False)),
+                uri=ldap_raw.get("uri"),
+                bind_dn=ldap_raw.get("bind_dn"),
+                bind_password=ldap_raw.get("bind_password"),
+                user_base_dn=ldap_raw.get("user_base_dn"),
+                user_filter=ldap_raw.get("user_filter"),
+                start_tls=bool(ldap_raw.get("start_tls", False)),
+                ca_cert=Path(ldap_raw["ca_cert"]) if ldap_raw.get("ca_cert") else None
+            ),
+            proxy_header=ProxyAuthSettings(
+                enabled=bool(proxy_raw.get("enabled", False)),
+                header_name=proxy_raw.get("header_name", "X-Forwarded-User"),
+                auto_create=bool(proxy_raw.get("auto_create", False))
+            )
+        )
+    else:
+        auth = AuthSettings()
+    
+    # Load TLS from database
+    tls_raw = index_db.get_tls()
+    if tls_raw:
+        manual_raw = json.loads(tls_raw["manual_config"]) if tls_raw["manual_config"] else {}
+        http_raw = json.loads(tls_raw["http_config"]) if tls_raw["http_config"] else {}
+        dns01_raw = json.loads(tls_raw["dns01_config"]) if tls_raw["dns01_config"] else {}
+        
+        tls = TLSSettings(
+            enabled=tls_raw["enabled"],
+            mode=tls_raw["mode"],
+            manual=TLSManualSettings(
+                cert_path=Path(manual_raw["cert_path"]) if manual_raw.get("cert_path") else None,
+                key_path=Path(manual_raw["key_path"]) if manual_raw.get("key_path") else None
+            ),
+            http=TLSHTTPSettings(
+                email=http_raw.get("email"),
+                domains=http_raw.get("domains", []),
+                challenge=http_raw.get("challenge", "http-01"),
+                webroot_path=Path(http_raw["webroot_path"]) if http_raw.get("webroot_path") else None,
+                staging=bool(http_raw.get("staging", False))
+            ),
+            dns01=TLSDNS01Settings(
+                email=dns01_raw.get("email"),
+                domains=dns01_raw.get("domains", []),
+                provider=dns01_raw.get("provider"),
+                credentials_ini=Path(dns01_raw["credentials_ini"]) if dns01_raw.get("credentials_ini") else None,
+                staging=bool(dns01_raw.get("staging", False)),
+                propagation_seconds=int(dns01_raw.get("propagation_seconds", 60))
+            )
+        )
+    else:
+        tls = TLSSettings()
+    
+    # Load cachelinks from database
+    mount_tree_paths = []
+    inline_cachelinks = {}
+    cachelinks_data = index_db.get_cachelinks()
+    if cachelinks_data:
+        # Create a temporary cachelinks.yaml file for backward compatibility
+        cachelinks_path = config_dir / "cachelinks.yaml"
+        cachelinks_content = _build_cachelinks_yaml(cachelinks_data)
+        cachelinks_path.write_text(cachelinks_content, encoding="utf-8")
+        mount_tree_paths.append(cachelinks_path)
+    
+    # Create bootstrap settings object
+    bootstrap_settings = BootstrapSettings(
+        users={},
+        cachelinks=[],
+        settings={}
+    )
+    
+    return TwoFileSettings(
+        config_dir=config_dir,
+        config_path=config_dir / "config.yml",
+        bootstrap_path=None,
+        database=database_settings,
+        auth=auth,
+        tls=tls,
+        indexing=indexing,
+        limits=limits,
+        backends=backends,
+        staging=staging,
+        cookies=cookies,
+        shares=shares,
+        inline_cachelinks=inline_cachelinks,
+        mount_tree_paths=mount_tree_paths,
+        bootstrap_config=bootstrap_settings
+    )
+
+
+def _build_cachelinks_yaml(cachelinks_data: list[dict]) -> str:
+    """Build cachelinks.yaml content from database data."""
+    cachelinks_dict = {}
+    
+    for cachelink in cachelinks_data:
+        path_segments = cachelink["backend_path"].split("/")
+        current = cachelinks_dict
+        
+        # Navigate to the parent folder
+        for segment in path_segments:
+            if segment not in current:
+                current[segment] = {}
+            current = current[segment]
+        
+        # Add the cachelink leaf
+        current[cachelink["canonical_id"]] = {
+            "url": cachelink["url"],
+            "subfolder": cachelink["subfolder"]
+        }
+    
+    return yaml.safe_dump({"cachelinks": cachelinks_dict}, default_flow_style=False, indent=2)
 
 
 
@@ -1416,6 +2017,7 @@ class ConfigPersistence:
 
 __all__ = [
     "ConfigError",
+    "ConfigMigrationError",
     "LimitsDefinition",
     "ShareUserPolicy",
     "ShareDefinition",
@@ -1429,6 +2031,7 @@ __all__ = [
     "TLSSettings",
     "IndexingSettings",
     "load_two_file_settings",
+    "load_database_backed_settings",
     "validate_settings",
     "DatabaseSettings",
     "BootstrapSettings",
@@ -1436,4 +2039,5 @@ __all__ = [
     "ConfigPersistence",
     "ConfigBackup",
     "ConfigPersistenceError",
+    "ConfigMigration",
 ]

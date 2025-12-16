@@ -9,10 +9,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 
-from ..cache.cachelinks import CachelinkDescriptor
-from ..core.errors import ConfigError
-from .adapter import DBAdapter
-from ..auth.credentials import CredentialStore
+from cache.cachelinks import CachelinkDescriptor
+from core.errors import ConfigError
+from db.adapter import DBAdapter
+from auth.credentials import CredentialStore
 
 
 @dataclass
@@ -74,6 +74,7 @@ class IndexDatabase:
     # Schema -----------------------------------------------------------------
     def _init_schema(self) -> None:
         with self._lock:
+            # Existing tables
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS indexing_targets (
@@ -88,6 +89,168 @@ class IndexDatabase:
                     needs_full_reindex INTEGER DEFAULT 1,
                     last_error TEXT,
                     last_error_at TEXT
+                )
+                """
+            )
+            
+            # Configuration tables
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_backends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    backend_mounted BOOLEAN NOT NULL,
+                    backend_cache_root TEXT NOT NULL,
+                    backend_mount_root TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_staging (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    staging_mounted BOOLEAN NOT NULL,
+                    staging_mount_root TEXT,
+                    size_gb INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    max_zip_total_gb INTEGER NOT NULL,
+                    one_zip_cache_at_a_time BOOLEAN NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_indexing (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    min_full_reindex_days INTEGER NOT NULL,
+                    max_full_reindex_days INTEGER NOT NULL,
+                    hot_window_days INTEGER NOT NULL,
+                    hot_radius INTEGER NOT NULL,
+                    daily_full_reindex_budget INTEGER NOT NULL,
+                    daily_cheap_check_budget INTEGER NOT NULL,
+                    max_full_reindex_per_14d INTEGER NOT NULL,
+                    max_cheap_checks_per_day INTEGER NOT NULL,
+                    allow_early_full_on_change BOOLEAN NOT NULL,
+                    early_full_requires_hot BOOLEAN NOT NULL,
+                    score_weights TEXT,  -- JSON string
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_cookies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT UNIQUE NOT NULL,
+                    cookie_content TEXT NOT NULL,  -- Full cookie jar content stored in database
+                    credfile_path TEXT,            -- Path to credential file (if used)
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_shares (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    backend_folder TEXT NOT NULL,
+                    frontend_folder TEXT NOT NULL,
+                    writable BOOLEAN NOT NULL,
+                    cachelink_overlay BOOLEAN NOT NULL,
+                    users_config TEXT NOT NULL,  -- JSON string of users dict
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_auth (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    oidc_config TEXT,      -- JSON string
+                    ldap_config TEXT,      -- JSON string
+                    proxy_config TEXT,     -- JSON string
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_tls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enabled BOOLEAN NOT NULL,
+                    mode TEXT NOT NULL,
+                    manual_config TEXT,    -- JSON string
+                    http_config TEXT,      -- JSON string
+                    dns01_config TEXT,     -- JSON string
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password_plain TEXT,
+                    password_hash TEXT,
+                    enabled BOOLEAN NOT NULL,
+                    is_admin BOOLEAN NOT NULL,
+                    purpose TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_cachelinks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_id TEXT,
+                    backend_path TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    subfolder TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    source_file TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(backend_path, url, subfolder)
+                )
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_config_cachelinks_canonical
+                ON config_cachelinks(canonical_id)
+                """
+            )
+            
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_settings_snapshot (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    settings_text TEXT,        -- Full settings.yaml content
+                    bootstrap_text TEXT,       -- Full bootstrap.yaml content (includes cachelinks and credentials)
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -1018,6 +1181,757 @@ class IndexDatabase:
                 "SELECT COUNT(*) as count FROM webui_sessions"
             )
             return row["count"] if row else 0
+
+    # Configuration Repository Methods -----------------------------------------
+    def get_backend(self, name: str) -> dict | None:
+        """Get a backend configuration by name."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT name, backend_mounted, backend_cache_root, backend_mount_root, created_at, updated_at
+                FROM config_backends
+                WHERE name = ?
+                """,
+                (name,),
+            )
+        if not row:
+            return None
+        return {
+            "name": row["name"],
+            "backend_mounted": bool(row["backend_mounted"]),
+            "backend_cache_root": row["backend_cache_root"],
+            "backend_mount_root": row["backend_mount_root"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_all_backends(self) -> list[dict]:
+        """Get all backend configurations."""
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT name, backend_mounted, backend_cache_root, backend_mount_root, created_at, updated_at
+                FROM config_backends
+                ORDER BY name
+                """
+            )
+        return [
+            {
+                "name": row["name"],
+                "backend_mounted": bool(row["backend_mounted"]),
+                "backend_cache_root": row["backend_cache_root"],
+                "backend_mount_root": row["backend_mount_root"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_backend(self, backend: dict) -> None:
+        """Save a backend configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_backends (name, backend_mounted, backend_cache_root, backend_mount_root, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    backend_mounted = excluded.backend_mounted,
+                    backend_cache_root = excluded.backend_cache_root,
+                    backend_mount_root = excluded.backend_mount_root,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    backend["name"],
+                    1 if backend["backend_mounted"] else 0,
+                    backend["backend_cache_root"],
+                    backend["backend_mount_root"],
+                    now,
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_staging(self) -> dict | None:
+        """Get staging configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT staging_mounted, staging_mount_root, size_gb, updated_at
+                FROM config_staging
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "staging_mounted": bool(row["staging_mounted"]),
+            "staging_mount_root": row["staging_mount_root"],
+            "size_gb": row["size_gb"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_staging(self, staging: dict) -> None:
+        """Save staging configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_staging (staging_mounted, staging_mount_root, size_gb, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    staging_mounted = excluded.staging_mounted,
+                    staging_mount_root = excluded.staging_mount_root,
+                    size_gb = excluded.size_gb,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    1 if staging["staging_mounted"] else 0,
+                    staging["staging_mount_root"],
+                    staging["size_gb"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_limits(self) -> dict | None:
+        """Get limits configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT max_zip_total_gb, one_zip_cache_at_a_time, updated_at
+                FROM config_limits
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "max_zip_total_gb": row["max_zip_total_gb"],
+            "one_zip_cache_at_a_time": bool(row["one_zip_cache_at_a_time"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def save_limits(self, limits: dict) -> None:
+        """Save limits configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_limits (max_zip_total_gb, one_zip_cache_at_a_time, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    max_zip_total_gb = excluded.max_zip_total_gb,
+                    one_zip_cache_at_a_time = excluded.one_zip_cache_at_a_time,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    limits["max_zip_total_gb"],
+                    1 if limits["one_zip_cache_at_a_time"] else 0,
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_indexing(self) -> dict | None:
+        """Get indexing configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT min_full_reindex_days, max_full_reindex_days, hot_window_days, hot_radius,
+                       daily_full_reindex_budget, daily_cheap_check_budget, max_full_reindex_per_14d,
+                       max_cheap_checks_per_day, allow_early_full_on_change, early_full_requires_hot,
+                       score_weights, updated_at
+                FROM config_indexing
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "min_full_reindex_days": row["min_full_reindex_days"],
+            "max_full_reindex_days": row["max_full_reindex_days"],
+            "hot_window_days": row["hot_window_days"],
+            "hot_radius": row["hot_radius"],
+            "daily_full_reindex_budget": row["daily_full_reindex_budget"],
+            "daily_cheap_check_budget": row["daily_cheap_check_budget"],
+            "max_full_reindex_per_14d": row["max_full_reindex_per_14d"],
+            "max_cheap_checks_per_day": row["max_cheap_checks_per_day"],
+            "allow_early_full_on_change": bool(row["allow_early_full_on_change"]),
+            "early_full_requires_hot": bool(row["early_full_requires_hot"]),
+            "score_weights": row["score_weights"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_indexing(self, indexing: dict) -> None:
+        """Save indexing configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_indexing (min_full_reindex_days, max_full_reindex_days, hot_window_days, hot_radius,
+                                           daily_full_reindex_budget, daily_cheap_check_budget, max_full_reindex_per_14d,
+                                           max_cheap_checks_per_day, allow_early_full_on_change, early_full_requires_hot,
+                                           score_weights, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    min_full_reindex_days = excluded.min_full_reindex_days,
+                    max_full_reindex_days = excluded.max_full_reindex_days,
+                    hot_window_days = excluded.hot_window_days,
+                    hot_radius = excluded.hot_radius,
+                    daily_full_reindex_budget = excluded.daily_full_reindex_budget,
+                    daily_cheap_check_budget = excluded.daily_cheap_check_budget,
+                    max_full_reindex_per_14d = excluded.max_full_reindex_per_14d,
+                    max_cheap_checks_per_day = excluded.max_cheap_checks_per_day,
+                    allow_early_full_on_change = excluded.allow_early_full_on_change,
+                    early_full_requires_hot = excluded.early_full_requires_hot,
+                    score_weights = excluded.score_weights,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    indexing["min_full_reindex_days"],
+                    indexing["max_full_reindex_days"],
+                    indexing["hot_window_days"],
+                    indexing["hot_radius"],
+                    indexing["daily_full_reindex_budget"],
+                    indexing["daily_cheap_check_budget"],
+                    indexing["max_full_reindex_per_14d"],
+                    indexing["max_cheap_checks_per_day"],
+                    1 if indexing["allow_early_full_on_change"] else 0,
+                    1 if indexing["early_full_requires_hot"] else 0,
+                    indexing["score_weights"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_cookie(self, domain: str) -> dict | None:
+        """Get cookie configuration by domain."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT domain, cookie_content, credfile_path, updated_at
+                FROM config_cookies
+                WHERE domain = ?
+                """,
+                (domain,),
+            )
+        if not row:
+            return None
+        return {
+            "domain": row["domain"],
+            "cookie_content": row["cookie_content"],
+            "credfile_path": row["credfile_path"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_all_cookies(self) -> list[dict]:
+        """Get all cookie configurations."""
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT domain, cookie_content, credfile_path, updated_at
+                FROM config_cookies
+                ORDER BY domain
+                """
+            )
+        return [
+            {
+                "domain": row["domain"],
+                "cookie_content": row["cookie_content"],
+                "credfile_path": row["credfile_path"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_cookie(self, cookie: dict) -> None:
+        """Save cookie configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_cookies (domain, cookie_content, credfile_path, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    cookie_content = excluded.cookie_content,
+                    credfile_path = excluded.credfile_path,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    cookie["domain"],
+                    cookie["cookie_content"],
+                    cookie["credfile_path"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_share(self, name: str) -> dict | None:
+        """Get share configuration by name."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT name, backend_folder, frontend_folder, writable, cachelink_overlay, users_config, updated_at
+                FROM config_shares
+                WHERE name = ?
+                """,
+                (name,),
+            )
+        if not row:
+            return None
+        return {
+            "name": row["name"],
+            "backend_folder": row["backend_folder"],
+            "frontend_folder": row["frontend_folder"],
+            "writable": bool(row["writable"]),
+            "cachelink_overlay": bool(row["cachelink_overlay"]),
+            "users_config": row["users_config"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_all_shares(self) -> list[dict]:
+        """Get all share configurations."""
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT name, backend_folder, frontend_folder, writable, cachelink_overlay, users_config, updated_at
+                FROM config_shares
+                ORDER BY name
+                """
+            )
+        return [
+            {
+                "name": row["name"],
+                "backend_folder": row["backend_folder"],
+                "frontend_folder": row["frontend_folder"],
+                "writable": bool(row["writable"]),
+                "cachelink_overlay": bool(row["cachelink_overlay"]),
+                "users_config": row["users_config"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_share(self, share: dict) -> None:
+        """Save share configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_shares (name, backend_folder, frontend_folder, writable, cachelink_overlay, users_config, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    backend_folder = excluded.backend_folder,
+                    frontend_folder = excluded.frontend_folder,
+                    writable = excluded.writable,
+                    cachelink_overlay = excluded.cachelink_overlay,
+                    users_config = excluded.users_config,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    share["name"],
+                    share["backend_folder"],
+                    share["frontend_folder"],
+                    1 if share["writable"] else 0,
+                    1 if share["cachelink_overlay"] else 0,
+                    share["users_config"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_auth(self) -> dict | None:
+        """Get authentication configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT oidc_config, ldap_config, proxy_config, updated_at
+                FROM config_auth
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "oidc_config": row["oidc_config"],
+            "ldap_config": row["ldap_config"],
+            "proxy_config": row["proxy_config"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_auth(self, auth: dict) -> None:
+        """Save authentication configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_auth (oidc_config, ldap_config, proxy_config, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    oidc_config = excluded.oidc_config,
+                    ldap_config = excluded.ldap_config,
+                    proxy_config = excluded.proxy_config,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    auth["oidc_config"],
+                    auth["ldap_config"],
+                    auth["proxy_config"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_tls(self) -> dict | None:
+        """Get TLS configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT enabled, mode, manual_config, http_config, dns01_config, updated_at
+                FROM config_tls
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "enabled": bool(row["enabled"]),
+            "mode": row["mode"],
+            "manual_config": row["manual_config"],
+            "http_config": row["http_config"],
+            "dns01_config": row["dns01_config"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_tls(self, tls: dict) -> None:
+        """Save TLS configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_tls (enabled, mode, manual_config, http_config, dns01_config, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    mode = excluded.mode,
+                    manual_config = excluded.manual_config,
+                    http_config = excluded.http_config,
+                    dns01_config = excluded.dns01_config,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    1 if tls["enabled"] else 0,
+                    tls["mode"],
+                    tls["manual_config"],
+                    tls["http_config"],
+                    tls["dns01_config"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_user(self, username: str) -> dict | None:
+        """Get user configuration by username."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at
+                FROM config_users
+                WHERE username = ?
+                """,
+                (username,),
+            )
+        if not row:
+            return None
+        return {
+            "username": row["username"],
+            "password_plain": row["password_plain"],
+            "password_hash": row["password_hash"],
+            "enabled": bool(row["enabled"]),
+            "is_admin": bool(row["is_admin"]),
+            "purpose": row["purpose"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def get_all_users(self) -> list[dict]:
+        """Get all user configurations."""
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at
+                FROM config_users
+                ORDER BY username
+                """
+            )
+        return [
+            {
+                "username": row["username"],
+                "password_plain": row["password_plain"],
+                "password_hash": row["password_hash"],
+                "enabled": bool(row["enabled"]),
+                "is_admin": bool(row["is_admin"]),
+                "purpose": row["purpose"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_user(self, user: dict) -> None:
+        """Save user configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    password_plain = excluded.password_plain,
+                    password_hash = excluded.password_hash,
+                    enabled = excluded.enabled,
+                    is_admin = excluded.is_admin,
+                    purpose = excluded.purpose,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user["username"],
+                    user["password_plain"],
+                    user["password_hash"],
+                    1 if user["enabled"] else 0,
+                    1 if user["is_admin"] else 0,
+                    user["purpose"],
+                    now,
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def delete_user(self, username: str) -> None:
+        """Delete user configuration."""
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM config_users WHERE username = ?",
+                (username,),
+            )
+            self._db.commit()
+
+    def get_cachelinks(self) -> list[dict]:
+        """Get all cachelink configurations."""
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at
+                FROM config_cachelinks
+                ORDER BY backend_path, canonical_id
+                """
+            )
+        return [
+            {
+                "canonical_id": row["canonical_id"],
+                "backend_path": row["backend_path"],
+                "url": row["url"],
+                "subfolder": row["subfolder"],
+                "mode": row["mode"],
+                "source_file": row["source_file"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_cachelinks(self, cachelinks: list[dict]) -> None:
+        """Save cachelink configurations."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute("DELETE FROM config_cachelinks")
+            if cachelinks:
+                self._db.executemany(
+                    """
+                    INSERT INTO config_cachelinks (canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            c["canonical_id"],
+                            c["backend_path"],
+                            c["url"],
+                            c["subfolder"],
+                            c["mode"],
+                            c["source_file"],
+                            now,
+                            now,
+                        )
+                        for c in cachelinks
+                    ],
+                )
+            self._db.commit()
+
+    def get_full_settings_snapshot(self) -> dict | None:
+        """Get the full settings snapshot."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT settings_text, bootstrap_text, updated_at
+                FROM config_settings_snapshot
+                WHERE id = 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "settings_text": row["settings_text"],
+            "bootstrap_text": row["bootstrap_text"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_full_settings_snapshot(self, settings_text: str, bootstrap_text: str) -> None:
+        """Save the full settings snapshot."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_settings_snapshot (id, settings_text, bootstrap_text, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    settings_text = excluded.settings_text,
+                    bootstrap_text = excluded.bootstrap_text,
+                    updated_at = excluded.updated_at
+                """,
+                (settings_text, bootstrap_text, now),
+            )
+            self._db.commit()
+
+    # Additional methods needed by credentials module
+    def get_user_credentials(self, username: str) -> dict | None:
+        """Get user credentials from database."""
+        try:
+            result = self._db.fetchone(
+                "SELECT id, username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at FROM auth_users WHERE username = ?",
+                (username,)
+            )
+            return result
+        except Exception:
+            return None
+
+    def upsert_auth_user(self, username: str, password_plain: str = None,
+                        password_hash: str = None, enabled: bool = True,
+                        is_admin: bool = False, purpose: str = None) -> bool:
+        """Create or update user in database."""
+        try:
+            # Check if user exists
+            existing = self._db.fetchone(
+                "SELECT id FROM auth_users WHERE username = ?",
+                (username,)
+            )
+            
+            now = datetime.now(timezone.utc).isoformat()
+            
+            if existing:
+                # Update existing user
+                self._db.execute(
+                    "UPDATE auth_users SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, purpose = ?, updated_at = ? WHERE username = ?",
+                    (password_plain, password_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, username)
+                )
+            else:
+                # Create new user
+                self._db.execute(
+                    "INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (username, password_plain, password_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, now)
+                )
+            
+            self._db.commit()
+            return True
+        except Exception:
+            self._db.rollback()
+            return False
+
+    def create_session(self, username: str, token: str, expires_at: datetime) -> bool:
+        """Create a new session in database."""
+        try:
+            created_at = datetime.utcnow()
+            self._db.execute(
+                "INSERT INTO auth_sessions (token, username, created_at, last_used, expires_at) VALUES (?, ?, ?, ?, ?)",
+                (token, username, created_at.isoformat(), created_at.isoformat(), expires_at.isoformat())
+            )
+            self._db.commit()
+            return True
+        except Exception:
+            self._db.rollback()
+            return False
+
+    def get_session(self, token: str) -> dict | None:
+        """Get session from database."""
+        try:
+            result = self._db.fetchone(
+                "SELECT token, username, created_at, last_used, expires_at FROM auth_sessions WHERE token = ?",
+                (token,)
+            )
+            if result:
+                # Parse timestamps
+                result['created_at'] = datetime.fromisoformat(result['created_at'])
+                result['last_used'] = datetime.fromisoformat(result['last_used'])
+                result['expires_at'] = datetime.fromisoformat(result['expires_at'])
+            return result
+        except Exception:
+            return None
+
+    def delete_session(self, token: str) -> bool:
+        """Delete session from database."""
+        try:
+            self._db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+            self._db.commit()
+            return True
+        except Exception:
+            self._db.rollback()
+            return False
+
+    def cleanup_expired_sessions(self, max_age_hours: int = 24) -> int:
+        """Clean up expired sessions from database."""
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+            result = self._db.execute(
+                "DELETE FROM auth_sessions WHERE expires_at < ?",
+                (cutoff.isoformat(),)
+            )
+            self._db.commit()
+            return result.rowcount if hasattr(result, 'rowcount') else 0
+        except Exception:
+            self._db.rollback()
+            return 0
+
+    def validate_credentials(self, username: str, password: str) -> bool:
+        """Validate user credentials against database."""
+        try:
+            result = self.get_user_credentials(username)
+            if not result:
+                return False
+            
+            stored_plain = result.get('password_plain')
+            stored_hash = result.get('password_hash')
+            
+            # Check plain text password first (for backward compatibility)
+            if stored_plain and stored_plain == password:
+                return True
+            
+            # Check hashed password
+            if stored_hash and self._verify_password_hash(password, stored_hash):
+                return True
+            
+            return False
+        except Exception:
+            return False
+
+    def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
+        """Verify a password against its hash."""
+        import hashlib
+        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
 
 
 def _parse_ts(value: str | None) -> datetime | None:

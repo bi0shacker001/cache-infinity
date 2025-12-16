@@ -15,7 +15,8 @@ from typing import Optional
 
 import yaml
 
-from ..core.config import TwoFileSettings
+# Removed TwoFileSettings import to break circular dependency
+# Settings are now managed through the database adapter
 
 
 class CredentialError(RuntimeError):
@@ -132,10 +133,9 @@ class SessionToken:
 
 
 class AuthConfigManager:
-    """Authentication configuration manager using consolidated settings."""
+    """Authentication configuration manager using database adapter."""
     
-    def __init__(self, settings: TwoFileSettings, db_adapter):
-        self.settings = settings
+    def __init__(self, db_adapter):
         self.db_adapter = db_adapter
         self._cli_api_key: Optional[str] = None
         self._sessions: dict[str, SessionToken] = {}
@@ -149,7 +149,7 @@ class AuthConfigManager:
         self._start_session_cleanup()
     
     def _initialize_cli_api_key(self) -> None:
-        """Initialize CLI API key system using consolidated settings."""
+        """Initialize CLI API key system using database adapter."""
         with self._lock:
             # Get or create CLI backend user
             cli_user = self._get_or_create_cli_user()
@@ -165,7 +165,7 @@ class AuthConfigManager:
             # Check if CLI backend user exists
             cli_user = self.db_adapter.get_user_credentials("cli-backend")
             if not cli_user:
-                # Create CLI backend user using settings
+                # Create CLI backend user
                 success = self.db_adapter.upsert_auth_user(
                     username="cli-backend",
                     password_plain=None,  # Will be set with API key
@@ -219,7 +219,7 @@ class AuthConfigManager:
                 return None
     
     def _get_or_generate_cli_api_key(self) -> str:
-        """Get existing CLI API key or generate a new one using settings."""
+        """Get existing CLI API key or generate a new one using database adapter."""
         try:
             # Check if API key already exists
             cli_user = self.db_adapter.get_user_credentials("cli-backend")
@@ -236,7 +236,7 @@ class AuthConfigManager:
             return secrets.token_urlsafe(32)
     
     def get_cli_api_key(self) -> str:
-        """Get CLI API key for authentication using consolidated settings.
+        """Get CLI API key for authentication using database adapter.
         
         This method validates that it's being called from the CLI module
         by checking the caller's module path.
@@ -263,7 +263,7 @@ class AuthConfigManager:
                 return ''
     
     def authenticate_with_api_key(self, username: str, password: str) -> bool:
-        """Authenticate using API key with settings-based validation."""
+        """Authenticate using API key with database validation."""
         if username != "api-key":
             return False
         
@@ -277,7 +277,7 @@ class AuthConfigManager:
             return False
     
     def authenticate_user(self, username: str, password: str, purpose: str = "webui") -> Optional[str]:
-        """Authenticate a user and create a session token for WebUI using settings."""
+        """Authenticate a user and create a session token for WebUI using database adapter."""
         if purpose == "webui":
             # For WebUI, validate credentials and create session
             if self._validate_user_credentials(username, password, purpose):
@@ -290,7 +290,7 @@ class AuthConfigManager:
             return self._validate_user_credentials(username, password, purpose)
     
     def _validate_user_credentials(self, username: str, password: str, purpose: str) -> bool:
-        """Validate user credentials against database using settings."""
+        """Validate user credentials against database using database adapter."""
         try:
             query = """
                 SELECT password_plain, password_hash, enabled
@@ -323,7 +323,7 @@ class AuthConfigManager:
         return hashlib.sha256(password.encode()).hexdigest() == stored_hash
     
     def _create_session_token(self, username: str) -> str:
-        """Create a new session token for a user using settings."""
+        """Create a new session token for a user using database adapter."""
         # Clean up expired sessions first
         self._cleanup_expired_sessions()
         
@@ -362,7 +362,7 @@ class AuthConfigManager:
         return token
     
     def validate_session_token(self, token: str) -> Optional[str]:
-        """Validate a session token and return username if valid using settings."""
+        """Validate a session token and return username if valid using database adapter."""
         if not token:
             return None
         
@@ -417,7 +417,7 @@ class AuthConfigManager:
             return None
     
     def _remove_user_sessions(self, username: str) -> None:
-        """Remove all sessions for a specific user using settings."""
+        """Remove all sessions for a specific user using database adapter."""
         with self._lock:
             tokens_to_remove = []
             for token, session in self._sessions.items():
@@ -435,7 +435,7 @@ class AuthConfigManager:
             logging.getLogger(__name__).error("Failed to remove user sessions: %s", exc)
     
     def _cleanup_expired_sessions(self) -> None:
-        """Clean up expired sessions from memory using settings."""
+        """Clean up expired sessions from memory using database adapter."""
         with self._lock:
             now = datetime.utcnow()
             expired_tokens = []
@@ -447,7 +447,7 @@ class AuthConfigManager:
                 del self._sessions[token]
     
     def _start_session_cleanup(self) -> None:
-        """Start background thread for session cleanup using settings."""
+        """Start background thread for session cleanup using database adapter."""
         def cleanup_loop():
             while True:
                 try:
@@ -468,7 +468,7 @@ class AuthConfigManager:
         self._session_cleanup_thread.start()
     
     def logout_user(self, token: str) -> None:
-        """Logout a user by invalidating their session token using settings."""
+        """Logout a user by invalidating their session token using database adapter."""
         with self._lock:
             if token in self._sessions:
                 del self._sessions[token]
@@ -477,7 +477,7 @@ class AuthConfigManager:
         self.db_adapter.delete_session(token)
     
     def authenticate_request(self, username: str, password: str) -> dict:
-        """Authenticate request and return session info using consolidated settings.
+        """Authenticate request and return session info using database adapter.
         
         Args:
             username: Username or "api-key"

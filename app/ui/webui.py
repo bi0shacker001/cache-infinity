@@ -14,8 +14,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from .service import CacheInfinityService
     from ..utils.filemanager import FileManager
 
-from ..ui.management import ManagementLayer
-from ..utils.filemanager import FileManager
+from ui.management import ManagementLayer
+from utils.filemanager import FileManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1214,6 +1214,26 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function refreshStatus() {
       try {
         const data = await fetchJSON('api/status');
+        
+        // Check if backend is missing
+        if (data.missing_backend) {
+          document.getElementById('status-stats').innerHTML = `
+            <div class="alert alert-warning">
+              <h4>Setup Required</h4>
+              <p>${data.message}</p>
+              <p>Please go to Settings → Backends to configure your first backend (backend_1).</p>
+              <button class="btn btn-primary" onclick="setActiveSection('settings'); setTimeout(() => setActiveSection('settings'), 100)">Go to Settings</button>
+            </div>
+          `;
+          document.getElementById('metric-cache-hits').textContent = '0';
+          document.getElementById('metric-cache-miss').textContent = '0';
+          document.getElementById('metric-targets-indexed').textContent = '0';
+          document.getElementById('metric-access-total').textContent = '0';
+          document.getElementById('status-storage').innerHTML = '<p class="empty">No backends configured</p>';
+          document.getElementById('status-shares').innerHTML = '<li class="empty">No shares configured</li>';
+          return;
+        }
+        
         const stats = data.stats || {};
         document.getElementById('metric-cache-hits').textContent = stats.cache_hits ?? 0;
         document.getElementById('metric-cache-miss').textContent = stats.cache_misses ?? 0;
@@ -1245,12 +1265,27 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function loadStorage() {
       try {
         const data = await fetchJSON('api/storage');
+        
+        // Check if backend is missing
+        if (data.missing_backend) {
+          document.getElementById('storage-backends').innerHTML = `
+            <div class="empty-state">
+              <h3>No Backends Configured</h3>
+              <p>Please configure backend_1 in Settings → Backends to access storage functionality.</p>
+              <button class="btn btn-primary" onclick="setActiveSection('settings'); setTimeout(() => setActiveSection('settings'), 100)">Go to Settings</button>
+            </div>
+          `;
+          document.getElementById('file-list').innerHTML = '';
+          document.getElementById('enhanced-file-container').innerHTML = '';
+          return;
+        }
+        
         const backends = (data.backends || []).map((b) => `
           <div class="card">
             <span>${b.name}</span>
             <strong>${b.path}</strong>
             <div style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--text-muted);">
-              ${b.mounted ? 'Mounted' : 'Not Mounted'} | 
+              ${b.mounted ? 'Mounted' : 'Not Mounted'} |
               ${b.used ? `${(b.used / 1024 / 1024 / 1024).toFixed(2)} GB used` : 'Unknown'}
             </div>
           </div>

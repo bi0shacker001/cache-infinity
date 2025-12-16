@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings, TwoFileSettings
+from core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings, TwoFileSettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -391,4 +391,10 @@ def create_tls_service(config_dir: Path, settings: TwoFileSettings) -> Optional[
     """Create TLS service using consolidated settings."""
     if settings.tls.enabled and settings.tls.mode in ("http", "dns-01"):
         return TLSAutomationService(config_dir, settings.tls)
+    return None
+
+def create_tls_automation_service(config_dir: Path, tls_settings: TLSSettings) -> Optional[TLSAutomationService]:
+    """Create TLS automation service for certificate management."""
+    if tls_settings.enabled and tls_settings.mode in ("http", "dns-01"):
+        return TLSAutomationService(config_dir, tls_settings)
     return None

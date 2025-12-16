@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence, Optional, Union
 
-from ..core.errors import ConfigError
+from core.errors import ConfigError
 
 
 class DBAdapter:

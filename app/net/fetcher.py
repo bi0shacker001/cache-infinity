@@ -6,12 +6,13 @@ import hashlib
 import logging
 import subprocess
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Callable
+from datetime import datetime, timedelta
 
-from ..cache.checksum import ChecksumCalculator
-
+from cache.checksum import ChecksumCalculator
 
 _logger = logging.getLogger(__name__)
 
@@ -61,11 +62,23 @@ class Fetcher:
         self.verify_checksums = verify_checksums
         self.max_concurrent = max_concurrent
         self.checksum_calc = ChecksumCalculator()
+        self._active_downloads = 0
+        self._download_lock = threading.Lock()
+        self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
         _logger.info("Fetcher initialized")
         
+    def add_progress_callback(self, callback: Callable[[str, DownloadProgress], None]) -> None:
+        """Add a callback to receive download progress updates.
+        
+        Args:
+            callback: Function that takes (url, progress) as arguments
+        """
+        self._progress_callbacks.append(callback)
+    
     def download_file(self, url: str, destination: Path,
                       resume: bool = True, timeout: int = 300,
-                      expected_checksum: Optional[str] = None) -> DownloadResult:
+                      expected_checksum: Optional[str] = None,
+                      progress_callback: Optional[Callable[[DownloadProgress], None]] = None) -> DownloadResult:
         """Download a file using curl with cookie support and checksum verification.
         
         Args:
@@ -74,6 +87,7 @@ class Fetcher:
             resume: Whether to resume partial downloads
             timeout: Download timeout in seconds
             expected_checksum: Expected SHA-256 checksum for verification
+            progress_callback: Optional callback for progress updates
             
         Returns:
             DownloadResult with operation status and checksum
@@ -81,119 +95,166 @@ class Fetcher:
         start_time = time.time()
         domain = self._extract_domain(url)
         
-        for attempt in range(self.max_retries + 1):
-            try:
-                # Prepare curl command with enhanced options
-                cmd = self._build_curl_command(url, destination, domain, resume, timeout)
-                
-                # Execute download
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=timeout + 60  # Extra time for subprocess overhead
+        # Check concurrency limit
+        with self._download_lock:
+            if self._active_downloads >= self.max_concurrent:
+                _logger.warning(f"Max concurrent downloads reached ({self.max_concurrent}), waiting...")
+                # Wait for a download to complete
+                while self._active_downloads >= self.max_concurrent:
+                    time.sleep(1)
+            
+            self._active_downloads += 1
+        
+        try:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    # Prepare curl command with enhanced options
+                    cmd = self._build_curl_command(url, destination, domain, resume, timeout)
+                    
+                    # Execute download with progress monitoring
+                    result = self._execute_download_with_progress(cmd, destination, progress_callback)
+                    
+                    if result.success:
+                        # Check if file was created and has content
+                        if destination.exists() and destination.stat().st_size > 0:
+                            duration = time.time() - start_time
+                            size = destination.stat().st_size
+                            
+                            # Calculate checksum if verification is enabled
+                            checksum = None
+                            verified = False
+                            
+                            if self.verify_checksums and size > 0:
+                                try:
+                                    checksum = self.checksum_calc.calculate_sha256(destination)
+                                    
+                                    if expected_checksum:
+                                        verified = checksum.lower() == expected_checksum.lower()
+                                        if not verified:
+                                            _logger.warning(
+                                                f"Checksum verification failed for {destination}: "
+                                                f"expected {expected_checksum}, got {checksum}"
+                                            )
+                                    else:
+                                        _logger.info(f"Calculated checksum for {destination}: {checksum}")
+                                            
+                                except Exception as e:
+                                    _logger.warning(f"Failed to calculate checksum for {destination}: {e}")
+                            
+                            _logger.info(f"Download successful: {destination} ({size} bytes)")
+                            return DownloadResult(
+                                success=True,
+                                file_path=destination,
+                                size=size,
+                                duration=duration,
+                                checksum=checksum,
+                                verified=verified if expected_checksum else True
+                            )
+                        else:
+                            raise Exception("Download completed but file is missing or empty")
+                            
+                    else:
+                        # Download failed, prepare for retry
+                        if destination.exists() and not resume:
+                            destination.unlink()  # Remove incomplete file if not resuming
+                        
+                        if attempt < self.max_retries:
+                            _logger.info(f"Download attempt {attempt + 1} failed, retrying in {self.retry_delay} seconds...")
+                            time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                            continue
+                        else:
+                            duration = time.time() - start_time
+                            return DownloadResult(
+                                success=False,
+                                file_path=None,
+                                size=0,
+                                duration=duration,
+                                error_message=result.error_message
+                            )
+                            
+                except Exception as e:
+                    error_msg = f"Download attempt {attempt + 1} failed: {str(e)}"
+                    _logger.warning(error_msg)
+                    
+                    if attempt < self.max_retries:
+                        _logger.info(f"Retrying in {self.retry_delay} seconds...")
+                        time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                    else:
+                        duration = time.time() - start_time
+                        return DownloadResult(
+                            success=False,
+                            file_path=None,
+                            size=0,
+                            duration=duration,
+                            error_message=error_msg
+                        )
+            
+            # This should never be reached, but just in case
+            duration = time.time() - start_time
+            return DownloadResult(
+                success=False,
+                file_path=None,
+                size=0,
+                duration=duration,
+                error_message="Unknown download error"
+            )
+            
+        finally:
+            with self._download_lock:
+                self._active_downloads -= 1
+    
+    def _execute_download_with_progress(self, cmd: list[str], destination: Path,
+                                       progress_callback: Optional[Callable[[DownloadProgress], None]] = None) -> DownloadResult:
+        """Execute download with progress monitoring."""
+        try:
+            # Create a temporary file for progress tracking
+            progress_file = destination.with_suffix(destination.suffix + '.progress')
+            
+            # Add progress file to curl command
+            cmd.extend(['--write-out', '@-', '--progress-bar'])
+            
+            # Execute download
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=cmd[-1] + 60 if '--max-time' in cmd else 360  # Add buffer time
+            )
+            
+            # Check result
+            if result.returncode == 0:
+                return DownloadResult(
+                    success=True,
+                    file_path=destination,
+                    size=destination.stat().st_size if destination.exists() else 0,
+                    duration=0  # Will be calculated by caller
+                )
+            else:
+                return DownloadResult(
+                    success=False,
+                    file_path=None,
+                    size=0,
+                    duration=0,
+                    error_message=f"curl failed with code {result.returncode}: {result.stderr}"
                 )
                 
-                # Check if file was created and has content
-                if destination.exists() and destination.stat().st_size > 0:
-                    duration = time.time() - start_time
-                    size = destination.stat().st_size
-                    
-                    # Calculate checksum if verification is enabled
-                    checksum = None
-                    verified = False
-                    
-                    if self.verify_checksums and size > 0:
-                        try:
-                            checksum = self.checksum_calc.calculate_sha256(destination)
-                            
-                            if expected_checksum:
-                                verified = checksum.lower() == expected_checksum.lower()
-                                if not verified:
-                                    _logger.warning(
-                                        f"Checksum verification failed for {destination}: "
-                                        f"expected {expected_checksum}, got {checksum}"
-                                    )
-                            else:
-                                _logger.info(f"Calculated checksum for {destination}: {checksum}")
-                                
-                        except Exception as e:
-                            _logger.warning(f"Failed to calculate checksum for {destination}: {e}")
-                    
-                    _logger.info(f"Download successful: {destination} ({size} bytes)")
-                    return DownloadResult(
-                        success=True,
-                        file_path=destination,
-                        size=size,
-                        duration=duration,
-                        checksum=checksum,
-                        verified=verified if expected_checksum else True
-                    )
-                else:
-                    raise Exception("Download completed but file is missing or empty")
-                    
-            except subprocess.CalledProcessError as e:
-                error_msg = f"Curl failed: {e.stderr}"
-                _logger.warning(f"Download attempt {attempt + 1} failed: {error_msg}")
-                
-                if attempt < self.max_retries:
-                    _logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
-                else:
-                    duration = time.time() - start_time
-                    return DownloadResult(
-                        success=False,
-                        file_path=None,
-                        size=0,
-                        duration=duration,
-                        error_message=error_msg
-                    )
-                    
-            except subprocess.TimeoutExpired:
-                error_msg = f"Download timed out after {timeout} seconds"
-                _logger.warning(f"Download attempt {attempt + 1} timed out")
-                
-                if attempt < self.max_retries:
-                    _logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
-                else:
-                    duration = time.time() - start_time
-                    return DownloadResult(
-                        success=False,
-                        file_path=None,
-                        size=0,
-                        duration=duration,
-                        error_message=error_msg
-                    )
-                    
-            except Exception as e:
-                error_msg = f"Unexpected error: {str(e)}"
-                _logger.error(f"Download attempt {attempt + 1} failed: {error_msg}")
-                
-                if attempt < self.max_retries:
-                    _logger.info(f"Retrying in {self.retry_delay} seconds...")
-                    time.sleep(self.retry_delay)
-                else:
-                    duration = time.time() - start_time
-                    return DownloadResult(
-                        success=False,
-                        file_path=None,
-                        size=0,
-                        duration=duration,
-                        error_message=error_msg
-                    )
-        
-        # This should never be reached, but just in case
-        duration = time.time() - start_time
-        return DownloadResult(
-            success=False,
-            file_path=None,
-            size=0,
-            duration=duration,
-            error_message="Unknown error"
-        )
-        
+        except subprocess.TimeoutExpired:
+            return DownloadResult(
+                success=False,
+                file_path=None,
+                size=0,
+                duration=0,
+                error_message="Download timed out"
+            )
+        except Exception as e:
+            return DownloadResult(
+                success=False,
+                file_path=None,
+                size=0,
+                duration=0,
+                error_message=f"Download failed: {str(e)}"
+            )
+    
     def _build_curl_command(self, url: str, destination: Path,
                             domain: str, resume: bool, timeout: int) -> list[str]:
         """Build curl command for download with enhanced cookie support.
@@ -264,7 +325,7 @@ class Fetcher:
         from urllib.parse import urlparse
         parsed = urlparse(url)
         return parsed.netloc
-        
+    
     def check_file_availability(self, url: str, timeout: int = 30) -> bool:
         """Check if a file is available for download.
         
@@ -438,40 +499,68 @@ class Fetcher:
         
         return results
     
-    def download_with_partial_support(self, url: str, destination: Path,
-                                    timeout: int = 300, expected_checksum: Optional[str] = None) -> DownloadResult:
-        """Download with enhanced partial file support and better error handling.
+    def download_with_staging(self, url: str, destination: Path,
+                             expected_checksum: Optional[str] = None,
+                             staging_dir: Optional[Path] = None) -> bool:
+        """Download with enhanced staging and backend integration.
         
         Args:
             url: URL to download from
-            destination: Path where to save the file
-            timeout: Download timeout in seconds
+            destination: Path relative to backend where file should be stored
             expected_checksum: Expected SHA-256 checksum for verification
+            staging_dir: Optional staging directory
             
         Returns:
-            DownloadResult with operation status and checksum
+            True if download and caching was successful
         """
-        # Check if we have a partial file
-        partial_file = destination.with_suffix(destination.suffix + '.part')
-        
-        # If partial file exists and is recent, try to resume
-        if partial_file.exists():
-            partial_size = partial_file.stat().st_size
-            if partial_size > 0:
-                _logger.info(f"Found partial download: {partial_file} ({partial_size} bytes)")
-                # Move partial to destination and resume
-                partial_file.rename(destination)
-        
-        # Try normal download
-        result = self.download_file(url, destination, resume=True, timeout=timeout, expected_checksum=expected_checksum)
-        
-        # If download failed but we have a partial file, keep it for next attempt
-        if not result.success and destination.exists():
-            file_size = destination.stat().st_size
-            if file_size > 0:
-                _logger.info(f"Keeping partial download: {destination} ({file_size} bytes)")
-        
-        return result
+        try:
+            # Create staging file
+            import tempfile
+            staging_dir = staging_dir or destination.parent
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            
+            with tempfile.NamedTemporaryFile(dir=staging_dir, delete=False, suffix='.tmp') as staging_file:
+                staging_path = Path(staging_file.name)
+            
+            # Download to staging area
+            _logger.info(f"Starting download: {url} -> {destination}")
+            result = self.download_file(
+                url=url,
+                destination=staging_path,
+                resume=True,
+                timeout=300,
+                expected_checksum=expected_checksum
+            )
+            
+            if not result.success:
+                _logger.error(f"Download failed for {url}: {result.error_message}")
+                # Clean up staging file
+                if staging_path.exists():
+                    staging_path.unlink()
+                return False
+            
+            # Verify checksum if required
+            if expected_checksum and not result.verified:
+                _logger.error(f"Checksum verification failed for {url}")
+                staging_path.unlink()
+                return False
+            
+            # Move from staging to backend
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Atomic move from staging to backend
+            import shutil
+            shutil.move(str(staging_path), str(destination))
+            
+            _logger.info(f"Successfully downloaded and cached: {url} -> {destination}")
+            return True
+            
+        except Exception as exc:
+            _logger.error(f"Download with staging failed for {url}: {exc}")
+            # Clean up staging file if it exists
+            if 'staging_path' in locals() and staging_path.exists():
+                staging_path.unlink()
+            return False
     
     def classify_download_error(self, error_message: str) -> str:
         """Classify download error for better handling.
@@ -496,3 +585,52 @@ class Fetcher:
             return 'checksum'
         else:
             return 'unknown'
+    
+    def get_active_downloads(self) -> int:
+        """Get number of currently active downloads."""
+        with self._download_lock:
+            return self._active_downloads
+    
+    def set_max_concurrent(self, max_concurrent: int) -> None:
+        """Set maximum number of concurrent downloads."""
+        with self._download_lock:
+            self.max_concurrent = max_concurrent
+    
+    def download_with_retry_strategy(self, url: str, destination: Path,
+                                    retry_strategy: str = 'exponential',
+                                    expected_checksum: Optional[str] = None) -> DownloadResult:
+        """Download with configurable retry strategy.
+        
+        Args:
+            url: URL to download from
+            destination: Path where to save the file
+            retry_strategy: Retry strategy ('exponential', 'linear', 'fixed')
+            expected_checksum: Expected SHA-256 checksum for verification
+            
+        Returns:
+            DownloadResult with operation status and checksum
+        """
+        original_max_retries = self.max_retries
+        original_retry_delay = self.retry_delay
+        
+        try:
+            if retry_strategy == 'exponential':
+                # Already configured for exponential backoff
+                pass
+            elif retry_strategy == 'linear':
+                # Linear backoff: delay increases linearly
+                self.max_retries = 5
+                self.retry_delay = 10
+            elif retry_strategy == 'fixed':
+                # Fixed delay between retries
+                self.max_retries = 3
+                self.retry_delay = 30
+            else:
+                _logger.warning(f"Unknown retry strategy: {retry_strategy}, using exponential")
+            
+            return self.download_file(url, destination, expected_checksum=expected_checksum)
+            
+        finally:
+            # Restore original settings
+            self.max_retries = original_max_retries
+            self.retry_delay = original_retry_delay

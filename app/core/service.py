@@ -8,20 +8,21 @@ import importlib
 import logging
 import shutil
 import threading
+import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 
 from wsgidav.dc.simple_dc import SimpleDomainController
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from ..auth.tls import TLSAutomationService, create_tls_automation_service
+from auth.tls import TLSAutomationService, create_tls_automation_service
 
-from ..storage.backend import BackendRegistry
-from ..cache.cachelinks import (
+from storage.backend import BackendRegistry
+from cache.cachelinks import (
     CachelinkDescriptor,
     CachelinkIndex,
     CachelinkRecord,
@@ -31,15 +32,14 @@ from ..cache.cachelinks import (
     records_for_file,
     render_cachelink_records,
 )
-from ..cache.checksum import ChecksumCatalog
-from ..core.config import ConfigError, Settings, load_settings
-from ..auth.credentials import CredentialStore, load_credentials
-from ..auth.credentials import AuthenticationManager
-from ..net.fetcher import Fetcher
-from ..db.index import IndexDatabase, IndexedEntry
-from ..net.indexer import RemoteListingFetcher, Indexer
-from ..storage.staging import StagingArea
-from ..ui.webui import WebUIApp
+from cache.checksum import ChecksumCatalog
+from core.config import ConfigError, Settings, load_two_file_settings, load_database_backed_settings
+from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
+from net.fetcher import Fetcher
+from db.index import IndexDatabase, IndexedEntry
+from net.indexer import RemoteListingFetcher, Indexer
+from storage.staging import StagingArea
+from ui.webui import WebUIApp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,13 +67,12 @@ class CacheInfinityService:
         credentials_file: Optional[Path] = None,
         state_store: ConfigStateStore | None = None,
     ) -> "CacheInfinityService":
-        # Try to load two-file configuration first
+        # Load database-backed configuration
         try:
-            # For now, use legacy load_settings, but in the future this should use load_two_file_settings
-            settings = load_settings(config_dir)
-        except Exception:
-            # Fallback to minimal defaults
-            settings = load_settings(config_dir)
+            settings = load_database_backed_settings(config_dir, None, os.environ)
+        except Exception as exc:
+            _LOGGER.error("Failed to load configuration: %s", exc)
+            raise
         
         credentials = load_credentials(credentials_file) if credentials_file else None
         return cls.from_settings(settings, credentials, state_store=state_store)
@@ -128,8 +127,8 @@ class CacheInfinityService:
             self.indexer = indexer
             self.checksum_catalog = checksum_catalog
             # Initialize authentication manager and generate CLI API key
-            self.auth_manager = AuthenticationManager(index_db)
-            self.auth_manager.generate_cli_api_key()
+            self.auth_manager = AuthConfigManager(index_db)
+            self.auth_manager.create_cli_api_key()
             self._wsgi_app = self._build_wsgi_app()
             self._webui_app = WebUIApp(self)
         self._persist_state_snapshot()
@@ -141,6 +140,7 @@ class CacheInfinityService:
         
         if getattr(self, "_background_running", False):
             self._start_indexer_task()
+            self._start_fetcher_task()
 
     def ensure_filesystems(self) -> None:
         """Ensure backend and staging directories exist."""
@@ -164,7 +164,7 @@ class CacheInfinityService:
     # Internal helpers ----------------------------------------------------
     def _build_wsgi_app(self):
         """Create a configured WsgiDAV application."""
-        from ..hosting.webdav import WebDAVProvider
+        from hosting.webdav import WebDAVProvider
         
         provider_mapping = {}
         for share in self.settings.shares.values():
@@ -300,6 +300,31 @@ class CacheInfinityService:
         
         indexer_thread = threading.Thread(target=indexer_loop, daemon=True)
         indexer_thread.start()
+    
+    def _start_fetcher_task(self) -> None:
+        """Start a background thread for fetcher operations."""
+        def fetcher_loop():
+            while getattr(self, "_background_running", False):
+                try:
+                    # Check for pending downloads
+                    pending_downloads = self._get_pending_downloads()
+                    if pending_downloads:
+                        _LOGGER.info("Processing %d pending downloads", len(pending_downloads))
+                        results = self.fetcher.batch_download(pending_downloads, max_concurrent=3)
+                        success_count = sum(1 for result in results.values() if result.success)
+                        _LOGGER.info("Download processing completed: %d/%d successful", success_count, len(pending_downloads))
+                    
+                    # Wait before next check
+                    import time
+                    time.sleep(300)  # 5 minutes between checks
+                except Exception as exc:
+                    _LOGGER.error("Fetcher task failed: %s", exc)
+                    # Wait before retrying
+                    import time
+                    time.sleep(300)  # 5 minutes before retry
+        
+        fetcher_thread = threading.Thread(target=fetcher_loop, daemon=True)
+        fetcher_thread.start()
 
     def _start_tls_automation_task(self) -> None:
         """Start a background thread to manage TLS certificates."""
@@ -533,6 +558,166 @@ class CacheInfinityService:
                     break
         
         return targets
+    
+    def _get_pending_downloads(self) -> list[dict[str, Any]]:
+        """Get list of pending downloads from the database."""
+        try:
+            if not self.index_db:
+                return []
+            
+            # Get pending downloads from database
+            results = self.index_db.fetchall("""
+                SELECT url, destination, expected_checksum, priority
+                FROM pending_downloads
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT 10
+            """)
+            
+            downloads = []
+            for row in results:
+                downloads.append({
+                    'url': row['url'],
+                    'destination': row['destination'],
+                    'checksum': row['expected_checksum'],
+                    'resume': True,
+                    'timeout': 300
+                })
+            
+            return downloads
+            
+        except Exception as exc:
+            _LOGGER.error("Failed to get pending downloads: %s", exc)
+            return []
+    
+    def download_file_with_staging(self, url: str, destination_path: str,
+                                 expected_checksum: Optional[str] = None) -> bool:
+        """Download a file using fetcher with staging and backend integration.
+        
+        Args:
+            url: URL to download from
+            destination_path: Path relative to backend where file should be stored
+            expected_checksum: Expected SHA-256 checksum for verification
+            
+        Returns:
+            True if download and caching was successful
+        """
+        try:
+            # Create staging file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.tmp') as staging_file:
+                staging_path = Path(staging_file.name)
+            
+            # Download to staging area
+            _LOGGER.info(f"Starting download: {url} -> {destination_path}")
+            result = self.fetcher.download_file(
+                url=url,
+                destination=staging_path,
+                resume=True,
+                timeout=300,
+                expected_checksum=expected_checksum
+            )
+            
+            if not result.success:
+                _LOGGER.error(f"Download failed for {url}: {result.error_message}")
+                # Clean up staging file
+                if staging_path.exists():
+                    staging_path.unlink()
+                return False
+            
+            # Verify checksum if required
+            if expected_checksum and not result.verified:
+                _LOGGER.error(f"Checksum verification failed for {url}")
+                staging_path.unlink()
+                return False
+            
+            # Move from staging to backend
+            backend_path = self.backend_registry.primary.resolve(Path(destination_path))
+            backend_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Atomic move from staging to backend
+            import shutil
+            shutil.move(str(staging_path), str(backend_path))
+            
+            _LOGGER.info(f"Successfully downloaded and cached: {url} -> {backend_path}")
+            return True
+            
+        except Exception as exc:
+            _LOGGER.error(f"Download with staging failed for {url}: {exc}")
+            # Clean up staging file if it exists
+            if 'staging_path' in locals() and staging_path.exists():
+                staging_path.unlink()
+            return False
+    
+    def add_pending_download(self, url: str, destination: str,
+                           expected_checksum: Optional[str] = None,
+                           priority: int = 1) -> bool:
+        """Add a download to the pending downloads queue.
+        
+        Args:
+            url: URL to download from
+            destination: Destination path relative to backend
+            expected_checksum: Expected SHA-256 checksum
+            priority: Download priority (higher = more important)
+            
+        Returns:
+            True if download was added successfully
+        """
+        try:
+            if not self.index_db:
+                return False
+            
+            # Add to pending downloads table
+            self.index_db.execute("""
+                INSERT INTO pending_downloads (
+                    url, destination, expected_checksum, priority, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (url, destination, expected_checksum, priority, 'pending', int(time.time())))
+            
+            self.index_db.commit()
+            _LOGGER.info(f"Added pending download: {url} -> {destination}")
+            return True
+            
+        except Exception as exc:
+            _LOGGER.error(f"Failed to add pending download: {exc}")
+            return False
+    
+    def record_file_access(self, file_path: str, user: str) -> bool:
+        """Record file access for hotness tracking.
+        
+        Args:
+            file_path: Path to the accessed file
+            user: User who accessed the file
+            
+        Returns:
+            True if access was recorded successfully
+        """
+        try:
+            if self.indexer:
+                return self.indexer.record_file_access(file_path, user)
+            return False
+            
+        except Exception as exc:
+            _LOGGER.error(f"Failed to record file access: {exc}")
+            return False
+    
+    def get_hot_files(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get list of hottest files based on access patterns.
+        
+        Args:
+            limit: Maximum number of files to return
+            
+        Returns:
+            List of hot files with their scores
+        """
+        try:
+            if self.indexer:
+                return self.indexer.get_hot_files(limit)
+            return []
+            
+        except Exception as exc:
+            _LOGGER.error(f"Failed to get hot files: {exc}")
+            return []
 
     def regenerate_cookie(self, domain: str) -> None:
         if domain not in self.settings.cookies:
@@ -695,127 +880,145 @@ class CacheInfinityService:
         def _path(value) -> str:
             return str(value) if value else ""
 
-        paths: list[dict[str, object]] = []
-        for name, backend in settings.backends.items():
-            paths.append(
-                {
-                    "name": name,
-                    "backend_cache_root": _path(backend.backend_cache_root),
-                    "backend_mounted": backend.backend_mounted,
-                    "backend_mount_root": _path(backend.backend_mount_root),
-                }
-            )
-        staging = {
-            "staging_mounted": settings.staging.staging_mounted,
-            "staging_mount_root": _path(settings.staging.staging_mount_root),
-            "size_gb": settings.staging.size_gb,
-        }
-        limits = {
-            "max_zip_total_gb": settings.limits.max_zip_total_gb,
-            "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
-        }
-        cookies = [
-            {
-                "domain": name,
-                "cookie_jar": _path(defn.cookie_jar),
-                "credfile": _path(defn.credfile),
-            }
-            for name, defn in settings.cookies.items()
-        ]
-        shares = [
-            {
-                "name": share.name,
-                "backend_folder": share.backend_folder.as_posix(),
-                "frontend_folder": share.frontend_folder.as_posix(),
-                "writable": share.writable,
-                "cachelink_overlay": share.cachelink_overlay,
-            }
-            for share in settings.shares.values()
-        ]
-        tls = {
-            "enabled": settings.tls.enabled,
-            "mode": settings.tls.mode.value,
-            "manual": {
-                "cert_path": _path(settings.tls.manual.cert_path),
-                "key_path": _path(settings.tls.manual.key_path),
-            },
-            "http": {
-                "email": settings.tls.http.email or "",
-                "domains": list(settings.tls.http.domains),
-                "challenge": settings.tls.http.challenge,
-                "webroot_path": _path(settings.tls.http.webroot_path),
-                "staging": settings.tls.http.staging,
-            },
-            "dns01": {
-                "email": settings.tls.dns01.email or "",
-                "domains": list(settings.tls.dns01.domains),
-                "provider": settings.tls.dns01.provider or "",
-                "credentials_ini": _path(settings.tls.dns01.credentials_ini),
-                "staging": settings.tls.dns01.staging,
-                "propagation_seconds": settings.tls.dns01.propagation_seconds,
-            },
-        }
-        database = {
+        # Dynamic settings based on configuration
+        result = {}
+        
+        # Always show database settings
+        result["database"] = {
             "engine": settings.database.engine,
-            "sqlite_path": _path(settings.database.sqlite_path),
             "postgres_dsn": settings.database.postgres_dsn or "",
         }
-        idx = settings.indexing
-        indexing = {
-            "min_full_reindex_days": idx.min_full_reindex_days,
-            "max_full_reindex_days": idx.max_full_reindex_days,
-            "hot_window_days": idx.hot_window_days,
-            "hot_radius": idx.hot_radius,
-            "daily_full_reindex_budget": idx.daily_full_reindex_budget,
-            "daily_cheap_check_budget": idx.daily_cheap_check_budget,
-            "max_full_reindex_per_14d": idx.max_full_reindex_per_14d,
-            "max_cheap_checks_per_day": idx.max_cheap_checks_per_day,
-            "allow_early_full_on_change": idx.allow_early_full_on_change,
-            "early_full_requires_hot": idx.early_full_requires_hot,
-            "score_weights": {
-                "due": idx.score_weights.due,
-                "hot": idx.score_weights.hot,
-                "change": idx.score_weights.change,
-                "penalty": idx.score_weights.penalty,
-            },
-        }
-        auth = {
-            "oidc": {
-                "enabled": settings.auth.oidc.enabled,
-                "issuer": settings.auth.oidc.issuer or "",
-                "client_id": settings.auth.oidc.client_id or "",
-                "client_secret": settings.auth.oidc.client_secret or "",
-                "redirect_uri": settings.auth.oidc.redirect_uri or "",
-                "scopes": list(settings.auth.oidc.scopes),
-                "allow_insecure_http": settings.auth.oidc.allow_insecure_http,
-            },
-            "ldap": {
-                "enabled": settings.auth.ldap.enabled,
-                "uri": settings.auth.ldap.uri or "",
-                "bind_dn": settings.auth.ldap.bind_dn or "",
-                "bind_password": settings.auth.ldap.bind_password or "",
-                "user_base_dn": settings.auth.ldap.user_base_dn or "",
-                "user_filter": settings.auth.ldap.user_filter or "",
-                "start_tls": settings.auth.ldap.start_tls,
-                "ca_cert": _path(settings.auth.ldap.ca_cert),
-            },
-            "proxy_header": {
-                "enabled": settings.auth.proxy_header.enabled,
-                "header_name": settings.auth.proxy_header.header_name,
-                "auto_create": settings.auth.proxy_header.auto_create,
-            },
-        }
-        return {
-            "paths": paths,
-            "staging": staging,
-            "limits": limits,
-            "cookies": cookies,
-            "shares": shares,
-            "tls": tls,
-            "database": database,
-            "indexing": indexing,
-            "auth": auth,
-        }
+        
+        # Show backends only if any are configured
+        if settings.backends:
+            paths: list[dict[str, object]] = []
+            for name, backend in settings.backends.items():
+                paths.append(
+                    {
+                        "name": name,
+                        "backend_cache_root": _path(backend.backend_cache_root),
+                        "backend_mounted": backend.backend_mounted,
+                        "backend_mount_root": _path(backend.backend_mount_root),
+                    }
+                )
+            result["paths"] = paths
+            result["staging"] = {
+                "staging_mounted": settings.staging.staging_mounted,
+                "staging_mount_root": _path(settings.staging.staging_mount_root),
+                "size_gb": settings.staging.size_gb,
+            }
+            result["limits"] = {
+                "max_zip_total_gb": settings.limits.max_zip_total_gb,
+                "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
+            }
+        
+        # Show cookies only if any are configured
+        if settings.cookies:
+            result["cookies"] = [
+                {
+                    "domain": name,
+                    "cookie_jar": _path(defn.cookie_jar),
+                    "credfile": _path(defn.credfile),
+                }
+                for name, defn in settings.cookies.items()
+            ]
+        
+        # Show shares only if any are configured
+        if settings.shares:
+            result["shares"] = [
+                {
+                    "name": share.name,
+                    "backend_folder": share.backend_folder.as_posix(),
+                    "frontend_folder": share.frontend_folder.as_posix(),
+                    "writable": share.writable,
+                    "cachelink_overlay": share.cachelink_overlay,
+                }
+                for share in settings.shares.values()
+            ]
+        
+        # Show TLS only if enabled or if it's configured
+        if settings.tls.enabled or settings.tls.mode != "manual":
+            result["tls"] = {
+                "enabled": settings.tls.enabled,
+                "mode": settings.tls.mode if isinstance(settings.tls.mode, str) else settings.tls.mode.value,
+                "manual": {
+                    "cert_path": _path(settings.tls.manual.cert_path),
+                    "key_path": _path(settings.tls.manual.key_path),
+                },
+                "http": {
+                    "email": settings.tls.http.email or "",
+                    "domains": list(settings.tls.http.domains),
+                    "challenge": settings.tls.http.challenge,
+                    "webroot_path": _path(settings.tls.http.webroot_path),
+                    "staging": settings.tls.http.staging,
+                },
+                "dns01": {
+                    "email": settings.tls.dns01.email or "",
+                    "domains": list(settings.tls.dns01.domains),
+                    "provider": settings.tls.dns01.provider or "",
+                    "credentials_ini": _path(settings.tls.dns01.credentials_ini),
+                    "staging": settings.tls.dns01.staging,
+                    "propagation_seconds": settings.tls.dns01.propagation_seconds,
+                },
+            }
+        
+        # Show indexing only if backends are configured
+        if settings.backends:
+            idx = settings.indexing
+            result["indexing"] = {
+                "min_full_reindex_days": idx.min_full_reindex_days,
+                "max_full_reindex_days": idx.max_full_reindex_days,
+                "hot_window_days": idx.hot_window_days,
+                "hot_radius": idx.hot_radius,
+                "daily_full_reindex_budget": idx.daily_full_reindex_budget,
+                "daily_cheap_check_budget": idx.daily_cheap_check_budget,
+                "max_full_reindex_per_14d": idx.max_full_reindex_per_14d,
+                "max_cheap_checks_per_day": idx.max_cheap_checks_per_day,
+                "allow_early_full_on_change": idx.allow_early_full_on_change,
+                "early_full_requires_hot": idx.early_full_requires_hot,
+                "score_weights": {
+                    "due": idx.score_weights.due if idx.score_weights else 0.0,
+                    "hot": idx.score_weights.hot if idx.score_weights else 0.0,
+                    "change": idx.score_weights.change if idx.score_weights else 0.0,
+                    "penalty": idx.score_weights.penalty if idx.score_weights else 0.0,
+                },
+            }
+        
+        # Show auth settings only if any auth method is enabled
+        auth_enabled = (
+            settings.auth.oidc.enabled or
+            settings.auth.ldap.enabled or
+            settings.auth.proxy_header.enabled
+        )
+        if auth_enabled:
+            result["auth"] = {
+                "oidc": {
+                    "enabled": settings.auth.oidc.enabled,
+                    "issuer": settings.auth.oidc.issuer or "",
+                    "client_id": settings.auth.oidc.client_id or "",
+                    "client_secret": settings.auth.oidc.client_secret or "",
+                    "redirect_uri": settings.auth.oidc.redirect_uri or "",
+                    "scopes": list(settings.auth.oidc.scopes),
+                    "allow_insecure_http": settings.auth.oidc.allow_insecure_http,
+                },
+                "ldap": {
+                    "enabled": settings.auth.ldap.enabled,
+                    "uri": settings.auth.ldap.uri or "",
+                    "bind_dn": settings.auth.ldap.bind_dn or "",
+                    "bind_password": settings.auth.ldap.bind_password or "",
+                    "user_base_dn": settings.auth.ldap.user_base_dn or "",
+                    "user_filter": settings.auth.ldap.user_filter or "",
+                    "start_tls": settings.auth.ldap.start_tls,
+                    "ca_cert": _path(settings.auth.ldap.ca_cert),
+                },
+                "proxy_header": {
+                    "enabled": settings.auth.proxy_header.enabled,
+                    "header_name": settings.auth.proxy_header.header_name,
+                    "auto_create": settings.auth.proxy_header.auto_create,
+                },
+            }
+        
+        return result
 
     def update_settings_detail(self, payload: dict[str, object]) -> None:
         if not isinstance(payload, dict):
@@ -901,11 +1104,10 @@ class CacheInfinityService:
                 },
             }
 
+            # Write database settings to config.yml
             database_payload = payload.get("database") or {}
             database_doc = {"engine": database_payload.get("engine", "sqlite")}
-            if database_doc["engine"] == "sqlite":
-                database_doc["sqlite"] = {"path": database_payload.get("sqlite_path")}
-            elif database_doc["engine"] == "postgres":
+            if database_doc["engine"] == "postgres":
                 database_doc["postgres_dsn"] = database_payload.get("postgres_dsn")
             doc["database"] = database_doc
 
@@ -1261,6 +1463,15 @@ class CacheInfinityService:
                     info.update({"total": usage.total, "used": usage.used, "free": usage.free})
             return info
 
+        # Check if we have any backends configured
+        if not self.backend_registry.storages:
+            return {
+                "backends": [],
+                "staging": summarize_path(self.staging.base_path),
+                "missing_backend": True,
+                "message": "No backends configured. Please set up backend_1 in Settings."
+            }
+
         backends: list[dict[str, object]] = []
         for name, storage in self.backend_registry.storages.items():
             summary = summarize_path(storage.definition.backend_cache_root)
@@ -1280,24 +1491,57 @@ class CacheInfinityService:
         """Alias for list_storage_entries to match frontend expectations."""
         return self.list_storage_entries(location, relative)
 
-    def list_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
+    def list_storage_entries(
+        self,
+        location: str,
+        relative: str | None,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = None,
+        view_mode: Optional[str] = None,
+        show_hidden: bool = False,
+        search_query: str = ""
+    ) -> dict[str, object]:
         normalized_location, segments, target = self._resolve_storage_directory(location, relative)
         entries: list[dict[str, object]] = []
-        for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        
+        # Get all entries
+        for child in target.iterdir():
+            # Skip hidden files unless show_hidden is True
+            if not show_hidden and child.name.startswith('.'):
+                continue
+                
             try:
                 metadata = child.stat()
             except OSError:
                 continue
+                
             rel_path = segments + (child.name,)
-            entries.append(
-                {
-                    "name": child.name,
-                    "path": "/" + "/".join(rel_path) if rel_path else "/",
-                    "is_dir": child.is_dir(),
-                    "size": metadata.st_size,
-                    "modified": metadata.st_mtime,
-                }
-            )
+            entry = {
+                "name": child.name,
+                "path": "/" + "/".join(rel_path) if rel_path else "/",
+                "is_dir": child.is_dir(),
+                "size": metadata.st_size,
+                "modified": metadata.st_mtime,
+            }
+            
+            # Filter by search query if provided
+            if search_query and search_query.lower() not in child.name.lower():
+                continue
+                
+            entries.append(entry)
+
+        # Apply sorting
+        if sort_by == "name":
+            entries.sort(key=lambda e: e["name"].lower(), reverse=sort_order == "desc")
+        elif sort_by == "size":
+            entries.sort(key=lambda e: e["size"] or 0, reverse=sort_order == "desc")
+        elif sort_by == "modified":
+            entries.sort(key=lambda e: e["modified"] or 0, reverse=sort_order == "desc")
+        elif sort_by == "type":
+            entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()), reverse=sort_order == "desc")
+        else:
+            # Default sorting: directories first, then by name
+            entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
 
         breadcrumbs: list[dict[str, object]] = []
         breadcrumbs.append({"label": normalized_location.upper(), "path": "/"})
@@ -1421,7 +1665,7 @@ class CacheInfinityService:
         return self.index_db.any_admin_users()
 
     def validate_ui_credentials(self, username: str, password: str) -> bool:
-        return self.index_db.validate_credentials(username, password, purpose="webui", require_admin=True)
+        return self.index_db.validate_credentials(username, password)
 
     def _mutate_settings_file(self, mutator: Callable[[dict], None]) -> None:
         settings_path = self.settings.settings_path

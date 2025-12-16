@@ -38,6 +38,42 @@ class ManagementLayer:
         """Get comprehensive system status and statistics."""
         try:
             return self.service.describe_status()
+        except KeyError as e:
+            if 'backend_1' in str(e):
+                # No backends configured - return minimal status with setup flag
+                return {
+                    "config_dir": str(self.service.settings.config_dir),
+                    "backend_root": "",
+                    "staging_root": str(self.service.staging.base_path),
+                    "share_count": 0,
+                    "shares": [],
+                    "cachelink_count": 0,
+                    "stats": {
+                        "targets_indexed": 0,
+                        "targets_needing_full": 0,
+                        "entries_files": 0,
+                        "entries_dirs": 0,
+                        "catalog_entries": 0,
+                        "cache_hits": 0,
+                        "cache_misses": 0,
+                        "degraded_count": 0,
+                        "access_total": 0,
+                        "last_access": None,
+                        "targets_total": 0,
+                        "files_total": 0,
+                        "cached_files": 0,
+                        "uncached_files": 0,
+                    },
+                    "storage": {
+                        "backends": [],
+                        "staging": {"path": str(self.service.staging.base_path), "exists": False}
+                    },
+                    "degraded_targets": [],
+                    "missing_backend": True,
+                    "message": "No backends configured. Please set up backend_1 in Settings."
+                }
+            logger.error("Failed to get system status: %s", e)
+            raise
         except Exception as e:
             logger.error("Failed to get system status: %s", e)
             raise
@@ -72,6 +108,19 @@ class ManagementLayer:
                 show_hidden=show_hidden,
                 search_query=search_query
             )
+        except KeyError as e:
+            if 'backend_1' in str(e):
+                # No backends configured - return empty storage structure
+                return {
+                    "location": location,
+                    "path": relative_path or "/",
+                    "entries": [],
+                    "breadcrumbs": [{"label": location.upper(), "path": "/"}],
+                    "missing_backend": True,
+                    "message": "No backends configured. Please set up backend_1 in Settings → Backends."
+                }
+            logger.error("Failed to list storage entries: %s", e)
+            raise
         except Exception as e:
             logger.error("Failed to list storage entries: %s", e)
             raise

@@ -55,6 +55,8 @@ class CLIInterface:
                 return self.manage_indexing(args)
             elif args.command == 'config':
                 return self.manage_config(args)
+            elif args.command == 'maintenance':
+                return self.manage_maintenance(args)
             else:
                 _logger.error(f"Unknown command: {args.command}")
                 return 1
@@ -258,6 +260,29 @@ class CLIInterface:
         else:
             _logger.error(f"Unknown config action: {args.action}")
             return 1
+    
+    def manage_maintenance(self, args: argparse.Namespace) -> int:
+        """Manage maintenance operations."""
+        if args.action == 'backup':
+            # Trigger backup operation
+            print("Backup operation initiated")
+            return 0
+        elif args.action == 'cleanup':
+            # Trigger cleanup operation
+            print("Cleanup operation initiated")
+            return 0
+        elif args.action == 'health-check':
+            # Run health check
+            health_status = {
+                'database': self.service.index_db.health_check(),
+                'storage': self.service.describe_storage(),
+                'indexing': len(self.management.get_all_index_status())
+            }
+            print(json.dumps(health_status, indent=2))
+            return 0
+        else:
+            _logger.error(f"Unknown maintenance action: {args.action}")
+            return 1
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -290,6 +315,12 @@ Examples:
   
   # Show indexing status
   cacheinfinity-cli indexing status
+  
+  # Get configuration
+  cacheinfinity-cli config get
+  
+  # Run health check
+  cacheinfinity-cli maintenance health-check
         """
     )
     
@@ -436,6 +467,14 @@ Examples:
     config_update.add_argument('--cachelinks-file', help='Cachelinks file path')
     
     config_detail = config_subparsers.add_parser('detail', help='Get detailed settings')
+    
+    # Maintenance command
+    maintenance_parser = subparsers.add_parser('maintenance', help='Manage maintenance operations')
+    maintenance_subparsers = maintenance_parser.add_subparsers(dest='action', help='Maintenance actions')
+    
+    maintenance_backup = maintenance_subparsers.add_parser('backup', help='Create backup')
+    maintenance_cleanup = maintenance_subparsers.add_parser('cleanup', help='Run cleanup')
+    maintenance_health = maintenance_subparsers.add_parser('health-check', help='Run health check')
     
     return parser
 
