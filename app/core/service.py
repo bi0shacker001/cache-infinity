@@ -39,7 +39,7 @@ from net.fetcher import Fetcher
 from db.index import IndexDatabase, IndexedEntry
 from net.indexer import RemoteListingFetcher, Indexer
 from storage.staging import StagingArea
-from ui.webui import WebUIApp
+from ui.web.webcore import WebUIApp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,11 +53,13 @@ class CacheInfinityService:
         credentials: Optional[CredentialStore],
         state_store: ConfigStateStore | None = None,
     ) -> None:
+        _LOGGER.info("Initializing CacheInfinityService with settings: %s", settings.config_dir)
         self._lock = threading.RLock()
         self._background_running = False
         self._state_store = state_store
         self._preview_fetcher = RemoteListingFetcher()
         self._tls_automation: Optional[TLSAutomationService] = None
+        _LOGGER.debug("CacheInfinityService instance created with lock and state store")
         self.apply_settings(settings, credentials)
 
     @classmethod
@@ -67,14 +69,23 @@ class CacheInfinityService:
         credentials_file: Optional[Path] = None,
         state_store: ConfigStateStore | None = None,
     ) -> "CacheInfinityService":
+        _LOGGER.info("Creating CacheInfinityService from paths: config_dir=%s, credentials_file=%s", config_dir, credentials_file)
         # Load database-backed configuration
         try:
+            _LOGGER.debug("Loading database-backed settings from: %s", config_dir)
             settings = load_database_backed_settings(config_dir, None, os.environ)
+            _LOGGER.info("Successfully loaded settings with %d backends, %d shares",
+                        len(settings.backends), len(settings.shares))
         except Exception as exc:
-            _LOGGER.error("Failed to load configuration: %s", exc)
+            _LOGGER.error("Failed to load configuration from %s: %s", config_dir, exc, exc_info=True)
             raise
         
         credentials = load_credentials(credentials_file) if credentials_file else None
+        if credentials:
+            _LOGGER.info("Loaded credentials for %d users", len(credentials.users) if credentials.users else 0)
+        else:
+            _LOGGER.info("No credentials file provided or loaded")
+        
         return cls.from_settings(settings, credentials, state_store=state_store)
 
     @classmethod
@@ -89,32 +100,62 @@ class CacheInfinityService:
     # Configuration application -------------------------------------------
     def apply_settings(self, settings: Settings, credentials: Optional[CredentialStore]) -> None:
         """Apply new settings/credentials atomically."""
+        _LOGGER.info("Applying new configuration from: %s", settings.config_path)
+        _LOGGER.debug("Configuration details: %d backends, %d shares, %d cookies",
+                     len(settings.backends), len(settings.shares), len(settings.cookies))
 
         # For TwoFileSettings, use the first backend as primary
         primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else "backend_1"
+        _LOGGER.debug("Using primary backend: %s", primary_backend_name)
+        
         backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
+        _LOGGER.info("Initialized backend registry with %d backends", len(backend_registry.storages))
+        
         staging = StagingArea(settings.staging)
+        _LOGGER.info("Initialized staging area at: %s", settings.staging.staging_mount_root)
+        
+        _LOGGER.debug("Loading cachelinks from %d mount paths", len(settings.mount_tree_paths))
         cachelinks = load_cachelinks(
             settings.mount_tree_paths,
             inline_docs=settings.inline_cachelinks,
             inline_source=settings.config_path,
         )
+        _LOGGER.info("Loaded %d cachelinks", len(cachelinks.cachelinks))
+
+        # Close existing database connection if present
         if getattr(self, "index_db", None):
+            _LOGGER.debug("Closing existing database connection")
             self.index_db.close()
+        
         index_db = IndexDatabase(settings.database)
+        _LOGGER.info("Initialized database connection with engine: %s", settings.database.engine)
+        
         index_db.ensure_default_admin()
+        _LOGGER.debug("Ensured default admin user exists")
+        
         index_db.sync_users_from_config(credentials)
+        _LOGGER.debug("Synced users from configuration")
+        
         index_db.replace_cachelinks(cachelinks.cachelinks.values())
+        _LOGGER.debug("Replaced cachelinks in database")
+
         checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
+        _LOGGER.debug("Initialized checksum catalog")
+        
         fetcher = Fetcher(settings.cookies)
+        _LOGGER.info("Initialized fetcher with %d cookie domains", len(settings.cookies))
         
         # Initialize indexer with settings and database
         indexer = Indexer(settings.indexing, settings.cookies, index_db)
+        _LOGGER.info("Initialized indexer with settings: min_days=%d, max_days=%d",
+                    settings.indexing.min_full_reindex_days, settings.indexing.max_full_reindex_days)
 
         self._validate_tls_requirements(settings)
+        _LOGGER.debug("TLS requirements validated")
 
         # Initialize TLS automation service
         self._tls_automation = create_tls_automation_service(settings.config_dir, settings.tls)
+        _LOGGER.info("Initialized TLS automation service with mode: %s", settings.tls.mode)
 
         with self._lock:
             self.settings = settings
@@ -129,16 +170,22 @@ class CacheInfinityService:
             # Initialize authentication manager and generate CLI API key
             self.auth_manager = AuthConfigManager(index_db)
             self.auth_manager.create_cli_api_key()
+            _LOGGER.debug("Created CLI API key")
             self._wsgi_app = self._build_wsgi_app()
+            _LOGGER.debug("Built WSGI application")
             self._webui_app = WebUIApp(self)
+            _LOGGER.debug("Initialized WebUI application")
+
         self._persist_state_snapshot()
         _LOGGER.info("Applied configuration from %s", settings.config_path)
         
         # Initialize indexer database tables
         if self.indexer:
             self.indexer._ensure_database_tables()
+            _LOGGER.debug("Ensured indexer database tables exist")
         
         if getattr(self, "_background_running", False):
+            _LOGGER.info("Background tasks enabled, starting indexer and fetcher tasks")
             self._start_indexer_task()
             self._start_fetcher_task()
 
@@ -251,14 +298,17 @@ class CacheInfinityService:
         pass
 
     def start_background_tasks(self) -> None:
+        _LOGGER.info("Starting background tasks")
         self._background_running = True
         # Start session cleanup background task
         self._start_session_cleanup_task()
         # Start TLS automation background task
         self._start_tls_automation_task()
+        _LOGGER.info("Background tasks started successfully")
     
     def _start_session_cleanup_task(self) -> None:
         """Start a background thread to periodically clean up expired sessions."""
+        _LOGGER.info("Starting session cleanup task")
         def cleanup_loop():
             while getattr(self, "_background_running", False):
                 try:
@@ -266,8 +316,10 @@ class CacheInfinityService:
                     deleted = self.index_db.cleanup_expired_sessions(max_age_hours=24)
                     if deleted > 0:
                         _LOGGER.info("Cleaned up %d expired WebUI sessions", deleted)
+                    else:
+                        _LOGGER.debug("No expired sessions to clean up")
                 except Exception as exc:
-                    _LOGGER.warning("Session cleanup failed: %s", exc)
+                    _LOGGER.warning("Session cleanup failed: %s", exc, exc_info=True)
                 
                 # Wait 1 hour before next cleanup
                 import time
@@ -275,9 +327,11 @@ class CacheInfinityService:
         
         cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
         cleanup_thread.start()
+        _LOGGER.debug("Session cleanup thread started")
 
     def _start_indexer_task(self) -> None:
         """Start a background thread for progressive indexing."""
+        _LOGGER.info("Starting indexer task")
         def indexer_loop():
             while getattr(self, "_background_running", False):
                 try:
@@ -288,21 +342,30 @@ class CacheInfinityService:
                         results = self.indexer.index_all_targets(targets)
                         success_count = sum(1 for success in results.values() if success)
                         _LOGGER.info("Progressive indexing completed: %d/%d successful", success_count, len(targets))
+                        
+                        # Log failed targets
+                        failed_targets = [target_id for target_id, success in results.items() if not success]
+                        if failed_targets:
+                            _LOGGER.warning("Indexing failed for targets: %s", ", ".join(failed_targets))
+                    else:
+                        _LOGGER.debug("No targets need indexing at this time")
                     
                     # Wait before next indexing cycle
                     import time
                     time.sleep(3600)  # 1 hour between indexing cycles
                 except Exception as exc:
-                    _LOGGER.error("Indexer task failed: %s", exc)
+                    _LOGGER.error("Indexer task failed: %s", exc, exc_info=True)
                     # Wait before retrying
                     import time
                     time.sleep(300)  # 5 minutes before retry
         
         indexer_thread = threading.Thread(target=indexer_loop, daemon=True)
         indexer_thread.start()
+        _LOGGER.debug("Indexer thread started")
     
     def _start_fetcher_task(self) -> None:
         """Start a background thread for fetcher operations."""
+        _LOGGER.info("Starting fetcher task")
         def fetcher_loop():
             while getattr(self, "_background_running", False):
                 try:
@@ -313,24 +376,34 @@ class CacheInfinityService:
                         results = self.fetcher.batch_download(pending_downloads, max_concurrent=3)
                         success_count = sum(1 for result in results.values() if result.success)
                         _LOGGER.info("Download processing completed: %d/%d successful", success_count, len(pending_downloads))
+                        
+                        # Log failed downloads
+                        failed_downloads = [url for url, result in results.items() if not result.success]
+                        if failed_downloads:
+                            _LOGGER.warning("Download failed for URLs: %s", ", ".join(failed_downloads))
+                    else:
+                        _LOGGER.debug("No pending downloads to process")
                     
                     # Wait before next check
                     import time
                     time.sleep(300)  # 5 minutes between checks
                 except Exception as exc:
-                    _LOGGER.error("Fetcher task failed: %s", exc)
+                    _LOGGER.error("Fetcher task failed: %s", exc, exc_info=True)
                     # Wait before retrying
                     import time
                     time.sleep(300)  # 5 minutes before retry
         
         fetcher_thread = threading.Thread(target=fetcher_loop, daemon=True)
         fetcher_thread.start()
+        _LOGGER.debug("Fetcher thread started")
 
     def _start_tls_automation_task(self) -> None:
         """Start a background thread to manage TLS certificates."""
         if not self._tls_automation:
+            _LOGGER.warning("TLS automation not available - skipping TLS automation task")
             return
         
+        _LOGGER.info("Starting TLS automation task with mode: %s", self.settings.tls.mode)
         def tls_loop():
             while getattr(self, "_background_running", False):
                 try:
@@ -342,6 +415,7 @@ class CacheInfinityService:
                         domains = list(self.settings.tls.dns01.domains)
                     
                     if domains:
+                        _LOGGER.debug("Checking certificate validity for domains: %s", ", ".join(domains))
                         cert = self._tls_automation._get_existing_certificate(domains)
                         if cert and not self._tls_automation._is_certificate_valid(cert):
                             _LOGGER.info("Certificate needs renewal for domains: %s", ", ".join(domains))
@@ -350,9 +424,13 @@ class CacheInfinityService:
                                 _LOGGER.info("Certificate renewed successfully")
                             else:
                                 _LOGGER.warning("Certificate renewal failed")
+                        else:
+                            _LOGGER.debug("Certificate is still valid")
+                    else:
+                        _LOGGER.debug("No domains configured for TLS automation")
                 
                 except Exception as exc:
-                    _LOGGER.warning("TLS automation failed: %s", exc)
+                    _LOGGER.warning("TLS automation failed: %s", exc, exc_info=True)
                 
                 # Wait 6 hours before next check
                 import time
@@ -360,6 +438,7 @@ class CacheInfinityService:
         
         tls_thread = threading.Thread(target=tls_loop, daemon=True)
         tls_thread.start()
+        _LOGGER.debug("TLS automation thread started")
 
     # Web UI helpers ------------------------------------------------------
     def describe_status(self) -> dict[str, object]:
@@ -720,15 +799,19 @@ class CacheInfinityService:
             return []
 
     def regenerate_cookie(self, domain: str) -> None:
+        _LOGGER.info("Regenerating cookies for domain: %s", domain)
         if domain not in self.settings.cookies:
+            _LOGGER.error("Unknown cookie domain: %s", domain)
             raise ConfigError(f"Unknown cookie domain {domain}")
         try:
             # Use the fetcher's cookie refresh functionality
+            _LOGGER.debug("Attempting to refresh cookies for domain: %s", domain)
             success = self.fetcher.refresh_cookies(domain)
             if not success:
                 raise Exception("Cookie refresh failed")
+            _LOGGER.info("Successfully regenerated cookies for domain: %s", domain)
         except Exception as exc:
-            _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc)
+            _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc, exc_info=True)
             self.index_db.record_cookie_error(domain, str(exc), auth_fail=_looks_like_auth_error(str(exc)))
             raise
         else:

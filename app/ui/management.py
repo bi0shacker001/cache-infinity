@@ -37,10 +37,14 @@ class ManagementLayer:
     def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status and statistics."""
         try:
-            return self.service.describe_status()
+            logger.debug("ManagementLayer.get_system_status() called")
+            result = self.service.describe_status()
+            logger.debug("System status result: %s", result)
+            return result
         except KeyError as e:
             if 'backend_1' in str(e):
                 # No backends configured - return minimal status with setup flag
+                logger.warning("No backends configured - returning minimal status")
                 return {
                     "config_dir": str(self.service.settings.config_dir),
                     "backend_root": "",
@@ -81,7 +85,10 @@ class ManagementLayer:
     def get_storage_utilization(self) -> Dict[str, Any]:
         """Get storage utilization information."""
         try:
-            return self.service.describe_storage()
+            logger.debug("ManagementLayer.get_storage_utilization() called")
+            result = self.service.describe_storage()
+            logger.debug("Storage utilization result: %s", result)
+            return result
         except Exception as e:
             logger.error("Failed to get storage utilization: %s", e)
             raise

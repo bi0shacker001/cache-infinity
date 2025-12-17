@@ -67,12 +67,16 @@ class IndexDatabase:
     """Persistent storage for indexing state."""
 
     def __init__(self, settings: 'DatabaseSettings'):
+        import logging
+        self._logger = logging.getLogger(__name__)
+        self._logger.info("Initializing IndexDatabase with settings: %s", settings.engine)
         self._db = DBAdapter(settings)
         self._lock = threading.RLock()
         self._init_schema()
 
     # Schema -----------------------------------------------------------------
     def _init_schema(self) -> None:
+        self._logger.info("Initializing database schema")
         with self._lock:
             # Existing tables
             self._db.execute(
@@ -397,6 +401,7 @@ class IndexDatabase:
 
     # Public API --------------------------------------------------------------
     def ensure_target(self, descriptor: CachelinkDescriptor, remote_url: str) -> TargetState:
+        self._logger.debug("Ensuring target for cachelink: %s", descriptor.canonical_id)
         with self._lock:
             row = self._db.fetchone(
                 """
@@ -408,6 +413,7 @@ class IndexDatabase:
                 (descriptor.canonical_id,),
             )
             if row is None:
+                self._logger.debug("Creating new target entry for: %s", descriptor.canonical_id)
                 self._db.execute(
                     "INSERT INTO indexing_targets (cachelink_id, remote_url, needs_full_reindex) VALUES (?, ?, 1)",
                     (descriptor.canonical_id, remote_url),
@@ -424,6 +430,7 @@ class IndexDatabase:
                 )
             else:
                 if remote_url and remote_url != row["remote_url"]:
+                    self._logger.debug("Updating remote URL for target: %s", descriptor.canonical_id)
                     self._db.execute(
                         "UPDATE indexing_targets SET remote_url = ? WHERE cachelink_id = ?",
                         (remote_url, descriptor.canonical_id),
@@ -442,6 +449,8 @@ class IndexDatabase:
         last_check = _parse_ts(row["last_check_at"]) if row["last_check_at"] else None
         needs_full = bool(row["needs_full_reindex"])
         remote_value = row["remote_url"] or remote_url
+        self._logger.debug("Target state for %s: last_full=%s, needs_full=%s",
+                          descriptor.canonical_id, last_full, needs_full)
         return TargetState(
             id=row["id"],
             descriptor=descriptor,
@@ -1084,18 +1093,25 @@ class IndexDatabase:
         return bool(row)
 
     def validate_credentials(self, username: str, password: str, *, purpose: str = "webui", require_admin: bool = False) -> bool:
+        self._logger.debug("Validating credentials for user: %s, purpose: %s, require_admin: %s", username, purpose, require_admin)
         user = self.get_auth_user(username, purpose=purpose)
         if not user:
+            self._logger.warning("User not found: %s", username)
             return False
         if not user["enabled"]:
+            self._logger.warning("User disabled: %s", username)
             return False
         if require_admin and not user["is_admin"]:
+            self._logger.warning("User not admin: %s", username)
             return False
         if user.get("password_plain") and password == user["password_plain"]:
+            self._logger.info("Successful authentication for user: %s", username)
             return True
         if user.get("password_hash"):
             # Placeholder for future hash verification
+            self._logger.warning("Hash-based authentication not yet implemented for user: %s", username)
             return False
+        self._logger.warning("No password found for user: %s", username)
         return False
 
     def get_user_password_plain(self, username: str, *, purpose: str = "webdav") -> str | None:
@@ -1908,9 +1924,11 @@ class IndexDatabase:
 
     def validate_credentials(self, username: str, password: str) -> bool:
         """Validate user credentials against database."""
+        self._logger.debug("Validating credentials for user: %s", username)
         try:
             result = self.get_user_credentials(username)
             if not result:
+                self._logger.warning("User not found: %s", username)
                 return False
             
             stored_plain = result.get('password_plain')
@@ -1918,14 +1936,18 @@ class IndexDatabase:
             
             # Check plain text password first (for backward compatibility)
             if stored_plain and stored_plain == password:
+                self._logger.info("Successful plain text authentication for user: %s", username)
                 return True
             
             # Check hashed password
             if stored_hash and self._verify_password_hash(password, stored_hash):
+                self._logger.info("Successful hash authentication for user: %s", username)
                 return True
             
+            self._logger.warning("Authentication failed for user: %s", username)
             return False
-        except Exception:
+        except Exception as exc:
+            self._logger.error("Error validating credentials for user %s: %s", username, exc)
             return False
 
     def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
