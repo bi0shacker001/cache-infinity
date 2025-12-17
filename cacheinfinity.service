@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=cache-infinite
 Group=cache-infinite
-ExecStart=/usr/bin/env cacheinfinity serve --config-dir /etc/cacheinfinity/config --credentials /etc/cacheinfinity/credentials/users.yaml
+ExecStart=/usr/bin/env cacheinfinity serve --config-dir /etc/cacheinfinity/config
 Restart=on-failure
 Environment=PYTHONUNBUFFERED=1
 # Hardening

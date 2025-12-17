@@ -1,7 +1,0 @@
-# Example cachelink hierarchy
-cachelinks:
-  example_share:
-    psx:
-      cachelink_Redump_PSX:
-        url: https://archive.org/download/Redump_PSX_2021_06_04_0-9
-        subfolder: /

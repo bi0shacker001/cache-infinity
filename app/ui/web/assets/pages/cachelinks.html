@@ -1,0 +1,37 @@
+<div class="cachelink-layout">
+  <div class="panel">
+    <h3>Folders</h3>
+    <div class="panel-subtitle">Virtual organization for cachelinks</div>
+    <div class="folder-actions">
+      <input type="text" id="folder-new-path" placeholder="games/psx" />
+      <button class="btn btn-secondary btn-small" id="cachelink-folder-add-btn" type="button">Add Folder</button>
+    </div>
+    <div class="folder-list" id="cachelink-folders">Loading…</div>
+  </div>
+  <div class="panel">
+    <h3>Cachelinks</h3>
+    <div class="panel-subtitle" id="cachelink-folder-label">Select a folder to view entries.</div>
+    <div class="entry-list" id="cachelink-entries">Loading…</div>
+    <button class="btn btn-secondary btn-small" id="cachelink-entry-add-btn" type="button">Add Cachelink</button>
+  </div>
+  <div class="panel editor-panel">
+    <h3 id="cachelink-editor-title">Cachelink Editor</h3>
+    <div class="panel-subtitle">Preview (run on demand)</div>
+    <div class="table-wrap" id="cachelink-preview">
+      <table><tbody><tr><td style="padding:0.5rem;color:var(--text-muted);">Run "Process" to preview listing.</td></tr></tbody></table>
+    </div>
+    <button class="btn btn-secondary btn-small" id="cachelink-process-btn" type="button">Process</button>
+    <label>Name</label>
+    <input type="text" id="cachelink-entry-name" placeholder="map0001" />
+    <label>Source URL</label>
+    <input type="text" id="cachelink-url" placeholder="https://archive.org/download/Identifier" />
+    <label>Subfolder</label>
+    <input type="text" id="cachelink-subfolder" value="/" />
+    <div class="editor-actions">
+      <button class="btn btn-primary" id="cachelink-save-btn" type="button">Save</button>
+      <button class="btn btn-secondary" id="cachelink-revert-btn" type="button">Revert</button>
+      <button class="btn btn-danger" id="cachelink-delete-btn" type="button" style="display:none;">Delete</button>
+    </div>
+    <div id="cachelink-status" class="status-msg"></div>
+  </div>
+</div>

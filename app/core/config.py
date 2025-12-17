@@ -562,9 +562,9 @@ class Settings:
 
 def load_config_dir(args, env) -> Path:
     """Load config directory from args or environment."""
-    config_dir = args.config_dir if hasattr(args, 'config_dir') and args.config_dir else env.get('CACHEINFINITY_CONFIG_DIR')
+    config_dir = args.config_dir if hasattr(args, 'config_dir') and args.config_dir else env.get('CONFIG_DIR')
     if not config_dir:
-        raise ConfigError("config-dir is required (via --config-dir or CACHEINFINITY_CONFIG_DIR)")
+        raise ConfigError("config-dir is required (via --config-dir or CONFIG_DIR)")
     return Path(config_dir).expanduser()
 
 
@@ -574,32 +574,32 @@ def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
     db_type = None
     if hasattr(args, 'db_type') and args.db_type:
         db_type = args.db_type
-    elif 'CACHEINFINITY_DB_TYPE' in env:
-        db_type = env['CACHEINFINITY_DB_TYPE']
-    
+    elif 'DB_TYPE' in env:
+        db_type = env['DB_TYPE']
+
     # Normalize db_type
     normalized_db_type = db_type.lower().strip() if db_type else ''
-    
+
     # Check for database_url
     database_url = None
     if hasattr(args, 'database_url') and args.database_url:
         database_url = args.database_url
-    elif 'CACHEINFINITY_DATABASE_URL' in env:
-        database_url = env['CACHEINFINITY_DATABASE_URL']
-    
+    elif 'DATABASE_URL' in env:
+        database_url = env['DATABASE_URL']
+
     # Check for db_user
     db_user = None
     if hasattr(args, 'db_user') and args.db_user:
         db_user = args.db_user
-    elif 'CACHEINFINITY_DB_USER' in env:
-        db_user = env['CACHEINFINITY_DB_USER']
-    
+    elif 'DB_USER' in env:
+        db_user = env['DB_USER']
+
     # Check for db_password
     db_password = None
     if hasattr(args, 'db_password') and args.db_password:
         db_password = args.db_password
-    elif 'CACHEINFINITY_DB_PASSWORD' in env:
-        db_password = env['CACHEINFINITY_DB_PASSWORD']
+    elif 'DB_PASS' in env:
+        db_password = env['DB_PASS']
     
     match normalized_db_type:
         case 'postgresql' | 'postgres':
@@ -673,20 +673,20 @@ def merge_configurations(basic_config: dict, bootstrap_config: dict, env: dict, 
 def _extract_env_config(env: dict) -> dict:
     """Extract configuration from environment variables."""
     env_config = {}
-    
-    # Extract database settings
-    if 'CACHEINFINITY_DB_TYPE' in env:
-        env_config.setdefault('database', {})['engine'] = env['CACHEINFINITY_DB_TYPE']
-    
-    if 'CACHEINFINITY_DATABASE_URL' in env:
-        env_config.setdefault('database', {})['postgres_dsn'] = env['CACHEINFINITY_DATABASE_URL']
-    
-    if 'CACHEINFINITY_DB_USER' in env:
-        env_config.setdefault('database', {})['db_user'] = env['CACHEINFINITY_DB_USER']
-    
-    if 'CACHEINFINITY_DB_PASSWORD' in env:
-        env_config.setdefault('database', {})['db_password'] = env['CACHEINFINITY_DB_PASSWORD']
-    
+
+    # Extract database settings - only use simple variables, not CACHEINFINITY_ prefixed ones
+    if 'DB_TYPE' in env:
+        env_config.setdefault('database', {})['engine'] = env['DB_TYPE']
+
+    if 'DATABASE_URL' in env:
+        env_config.setdefault('database', {})['postgres_dsn'] = env['DATABASE_URL']
+
+    if 'DB_USER' in env:
+        env_config.setdefault('database', {})['db_user'] = env['DB_USER']
+
+    if 'DB_PASS' in env:
+        env_config.setdefault('database', {})['db_password'] = env['DB_PASS']
+
     return env_config
 
 
@@ -948,6 +948,23 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
             backend_mount_root=Path(backend_raw["backend_mount_root"]) if backend_raw["backend_mount_root"] else None
         )
         backends[backend.name] = backend
+
+    # If no backends are defined in database, create a minimal default backend
+    if not backends:
+        _LOGGER.info("No backends configured in database - creating default backend_1 at /backend")
+        default_backend_path = Path("/backend")
+        default_backend_path.mkdir(parents=True, exist_ok=True)
+        backends["backend_1"] = BackendDefinition(
+            name="backend_1",
+            backend_mounted=False,
+            backend_cache_root=default_backend_path,
+            backend_mount_root=None
+        )
+    elif "backend_1" not in backends:
+        # If backends exist but no backend_1, use the first one as backend_1
+        first_backend_name = next(iter(backends.keys()))
+        _LOGGER.info("No backend_1 found in database - using %s as backend_1", first_backend_name)
+        backends["backend_1"] = backends[first_backend_name]
     
     # Load staging from database
     staging_raw = index_db.get_staging()

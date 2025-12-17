@@ -8,18 +8,19 @@ services:
   cacheinfinity:
     image: siliconautomaton/cache-infinity:test
     container_name: cacheinfinity-test
-    restart: unless-stopped
+    restart: no
     environment:
       UID: "${UID:-1000}"                      # container runtime user id
       GID: "${GID:-1000}"                      # container runtime group id
       DB_USER: "${DB_USER:-cacheinfinity}"     # shared DB username
       DB_PASS: "${DB_PASS:-cacheinfinity}"     # shared DB password
+      LOG_LEVEL: DEBUG
       CACHEINFINITY_DATABASE_URL: "postgresql://${DB_USER:-cacheinfinity}:${DB_PASS:-cacheinfinity}@cacheinfinity-db-test/cacheinfinity"
     depends_on:
       - db
     ports:
-      - "8080:8080"                           # expose WebDAV service
-      - "8090:8090"                           # expose Web UI control plane
+      - "9080:9080"                           # expose WebDAV service
+      - "9090:9090"                           # expose Web UI control plane
     volumes:
       - ${HOME}/.dev/docker-test/cache-infinity/backend:/backend            # persistent backend storage mount
       - ${HOME}/.dev/docker-test/cache-infinity/staging:/staging            # staging workspace for downloads

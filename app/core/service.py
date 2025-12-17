@@ -6,6 +6,7 @@ import base64
 import gzip
 import importlib
 import logging
+import os
 import shutil
 import threading
 import time
@@ -69,7 +70,7 @@ class CacheInfinityService:
         credentials_file: Optional[Path] = None,
         state_store: ConfigStateStore | None = None,
     ) -> "CacheInfinityService":
-        _LOGGER.info("Creating CacheInfinityService from paths: config_dir=%s, credentials_file=%s", config_dir, credentials_file)
+        _LOGGER.info("Creating CacheInfinityService from paths: config_dir=%s", config_dir)
         # Load database-backed configuration
         try:
             _LOGGER.debug("Loading database-backed settings from: %s", config_dir)
@@ -79,14 +80,8 @@ class CacheInfinityService:
         except Exception as exc:
             _LOGGER.error("Failed to load configuration from %s: %s", config_dir, exc, exc_info=True)
             raise
-        
-        credentials = load_credentials(credentials_file) if credentials_file else None
-        if credentials:
-            _LOGGER.info("Loaded credentials for %d users", len(credentials.users) if credentials.users else 0)
-        else:
-            _LOGGER.info("No credentials file provided or loaded")
-        
-        return cls.from_settings(settings, credentials, state_store=state_store)
+
+        return cls.from_settings(settings, None, state_store=state_store)
 
     @classmethod
     def from_settings(
@@ -107,13 +102,40 @@ class CacheInfinityService:
         # For TwoFileSettings, use the first backend as primary
         primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else "backend_1"
         _LOGGER.debug("Using primary backend: %s", primary_backend_name)
-        
+
+        # Ensure we have at least a default backend_1 configuration
+        if not settings.backends:
+            _LOGGER.info("No backends configured - creating default backend_1 at /backend")
+            from storage.backend import BackendDefinition
+            default_backend = BackendDefinition(
+                name="backend_1",
+                backend_cache_root=Path("/backend"),
+                backend_mounted=False,
+                backend_mount_root=None
+            )
+            # We need to modify the settings object to include the default backend
+            # This requires accessing the internal structure
+            settings.backends = {"backend_1": default_backend}
+
+            # Also save this default backend to the database for persistence
+            try:
+                self.index_db.save_backend({
+                    "name": "backend_1",
+                    "backend_mounted": False,
+                    "backend_cache_root": str(Path("/backend")),
+                    "backend_mount_root": None
+                })
+                _LOGGER.info("Created default backend_1 configuration and saved to database")
+            except Exception as e:
+                _LOGGER.error("Failed to save default backend to database: %s", e)
+                _LOGGER.info("Created default backend_1 configuration (database save failed)")
+
         backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
         _LOGGER.info("Initialized backend registry with %d backends", len(backend_registry.storages))
-        
+
         staging = StagingArea(settings.staging)
         _LOGGER.info("Initialized staging area at: %s", settings.staging.staging_mount_root)
-        
+
         _LOGGER.debug("Loading cachelinks from %d mount paths", len(settings.mount_tree_paths))
         cachelinks = load_cachelinks(
             settings.mount_tree_paths,
@@ -126,25 +148,36 @@ class CacheInfinityService:
         if getattr(self, "index_db", None):
             _LOGGER.debug("Closing existing database connection")
             self.index_db.close()
-        
+
+        # DEBUG: Check database settings before initialization
+        _LOGGER.info("DEBUG: Database settings - engine: %s, postgres_dsn: %s",
+                    settings.database.engine, getattr(settings.database, 'postgres_dsn', 'N/A'))
+
         index_db = IndexDatabase(settings.database)
         _LOGGER.info("Initialized database connection with engine: %s", settings.database.engine)
-        
+
+        # DEBUG: Test database connection immediately after initialization
+        try:
+            test_stats = index_db.stats_summary()
+            _LOGGER.info("DEBUG: Database connection test successful. Stats: %s", test_stats)
+        except Exception as e:
+            _LOGGER.error("DEBUG: Database connection test failed: %s", e, exc_info=True)
+
         index_db.ensure_default_admin()
         _LOGGER.debug("Ensured default admin user exists")
-        
+
         index_db.sync_users_from_config(credentials)
         _LOGGER.debug("Synced users from configuration")
-        
+
         index_db.replace_cachelinks(cachelinks.cachelinks.values())
         _LOGGER.debug("Replaced cachelinks in database")
 
         checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
         _LOGGER.debug("Initialized checksum catalog")
-        
+
         fetcher = Fetcher(settings.cookies)
         _LOGGER.info("Initialized fetcher with %d cookie domains", len(settings.cookies))
-        
+
         # Initialize indexer with settings and database
         indexer = Indexer(settings.indexing, settings.cookies, index_db)
         _LOGGER.info("Initialized indexer with settings: min_days=%d, max_days=%d",
@@ -442,48 +475,79 @@ class CacheInfinityService:
 
     # Web UI helpers ------------------------------------------------------
     def describe_status(self) -> dict[str, object]:
-        with self._lock:
-            shares = [
-                {
-                    "name": share.name,
-                    "frontend": share.frontend_folder.as_posix(),
-                    "backend": share.backend_folder.as_posix(),
-                    "users": len(share.users),
-                    "overlay": share.cachelink_overlay,
+        _LOGGER.info("CacheInfinityService.describe_status() called")
+        _LOGGER.info("Service settings: %s", self.settings)
+        _LOGGER.info("Service index_db: %s", self.index_db)
+        _LOGGER.info("Service cachelinks: %s", self.cachelinks)
+
+        try:
+            with self._lock:
+                _LOGGER.info("Acquired lock for status generation")
+
+                shares = [
+                    {
+                        "name": share.name,
+                        "frontend": share.frontend_folder.as_posix(),
+                        "backend": share.backend_folder.as_posix(),
+                        "users": len(share.users),
+                        "overlay": share.cachelink_overlay,
+                    }
+                    for share in self.settings.shares.values()
+                ]
+                _LOGGER.info("Generated shares list: %d shares", len(shares))
+
+                cachelink_count = len(self.cachelinks.cachelinks)
+                _LOGGER.info("Cachelink count: %d", cachelink_count)
+
+                _LOGGER.info("Calling index_db.stats_summary()")
+                db_stats = self.index_db.stats_summary()
+                _LOGGER.info("DB stats retrieved: %s", db_stats)
+
+                _LOGGER.info("Calling index_db.access_summary()")
+                access_stats = self.index_db.access_summary()
+                _LOGGER.info("Access stats retrieved: %s", access_stats)
+
+                _LOGGER.info("Calling _compute_cache_counts()")
+                cache_stats = self._compute_cache_counts()
+                _LOGGER.info("Cache stats computed: %s", cache_stats)
+
+                _LOGGER.info("Calling list_degraded_targets()")
+                degraded = self.list_degraded_targets()
+                _LOGGER.info("Degraded targets: %d", len(degraded))
+
+                _LOGGER.info("Calling describe_storage()")
+                storage = self.describe_storage()
+                _LOGGER.info("Storage info retrieved")
+
+                status = {
+                    "config_dir": str(self.settings.config_dir),
+                    "backend_root": str(self.settings.backend_cache_root),
+                    "staging_root": str(self.staging.base_path),
+                    "share_count": len(shares),
+                    "shares": shares,
+                    "cachelink_count": cachelink_count,
+                    "stats": {
+                        **db_stats,
+                        **cache_stats,
+                        "cache_hits": cache_stats["cached_files"],
+                        "cache_misses": cache_stats["uncached_files"],
+                        "degraded_count": len(degraded),
+                        "access_total": access_stats["total"],
+                        "last_access": access_stats["last_access"],
+                    },
+                    "storage": storage,
+                    "degraded_targets": degraded,
                 }
-                for share in self.settings.shares.values()
-            ]
-            cachelink_count = len(self.cachelinks.cachelinks)
-            db_stats = self.index_db.stats_summary()
-            access_stats = self.index_db.access_summary()
-            cache_stats = self._compute_cache_counts()
-            degraded = self.list_degraded_targets()
-            storage = self.describe_storage()
-            status = {
-                "config_dir": str(self.settings.config_dir),
-                "backend_root": str(self.settings.backend_cache_root),
-                "staging_root": str(self.staging.base_path),
-                "share_count": len(shares),
-                "shares": shares,
-                "cachelink_count": cachelink_count,
-                "stats": {
-                    **db_stats,
-                    **cache_stats,
-                    "cache_hits": cache_stats["cached_files"],
-                    "cache_misses": cache_stats["uncached_files"],
-                    "degraded_count": len(degraded),
-                    "access_total": access_stats["total"],
-                    "last_access": access_stats["last_access"],
-                },
-                "storage": storage,
-                "degraded_targets": degraded,
-            }
-            if getattr(self, "indexer", None):
-                status["indexing"] = {
-                    "targets": cachelink_count,
-                    "needing_full": db_stats.get("targets_needing_full", 0),
-                }
-            return status
+                if getattr(self, "indexer", None):
+                    status["indexing"] = {
+                        "targets": cachelink_count,
+                        "needing_full": db_stats.get("targets_needing_full", 0),
+                    }
+                _LOGGER.info("Status generation completed successfully")
+                return status
+        except Exception as e:
+            _LOGGER.error("Failed to generate status: %s", e, exc_info=True)
+            raise
 
     def list_degraded_targets(self) -> list[dict[str, object]]:
         rows = self.index_db.list_degraded_targets()
@@ -963,16 +1027,16 @@ class CacheInfinityService:
         def _path(value) -> str:
             return str(value) if value else ""
 
-        # Dynamic settings based on configuration
+        # Always return a complete structure, even when no backends are configured
         result = {}
-        
+
         # Always show database settings
         result["database"] = {
             "engine": settings.database.engine,
             "postgres_dsn": settings.database.postgres_dsn or "",
         }
-        
-        # Show backends only if any are configured
+
+        # Always show backends (even if empty), staging, and limits for UI consistency
         if settings.backends:
             paths: list[dict[str, object]] = []
             for name, backend in settings.backends.items():
@@ -985,17 +1049,24 @@ class CacheInfinityService:
                     }
                 )
             result["paths"] = paths
-            result["staging"] = {
-                "staging_mounted": settings.staging.staging_mounted,
-                "staging_mount_root": _path(settings.staging.staging_mount_root),
-                "size_gb": settings.staging.size_gb,
-            }
-            result["limits"] = {
-                "max_zip_total_gb": settings.limits.max_zip_total_gb,
-                "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
-            }
-        
-        # Show cookies only if any are configured
+        else:
+            # Return empty backends list when no backends are configured
+            result["paths"] = []
+
+        # Always show staging settings
+        result["staging"] = {
+            "staging_mounted": settings.staging.staging_mounted,
+            "staging_mount_root": _path(settings.staging.staging_mount_root),
+            "size_gb": settings.staging.size_gb,
+        }
+
+        # Always show limits
+        result["limits"] = {
+            "max_zip_total_gb": settings.limits.max_zip_total_gb,
+            "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
+        }
+
+        # Always show cookies (even if empty)
         if settings.cookies:
             result["cookies"] = [
                 {
@@ -1005,8 +1076,10 @@ class CacheInfinityService:
                 }
                 for name, defn in settings.cookies.items()
             ]
-        
-        # Show shares only if any are configured
+        else:
+            result["cookies"] = []
+
+        # Always show shares (even if empty)
         if settings.shares:
             result["shares"] = [
                 {
@@ -1018,89 +1091,83 @@ class CacheInfinityService:
                 }
                 for share in settings.shares.values()
             ]
-        
-        # Show TLS only if enabled or if it's configured
-        if settings.tls.enabled or settings.tls.mode != "manual":
-            result["tls"] = {
-                "enabled": settings.tls.enabled,
-                "mode": settings.tls.mode if isinstance(settings.tls.mode, str) else settings.tls.mode.value,
-                "manual": {
-                    "cert_path": _path(settings.tls.manual.cert_path),
-                    "key_path": _path(settings.tls.manual.key_path),
-                },
-                "http": {
-                    "email": settings.tls.http.email or "",
-                    "domains": list(settings.tls.http.domains),
-                    "challenge": settings.tls.http.challenge,
-                    "webroot_path": _path(settings.tls.http.webroot_path),
-                    "staging": settings.tls.http.staging,
-                },
-                "dns01": {
-                    "email": settings.tls.dns01.email or "",
-                    "domains": list(settings.tls.dns01.domains),
-                    "provider": settings.tls.dns01.provider or "",
-                    "credentials_ini": _path(settings.tls.dns01.credentials_ini),
-                    "staging": settings.tls.dns01.staging,
-                    "propagation_seconds": settings.tls.dns01.propagation_seconds,
-                },
-            }
-        
-        # Show indexing only if backends are configured
-        if settings.backends:
-            idx = settings.indexing
-            result["indexing"] = {
-                "min_full_reindex_days": idx.min_full_reindex_days,
-                "max_full_reindex_days": idx.max_full_reindex_days,
-                "hot_window_days": idx.hot_window_days,
-                "hot_radius": idx.hot_radius,
-                "daily_full_reindex_budget": idx.daily_full_reindex_budget,
-                "daily_cheap_check_budget": idx.daily_cheap_check_budget,
-                "max_full_reindex_per_14d": idx.max_full_reindex_per_14d,
-                "max_cheap_checks_per_day": idx.max_cheap_checks_per_day,
-                "allow_early_full_on_change": idx.allow_early_full_on_change,
-                "early_full_requires_hot": idx.early_full_requires_hot,
-                "score_weights": {
-                    "due": idx.score_weights.due if idx.score_weights else 0.0,
-                    "hot": idx.score_weights.hot if idx.score_weights else 0.0,
-                    "change": idx.score_weights.change if idx.score_weights else 0.0,
-                    "penalty": idx.score_weights.penalty if idx.score_weights else 0.0,
-                },
-            }
-        
-        # Show auth settings only if any auth method is enabled
-        auth_enabled = (
-            settings.auth.oidc.enabled or
-            settings.auth.ldap.enabled or
-            settings.auth.proxy_header.enabled
-        )
-        if auth_enabled:
-            result["auth"] = {
-                "oidc": {
-                    "enabled": settings.auth.oidc.enabled,
-                    "issuer": settings.auth.oidc.issuer or "",
-                    "client_id": settings.auth.oidc.client_id or "",
-                    "client_secret": settings.auth.oidc.client_secret or "",
-                    "redirect_uri": settings.auth.oidc.redirect_uri or "",
-                    "scopes": list(settings.auth.oidc.scopes),
-                    "allow_insecure_http": settings.auth.oidc.allow_insecure_http,
-                },
-                "ldap": {
-                    "enabled": settings.auth.ldap.enabled,
-                    "uri": settings.auth.ldap.uri or "",
-                    "bind_dn": settings.auth.ldap.bind_dn or "",
-                    "bind_password": settings.auth.ldap.bind_password or "",
-                    "user_base_dn": settings.auth.ldap.user_base_dn or "",
-                    "user_filter": settings.auth.ldap.user_filter or "",
-                    "start_tls": settings.auth.ldap.start_tls,
-                    "ca_cert": _path(settings.auth.ldap.ca_cert),
-                },
-                "proxy_header": {
-                    "enabled": settings.auth.proxy_header.enabled,
-                    "header_name": settings.auth.proxy_header.header_name,
-                    "auto_create": settings.auth.proxy_header.auto_create,
-                },
-            }
-        
+        else:
+            result["shares"] = []
+
+        # Always show TLS settings
+        result["tls"] = {
+            "enabled": settings.tls.enabled,
+            "mode": settings.tls.mode if isinstance(settings.tls.mode, str) else settings.tls.mode.value,
+            "manual": {
+                "cert_path": _path(settings.tls.manual.cert_path),
+                "key_path": _path(settings.tls.manual.key_path),
+            },
+            "http": {
+                "email": settings.tls.http.email or "",
+                "domains": list(settings.tls.http.domains),
+                "challenge": settings.tls.http.challenge,
+                "webroot_path": _path(settings.tls.http.webroot_path),
+                "staging": settings.tls.http.staging,
+            },
+            "dns01": {
+                "email": settings.tls.dns01.email or "",
+                "domains": list(settings.tls.dns01.domains),
+                "provider": settings.tls.dns01.provider or "",
+                "credentials_ini": _path(settings.tls.dns01.credentials_ini),
+                "staging": settings.tls.dns01.staging,
+                "propagation_seconds": settings.tls.dns01.propagation_seconds,
+            },
+        }
+
+        # Always show indexing settings
+        idx = settings.indexing
+        result["indexing"] = {
+            "min_full_reindex_days": idx.min_full_reindex_days,
+            "max_full_reindex_days": idx.max_full_reindex_days,
+            "hot_window_days": idx.hot_window_days,
+            "hot_radius": idx.hot_radius,
+            "daily_full_reindex_budget": idx.daily_full_reindex_budget,
+            "daily_cheap_check_budget": idx.daily_cheap_check_budget,
+            "max_full_reindex_per_14d": idx.max_full_reindex_per_14d,
+            "max_cheap_checks_per_day": idx.max_cheap_checks_per_day,
+            "allow_early_full_on_change": idx.allow_early_full_on_change,
+            "early_full_requires_hot": idx.early_full_requires_hot,
+            "score_weights": {
+                "due": idx.score_weights.due if idx.score_weights else 0.0,
+                "hot": idx.score_weights.hot if idx.score_weights else 0.0,
+                "change": idx.score_weights.change if idx.score_weights else 0.0,
+                "penalty": idx.score_weights.penalty if idx.score_weights else 0.0,
+            },
+        }
+
+        # Always show auth settings
+        result["auth"] = {
+            "oidc": {
+                "enabled": settings.auth.oidc.enabled,
+                "issuer": settings.auth.oidc.issuer or "",
+                "client_id": settings.auth.oidc.client_id or "",
+                "client_secret": settings.auth.oidc.client_secret or "",
+                "redirect_uri": settings.auth.oidc.redirect_uri or "",
+                "scopes": list(settings.auth.oidc.scopes),
+                "allow_insecure_http": settings.auth.oidc.allow_insecure_http,
+            },
+            "ldap": {
+                "enabled": settings.auth.ldap.enabled,
+                "uri": settings.auth.ldap.uri or "",
+                "bind_dn": settings.auth.ldap.bind_dn or "",
+                "bind_password": settings.auth.ldap.bind_password or "",
+                "user_base_dn": settings.auth.ldap.user_base_dn or "",
+                "user_filter": settings.auth.ldap.user_filter or "",
+                "start_tls": settings.auth.ldap.start_tls,
+                "ca_cert": _path(settings.auth.ldap.ca_cert),
+            },
+            "proxy_header": {
+                "enabled": settings.auth.proxy_header.enabled,
+                "header_name": settings.auth.proxy_header.header_name,
+                "auto_create": settings.auth.proxy_header.auto_create,
+            },
+        }
+
         return result
 
     def update_settings_detail(self, payload: dict[str, object]) -> None:
@@ -1807,6 +1874,15 @@ class CacheInfinityService:
             handle.write(data)
 
     def _compute_cache_counts(self) -> dict[str, int]:
+        # Check if we have any backends configured
+        if not self.backend_registry.storages:
+            _LOGGER.info("No backends configured - returning zero cache counts")
+            return {
+                "files_total": 0,
+                "cached_files": 0,
+                "uncached_files": 0,
+            }
+
         backend = self.backend_registry.primary
         total_files = 0
         cached_files = 0
@@ -1829,8 +1905,21 @@ class CacheInfinityService:
     ) -> dict[str, object]:
         state = self.index_db.ensure_target(descriptor, descriptor.remote_listing_url)
         entries = self.index_db.list_entries_for_descriptor(descriptor)
-        backend = self.backend_registry.primary
-        counts = self._descriptor_counts(descriptor, entries, backend)
+
+        # Check if we have backends before trying to access primary
+        if self.backend_registry.storages:
+            backend = self.backend_registry.primary
+            counts = self._descriptor_counts(descriptor, entries, backend)
+        else:
+            _LOGGER.info("No backends configured - using zero counts for cachelink snapshot")
+            counts = {
+                "entries_total": len(entries),
+                "files_total": 0,
+                "dirs_total": 0,
+                "cached_files": 0,
+                "uncached_files": 0,
+            }
+
         snapshot = {
             "canonical_id": descriptor.canonical_id,
             "backend_path": descriptor.backend_relative_folder.as_posix(),

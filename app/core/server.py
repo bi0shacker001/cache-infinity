@@ -20,9 +20,7 @@ from core.logging import configure_logging
 _LOGGER = logging.getLogger(__name__)
 
 
-_CONFIG_ENV = "CACHEINFINITY_CONFIG_DIR"
-_CREDENTIALS_ENV = "CACHEINFINITY_CREDENTIALS_PATH"
-_LOG_LEVEL_ENV = "CACHEINFINITY_LOG_LEVEL"
+_CONF_DIR_ENV = "CONFIG_DIR"
 _DEFAULT_UI_PORT = 9090
 
 
@@ -31,18 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CacheInfinity service controller")
     parser.add_argument(
         "--log-level",
-        default=os.getenv(_LOG_LEVEL_ENV, "INFO"),
-        help=f"Logging verbosity (case-insensitive). Environment override via {_LOG_LEVEL_ENV}.",
+        default=os.getenv("LOG_LEVEL", "INFO"),
+        help="Logging verbosity (case-insensitive). Environment override via LOG_LEVEL.",
     )
     parser.add_argument(
         "--config-dir",
         required=False,
-        help=f"Path to configuration directory (env {_CONFIG_ENV})",
-    )
-    parser.add_argument(
-        "--credentials",
-        help=f"Path to credentials YAML file (env {_CREDENTIALS_ENV})",
-        default=None,
+        help="Path to configuration directory (env CONFIG_DIR)",
     )
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind host")
     parser.add_argument("--port", default=9080, type=int, help="HTTP bind port")
@@ -68,28 +61,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db-type",
         choices=["sqlite", "postgres"],
-        help="Database type (env CACHEINFINITY_DB_TYPE)",
+        help="Database type (env DB_TYPE)",
     )
     parser.add_argument(
         "--database-url",
-        help="Database connection URL (env CACHEINFINITY_DATABASE_URL)",
+        help="Database connection URL (env DATABASE_URL)",
     )
     parser.add_argument(
         "--db-user",
-        help="Database username (env CACHEINFINITY_DB_USER)",
+        help="Database username (env DB_USER)",
     )
     parser.add_argument(
         "--db-password",
-        help="Database password (env CACHEINFINITY_DB_PASSWORD)",
+        help="Database password (env DB_PASS)",
     )
 
     return parser
 
 
 def _resolve_config_dir(cli_value: str | None) -> Path:
-    candidate = cli_value or os.getenv(_CONFIG_ENV)
+    candidate = cli_value or os.getenv(_CONF_DIR_ENV)
     if not candidate:
-        raise ValueError("config-dir is required (via --config-dir or CACHEINFINITY_CONFIG_DIR)")
+        raise ValueError("config-dir is required (via --config-dir or CONFIG_DIR)")
     # Expand environment variables like $HOME
     candidate = os.path.expandvars(candidate)
     return Path(candidate).expanduser()
@@ -193,16 +186,9 @@ def run_server(args) -> None:
         _LOGGER.error("Failed to load configuration: %s", exc)
         raise
     
-    # Load credentials
-    credentials_path = _resolve_credentials_path(args.credentials, config_dir)
-    credentials = None
-    if credentials_path:
-        from ..auth.credentials import load_credentials
-        credentials = load_credentials(credentials_path)
-    
     service = CacheInfinityService.from_settings(
         settings,
-        credentials,
+        None,
         state_store=None
     )
     service.ensure_filesystems()
@@ -239,7 +225,8 @@ def run_server(args) -> None:
         if ui_thread:
             ui_thread.join(timeout=5)
         if getattr(service, "indexer", None):
-            service.indexer.stop()
+            # Indexer doesn't have a stop method, but we should clean up background tasks
+            service._background_running = False
 
 
 class _ReloadableApp:

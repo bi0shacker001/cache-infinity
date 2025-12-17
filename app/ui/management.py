@@ -37,9 +37,26 @@ class ManagementLayer:
     def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status and statistics."""
         try:
-            logger.debug("ManagementLayer.get_system_status() called")
+            logger.info("ManagementLayer.get_system_status() called")
+            logger.info("Service object: %s", self.service)
+            logger.info("Service settings: %s", getattr(self.service, 'settings', 'No settings'))
+            logger.info("Service index_db: %s", getattr(self.service, 'index_db', 'No index_db'))
+
+            # DEBUG: Check if service has required components
+            if not hasattr(self.service, 'index_db') or self.service.index_db is None:
+                logger.error("CRITICAL: Service index_db is None - database not initialized")
+                raise Exception("Database not initialized")
+
+            # DEBUG: Test basic database connectivity
+            try:
+                test_stats = self.service.index_db.stats_summary()
+                logger.info("DEBUG: Database stats_summary() test successful: %s", test_stats)
+            except Exception as db_test_error:
+                logger.error("DEBUG: Database stats_summary() test failed: %s", db_test_error, exc_info=True)
+                raise
+
             result = self.service.describe_status()
-            logger.debug("System status result: %s", result)
+            logger.info("System status result: %s", result)
             return result
         except KeyError as e:
             if 'backend_1' in str(e):
@@ -76,10 +93,10 @@ class ManagementLayer:
                     "missing_backend": True,
                     "message": "No backends configured. Please set up backend_1 in Settings."
                 }
-            logger.error("Failed to get system status: %s", e)
+            logger.error("Failed to get system status: %s", e, exc_info=True)
             raise
         except Exception as e:
-            logger.error("Failed to get system status: %s", e)
+            logger.error("Failed to get system status: %s", e, exc_info=True)
             raise
 
     def get_storage_utilization(self) -> Dict[str, Any]:

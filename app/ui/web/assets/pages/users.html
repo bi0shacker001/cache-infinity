@@ -1,0 +1,43 @@
+<div id="user-tab-webui" class="user-tab">
+  <div class="panel">
+    <h3>Web UI Accounts</h3>
+    <div id="ui-users-list">Loading…</div>
+  </div>
+  <div class="panel">
+    <h3>Create or Update Account</h3>
+    <label>Username</label>
+    <input type="text" id="user-name" placeholder="admin" />
+    <label>Password (leave blank to keep existing)</label>
+    <input type="password" id="user-pass" placeholder="••••••••" />
+    <div class="check-row">
+      <label><input type="checkbox" id="user-enabled" checked /> Enabled</label>
+      <label><input type="checkbox" id="user-admin" checked /> Admin</label>
+    </div>
+    <button class="btn btn-primary" id="ui-user-save-btn" type="button">Save User</button>
+    <div id="user-status" class="status-msg"></div>
+  </div>
+</div>
+<div id="user-tab-webdav" class="user-tab" style="display: none;">
+  <div class="panel">
+    <h3>Share Assignments</h3>
+    <div id="webdav-users">Loading…</div>
+  </div>
+  <div class="panel">
+    <h3>Add or Update Mapping</h3>
+    <label>Share</label>
+    <select id="webdav-share"></select>
+    <label>Username</label>
+    <input type="text" id="webdav-username" placeholder="demo" />
+    <label>Password (leave blank to keep existing)</label>
+    <input type="password" id="webdav-password" placeholder="••••••••" />
+    <div class="check-row">
+      <label><input type="checkbox" id="webdav-enabled" checked /> Enabled</label>
+      <label><input type="checkbox" id="webdav-login" checked /> Login</label>
+      <label><input type="checkbox" id="webdav-read" checked /> Read</label>
+      <label><input type="checkbox" id="webdav-write" checked /> Write</label>
+      <label><input type="checkbox" id="webdav-cache" checked /> Cache</label>
+    </div>
+    <button class="btn btn-primary" id="webdav-user-save-btn" type="button">Save Mapping</button>
+    <div id="webdav-status" class="status-msg"></div>
+  </div>
+</div>
