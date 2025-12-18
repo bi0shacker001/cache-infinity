@@ -246,7 +246,186 @@ class WebUIApp:
             return self._json_response(start_response, self.management.get_storage_utilization())
         if path == "/api/settings/detail" and method == "GET":
             _LOGGER.debug("Serving settings detail")
-            return self._json_response(start_response, self.management.describe_settings_detail())
+            try:
+                # Call ManagementLayer to get settings detail
+                settings_data = self.management.describe_settings_detail()
+                _LOGGER.info("Settings detail retrieved successfully: %s", settings_data)
+                return self._json_response(start_response, settings_data)
+            except Exception as e:
+                _LOGGER.error("Failed to retrieve settings detail: %s", e, exc_info=True)
+                return self._json_error(start_response, f"Failed to retrieve settings: {e}", status="500 Internal Server Error")
+        if path == "/api/settings/detail" and method == "POST":
+            _LOGGER.debug("Updating settings detail")
+            try:
+                if 'settings' in self.handlers:
+                    return self._handle_json_request(environ, start_response, self.handlers['settings'].handle_settings_detail_update)
+                else:
+                    _LOGGER.error("Settings handler not available")
+                    return self._json_error(start_response, "Settings handler not available", status="500 Internal Server Error")
+            except Exception as e:
+                _LOGGER.error("Failed to update settings detail: %s", e, exc_info=True)
+                return self._json_error(start_response, f"Failed to update settings: {e}", status="500 Internal Server Error")
+
+        # Add missing API endpoints for storage
+        if path == "/api/storage/entries" and method == "GET":
+            _LOGGER.debug("Serving storage entries")
+            params = self._parse_query_params(environ)
+            location = params.get("location", "backend")
+            relative = params.get("relative", "/")
+            sort_by = params.get("sort_by")
+            sort_order = params.get("sort_order")
+            view_mode = params.get("view_mode")
+            show_hidden = params.get("show_hidden", "false").lower() == "true"
+            search_query = params.get("search_query", "")
+            try:
+                result = self.management.list_storage_entries(
+                    location=location,
+                    relative_path=relative,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    view_mode=view_mode,
+                    show_hidden=show_hidden,
+                    search_query=search_query
+                )
+                return self._json_response(start_response, result)
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="400 Bad Request")
+
+        if path == "/api/storage/upload" and method == "POST":
+            _LOGGER.debug("Handling storage upload")
+            if 'storage' in self.handlers:
+                return self.handlers['storage'].handle_storage_upload(environ, start_response)
+            return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
+
+        if path == "/api/storage/folder" and method == "POST":
+            _LOGGER.debug("Handling folder creation")
+            if 'storage' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['storage'].handle_folder_create)
+            return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
+
+        if path == "/api/storage/entries" and method == "DELETE":
+            _LOGGER.debug("Handling storage entry deletion")
+            if 'storage' in self.handlers:
+                return self.handlers['storage'].handle_storage_entry_delete(environ, start_response)
+            return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
+
+        if path == "/api/storage/folder" and method == "DELETE":
+            _LOGGER.debug("Handling folder deletion")
+            if 'storage' in self.handlers:
+                return self.handlers['storage'].handle_storage_folder_delete(environ, start_response)
+            return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
+
+        # Add missing API endpoints for cachelinks
+        if path == "/api/cachelinks" and method == "GET":
+            _LOGGER.debug("Serving cachelinks tree")
+            if 'cachelinks' in self.handlers:
+                return self._json_response(start_response, self.management.describe_cachelink_tree())
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks/tree" and method == "GET":
+            _LOGGER.debug("Serving cachelinks tree")
+            if 'cachelinks' in self.handlers:
+                return self._json_response(start_response, self.management.describe_cachelink_tree())
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks" and method == "POST":
+            _LOGGER.debug("Handling cachelink creation")
+            if 'cachelinks' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_create)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks/update" and method == "POST":
+            _LOGGER.debug("Handling cachelink update")
+            if 'cachelinks' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_update)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks/preview" and method == "POST":
+            _LOGGER.debug("Handling cachelink preview")
+            if 'cachelinks' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_preview)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks/folder" and method == "POST":
+            _LOGGER.debug("Handling cachelink folder creation")
+            if 'cachelinks' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_folder_add)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cachelinks/folder" and method == "DELETE":
+            _LOGGER.debug("Handling cachelink folder deletion")
+            if 'cachelinks' in self.handlers:
+                return self.handlers['cachelinks'].handle_cachelink_folder_delete(environ, start_response)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        if path.startswith("/api/cachelinks/") and method == "DELETE":
+            _LOGGER.debug("Handling cachelink deletion")
+            if 'cachelinks' in self.handlers:
+                return self.handlers['cachelinks'].handle_cachelink_delete(environ, start_response)
+            return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
+
+        # Add missing API endpoints for cookies
+        if path == "/api/cookies" and method == "GET":
+            _LOGGER.debug("Serving cookies list")
+            if 'cookies' in self.handlers:
+                return self._json_response(start_response, {"cookies": self.management.describe_cookies()})
+            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cookies/upload" and method == "POST":
+            _LOGGER.debug("Handling cookie upload")
+            if 'cookies' in self.handlers:
+                return self.handlers['cookies'].handle_cookie_upload(environ, start_response)
+            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cookies/credentials" and method == "POST":
+            _LOGGER.debug("Handling cookie credentials update")
+            if 'cookies' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_credentials)
+            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cookies/refresh" and method == "POST":
+            _LOGGER.debug("Handling cookie refresh")
+            if 'cookies' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_refresh)
+            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
+
+        if path == "/api/cookies/domain" and method == "POST":
+            _LOGGER.debug("Handling cookie domain addition")
+            if 'cookies' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_domain_add)
+            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
+
+        # Add missing API endpoints for users
+        if path == "/api/users" and method == "GET":
+            _LOGGER.debug("Serving users list")
+            if 'users' in self.handlers:
+                return self._json_response(start_response, {"users": self.management.list_users()})
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path == "/api/users" and method == "POST":
+            _LOGGER.debug("Handling user creation/update")
+            if 'users' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['users'].handle_user_upsert)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path.startswith("/api/users/") and method == "DELETE":
+            _LOGGER.debug("Handling user deletion")
+            if 'users' in self.handlers:
+                return self.handlers['users'].handle_user_disable(environ, start_response)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        # Add missing API endpoints for maintenance
+        if path == "/api/reindex" and method == "POST":
+            _LOGGER.debug("Handling reindex request")
+            if 'maintenance' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['maintenance'].handle_reindex)
+            return self._json_error(start_response, "Maintenance handler not available", status="500 Internal Server Error")
+
+        if path == "/api/degraded" and method == "GET":
+            _LOGGER.debug("Serving degraded targets list")
+            if 'maintenance' in self.handlers:
+                return self._json_response(start_response, {"degraded": self.management.list_degraded_targets()})
+            return self._json_error(start_response, "Maintenance handler not available", status="500 Internal Server Error")
 
         # Check if this is a module-specific route
         if path.startswith("/api/") and len(path) > 5:

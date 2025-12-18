@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import gzip
 import importlib
 import logging
 import os
@@ -12,7 +11,6 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from tempfile import TemporaryDirectory
 from typing import Any, Callable, Optional
 
 import yaml
@@ -34,7 +32,7 @@ from cache.cachelinks import (
     render_cachelink_records,
 )
 from cache.checksum import ChecksumCatalog
-from core.config import ConfigError, Settings, load_two_file_settings, load_database_backed_settings
+from core.config import ConfigError, Settings, load_two_file_settings, load_database_backed_settings, ConfigService
 from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
 from net.fetcher import Fetcher
 from db.index import IndexDatabase, IndexedEntry
@@ -60,6 +58,8 @@ class CacheInfinityService:
         self._state_store = state_store
         self._preview_fetcher = RemoteListingFetcher()
         self._tls_automation: Optional[TLSAutomationService] = None
+        # Initialize config service
+        self.config_service = ConfigService(self)
         _LOGGER.debug("CacheInfinityService instance created with lock and state store")
         self.apply_settings(settings, credentials)
 
@@ -100,38 +100,22 @@ class CacheInfinityService:
                      len(settings.backends), len(settings.shares), len(settings.cookies))
 
         # For TwoFileSettings, use the first backend as primary
-        primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else "backend_1"
+        primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else None
         _LOGGER.debug("Using primary backend: %s", primary_backend_name)
 
-        # Ensure we have at least a default backend_1 configuration
+        # Check if we have any backends configured
         if not settings.backends:
-            _LOGGER.info("No backends configured - creating default backend_1 at /backend")
-            from storage.backend import BackendDefinition
-            default_backend = BackendDefinition(
-                name="backend_1",
-                backend_cache_root=Path("/backend"),
-                backend_mounted=False,
-                backend_mount_root=None
-            )
-            # We need to modify the settings object to include the default backend
-            # This requires accessing the internal structure
-            settings.backends = {"backend_1": default_backend}
+            _LOGGER.info("No backends configured - WebUI will show appropriate message")
+            # Don't create default backend automatically - let user configure it explicitly
 
-            # Also save this default backend to the database for persistence
-            try:
-                self.index_db.save_backend({
-                    "name": "backend_1",
-                    "backend_mounted": False,
-                    "backend_cache_root": str(Path("/backend")),
-                    "backend_mount_root": None
-                })
-                _LOGGER.info("Created default backend_1 configuration and saved to database")
-            except Exception as e:
-                _LOGGER.error("Failed to save default backend to database: %s", e)
-                _LOGGER.info("Created default backend_1 configuration (database save failed)")
-
-        backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
-        _LOGGER.info("Initialized backend registry with %d backends", len(backend_registry.storages))
+        # Only create backend registry if we have backends configured
+        if settings.backends:
+            backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
+            _LOGGER.info("Initialized backend registry with %d backends", len(backend_registry.storages))
+        else:
+            # Create empty backend registry
+            backend_registry = BackendRegistry({}, None)
+            _LOGGER.info("No backends configured - created empty backend registry")
 
         staging = StagingArea(settings.staging)
         _LOGGER.info("Initialized staging area at: %s", settings.staging.staging_mount_root)
@@ -209,7 +193,7 @@ class CacheInfinityService:
             self._webui_app = WebUIApp(self)
             _LOGGER.debug("Initialized WebUI application")
 
-        self._persist_state_snapshot()
+        self.config_service.persist_state_snapshot()
         _LOGGER.info("Applied configuration from %s", settings.config_path)
         
         # Initialize indexer database tables
@@ -997,29 +981,7 @@ class CacheInfinityService:
         self._mutate_settings_file(mutator)
 
     def get_config_payload(self) -> dict[str, object]:
-        settings_text: str | None = None
-        cachelinks_text: str | None = None
-        try:
-            settings_text = self.settings.settings_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            settings_text = None
-        cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
-        stored_settings = None
-        stored_cachelinks = None
-        if hasattr(self, "index_db"):
-            stored_settings, stored_cachelinks = self.index_db.load_config_snapshot()
-        if cachelinks_path.exists():
-            cachelinks_text = cachelinks_path.read_text(encoding="utf-8")
-        elif stored_cachelinks:
-            cachelinks_text = stored_cachelinks
-        if settings_text is None and stored_settings:
-            settings_text = stored_settings
-        return {
-            "settings_path": str(self.settings.settings_path),
-            "settings_text": settings_text or "",
-            "cachelinks_path": str(cachelinks_path),
-            "cachelinks_text": cachelinks_text or "",
-        }
+        return self.config_service.get_config_payload()
 
     def describe_settings_detail(self) -> dict[str, object]:
         settings = self.settings
@@ -1171,119 +1133,7 @@ class CacheInfinityService:
         return result
 
     def update_settings_detail(self, payload: dict[str, object]) -> None:
-        if not isinstance(payload, dict):
-            raise ConfigError("Invalid settings payload")
-
-        def _clean_path(value: object) -> str | None:
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            return None
-
-        def mutator(doc: dict) -> None:
-            settings_doc = doc.setdefault("settings", {})
-            paths_doc: dict[str, object] = {}
-            for backend in payload.get("paths", []):
-                name = (backend.get("name") or "").strip()
-                if not name:
-                    continue
-                paths_doc[name] = {
-                    "backend_cache_root": backend.get("backend_cache_root"),
-                    "backend_mounted": bool(backend.get("backend_mounted", False)),
-                    "backend_mount_root": backend.get("backend_mount_root"),
-                }
-            staging_payload = payload.get("staging") or {}
-            paths_doc["staging"] = {
-                "staging_mounted": bool(staging_payload.get("staging_mounted", False)),
-                "staging_mount_root": staging_payload.get("staging_mount_root"),
-                "size_gb": staging_payload.get("size_gb"),
-            }
-            settings_doc["paths"] = paths_doc
-
-            limits_payload = payload.get("limits") or {}
-            doc["limits"] = {
-                "max_zip_total_gb": limits_payload.get("max_zip_total_gb"),
-                "one_zip_cache_at_a_time": bool(limits_payload.get("one_zip_cache_at_a_time", False)),
-            }
-
-            cookies_doc: dict[str, dict[str, object]] = {}
-            for cookie in payload.get("cookies", []):
-                domain = (cookie.get("domain") or "").strip().lower()
-                if not domain:
-                    continue
-                entry = {"cookie_jar": cookie.get("cookie_jar") or ""}
-                credfile = _clean_path(cookie.get("credfile"))
-                if credfile:
-                    entry["credfile"] = credfile
-                cookies_doc[domain] = entry
-            doc["cookies"] = cookies_doc
-
-            shares_doc: dict[str, dict[str, object]] = {}
-            for share in payload.get("shares", []):
-                name = (share.get("name") or "").strip()
-                if not name:
-                    continue
-                shares_doc[name] = {
-                    "backend_folder": share.get("backend_folder"),
-                    "frontend_folder": share.get("frontend_folder"),
-                    "writable": bool(share.get("writable", True)),
-                    "cachelink_overlay": bool(share.get("cachelink_overlay", True)),
-                    "users": doc.get("webdav", {}).get(name, {}).get("users", {}),
-                }
-            doc["webdav"] = shares_doc
-
-            tls_payload = payload.get("tls") or {}
-            doc["tls"] = {
-                "enabled": bool(tls_payload.get("enabled", False)),
-                "mode": tls_payload.get("mode", "manual"),
-                "cert_path": tls_payload.get("manual", {}).get("cert_path"),
-                "key_path": tls_payload.get("manual", {}).get("key_path"),
-                "http": {
-                    "email": tls_payload.get("http", {}).get("email"),
-                    "domains": tls_payload.get("http", {}).get("domains", []),
-                    "challenge": tls_payload.get("http", {}).get("challenge"),
-                    "webroot_path": tls_payload.get("http", {}).get("webroot_path"),
-                    "staging": bool(tls_payload.get("http", {}).get("staging", False)),
-                },
-                "dns01": {
-                    "email": tls_payload.get("dns01", {}).get("email"),
-                    "domains": tls_payload.get("dns01", {}).get("domains", []),
-                    "provider": tls_payload.get("dns01", {}).get("provider"),
-                    "credentials_ini": tls_payload.get("dns01", {}).get("credentials_ini"),
-                    "staging": bool(tls_payload.get("dns01", {}).get("staging", False)),
-                    "propagation_seconds": tls_payload.get("dns01", {}).get("propagation_seconds"),
-                },
-            }
-
-            # Write database settings to config.yml
-            database_payload = payload.get("database") or {}
-            database_doc = {"engine": database_payload.get("engine", "sqlite")}
-            if database_doc["engine"] == "postgres":
-                database_doc["postgres_dsn"] = database_payload.get("postgres_dsn")
-            doc["database"] = database_doc
-
-            indexing_payload = payload.get("indexing") or {}
-            doc["indexing"] = {
-                "min_full_reindex_days": indexing_payload.get("min_full_reindex_days"),
-                "max_full_reindex_days": indexing_payload.get("max_full_reindex_days"),
-                "hot_window_days": indexing_payload.get("hot_window_days"),
-                "hot_radius": indexing_payload.get("hot_radius"),
-                "daily_full_reindex_budget": indexing_payload.get("daily_full_reindex_budget"),
-                "daily_cheap_check_budget": indexing_payload.get("daily_cheap_check_budget"),
-                "max_full_reindex_per_14d": indexing_payload.get("max_full_reindex_per_14d"),
-                "max_cheap_checks_per_day": indexing_payload.get("max_cheap_checks_per_day"),
-                "allow_early_full_on_change": bool(indexing_payload.get("allow_early_full_on_change", False)),
-                "early_full_requires_hot": bool(indexing_payload.get("early_full_requires_hot", False)),
-                "score_weights": indexing_payload.get("score_weights", {}),
-            }
-
-            auth_payload = payload.get("auth") or {}
-            doc["auth"] = {
-                "oidc": auth_payload.get("oidc", {}),
-                "ldap": auth_payload.get("ldap", {}),
-                "proxy_header": auth_payload.get("proxy_header", {}),
-            }
-
-        self._mutate_settings_file(mutator)
+        self.config_service.update_settings_detail(payload)
 
     def describe_cachelinks(self) -> list[dict[str, object]]:
         degraded_map = {row["cachelink_id"]: row for row in self.index_db.list_degraded_targets()}
@@ -1447,117 +1297,19 @@ class CacheInfinityService:
         settings_text: Optional[str] = None,
         cachelinks_text: Optional[str] = None,
     ) -> None:
-        if not settings_text and not cachelinks_text:
-            raise ConfigError("No configuration changes provided")
-        config_dir = self.settings.config_dir
-        changes: list[tuple[Path, str, str]] = []
-        if settings_text is not None:
-            changes.append((self.settings.settings_path, settings_text, "settings"))
-        if cachelinks_text is not None:
-            cachelinks_path = config_dir / "cachelinks.yaml"
-            changes.append((cachelinks_path, cachelinks_text, "cachelinks"))
-        for target, text, label in changes:
-            self._validate_config_edit(target, text)
-        for target, text, label in changes:
-            self._backup_file(target, label)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
-        new_settings = load_settings(config_dir)
-        self.apply_settings(new_settings, self.credentials)
-        self.ensure_filesystems()
-        self._persist_state_snapshot()
+        self.config_service.update_config_from_webui(settings_text, cachelinks_text)
 
     def import_config_from_file(self, config_file: Path) -> None:
         """Import settings.yaml configuration from a file."""
-        if not config_file.exists():
-            raise ConfigError(f"Configuration file not found: {config_file}")
-        
-        # Validate the configuration first
-        self._validate_config_edit(config_file, config_file.read_text(encoding="utf-8"))
-        
-        # Backup the current settings
-        self._backup_file(self.settings.settings_path, "settings")
-        
-        # Copy the new configuration
-        self.settings.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config_file, self.settings.settings_path)
-        
-        # Reload the configuration
-        new_settings = load_settings(self.settings.config_dir)
-        self.apply_settings(new_settings, self.credentials)
-        self.ensure_filesystems()
-        self._persist_state_snapshot()
+        self.config_service.import_config_from_file(config_file)
 
     def import_cachelinks_from_file(self, cachelinks_file: Path) -> None:
         """Import cachelinks from a YAML file."""
-        if not cachelinks_file.exists():
-            raise ConfigError(f"Cachelinks file not found: {cachelinks_file}")
-        
-        # Load and validate the cachelinks document
-        doc = self._load_cachelinks_document(cachelinks_file)
-        cachelinks_path = self.settings.config_dir / "cachelinks.yaml"
-        
-        # Backup the current cachelinks
-        self._backup_file(cachelinks_path, "cachelinks")
-        
-        # Write the new cachelinks
-        cachelinks_path.parent.mkdir(parents=True, exist_ok=True)
-        cachelinks_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-        
-        # Reload the configuration
-        new_settings = load_settings(self.settings.config_dir)
-        self.apply_settings(new_settings, self.credentials)
-        self.ensure_filesystems()
-        self._persist_state_snapshot()
+        self.config_service.import_cachelinks_from_file(cachelinks_file)
 
     def import_users_from_file(self, users_file: Path) -> None:
         """Import users from a YAML file."""
-        if not users_file.exists():
-            raise ConfigError(f"Users file not found: {users_file}")
-        
-        # Load and validate the users document
-        doc = yaml.safe_load(users_file.read_text(encoding="utf-8")) or {}
-        if not isinstance(doc, dict):
-            raise ConfigError("Users file must contain a mapping at the root")
-        
-        users_doc = doc.get("users")
-        if not isinstance(users_doc, dict):
-            raise ConfigError("Users file must contain a 'users' mapping")
-        
-        # Apply users to the database
-        for username, user_data in users_doc.items():
-            if not isinstance(user_data, dict):
-                raise ConfigError(f"User '{username}' must be a mapping")
-            
-            password_plain = user_data.get("password_plain")
-            password_hash = user_data.get("password_hash")
-            digest_ha1 = user_data.get("digest_ha1")
-            
-            if not (password_plain or password_hash or digest_ha1):
-                raise ConfigError(f"User '{username}' must have at least one password method")
-            
-            enabled = bool(user_data.get("enabled", True))
-            is_admin = bool(user_data.get("is_admin", False))
-            
-            self.index_db.upsert_auth_user(
-                username,
-                password_plain=password_plain,
-                password_hash=password_hash,
-                digest_ha1=digest_ha1,
-                enabled=enabled,
-                is_admin=is_admin,
-            )
-        
-        # Reload the configuration to pick up any credential changes
-        # For now, we'll reload the existing credentials file if it exists
-        credentials_path = self.settings.config_dir / "credentials" / "users.yaml"
-        if credentials_path.exists():
-            new_credentials = load_credentials(credentials_path)
-        else:
-            new_credentials = None
-        self.apply_settings(self.settings, new_credentials)
-        self.ensure_filesystems()
-        self._persist_state_snapshot()
+        self.config_service.import_users_from_file(users_file)
 
     def create_cachelink_from_webui(
         self,
@@ -1903,44 +1655,7 @@ class CacheInfinityService:
         descriptor: CachelinkDescriptor,
         degraded: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        state = self.index_db.ensure_target(descriptor, descriptor.remote_listing_url)
-        entries = self.index_db.list_entries_for_descriptor(descriptor)
-
-        # Check if we have backends before trying to access primary
-        if self.backend_registry.storages:
-            backend = self.backend_registry.primary
-            counts = self._descriptor_counts(descriptor, entries, backend)
-        else:
-            _LOGGER.info("No backends configured - using zero counts for cachelink snapshot")
-            counts = {
-                "entries_total": len(entries),
-                "files_total": 0,
-                "dirs_total": 0,
-                "cached_files": 0,
-                "uncached_files": 0,
-            }
-
-        snapshot = {
-            "canonical_id": descriptor.canonical_id,
-            "backend_path": descriptor.backend_relative_folder.as_posix(),
-            "remote_url": descriptor.remote_listing_url,
-            "download_root": descriptor.download_root,
-            "identifier": descriptor.identifier,
-            "mode": descriptor.mode.value,
-            "entries_total": counts["entries_total"],
-            "files_total": counts["files_total"],
-            "dirs_total": counts["dirs_total"],
-            "cached_files": counts["cached_files"],
-            "uncached_files": counts["uncached_files"],
-            "last_full_index_at": state.last_full_index_at.isoformat() if state.last_full_index_at else None,
-            "last_check_at": state.last_check_at.isoformat() if state.last_check_at else None,
-            "needs_full_reindex": state.needs_full_reindex,
-            "source_file": str(descriptor.source_file),
-        }
-        if degraded:
-            snapshot["last_error"] = degraded.get("last_error")
-            snapshot["last_error_at"] = degraded.get("last_error_at")
-        return snapshot
+        return self.config_service.build_cachelink_snapshot(descriptor, degraded)
 
     def _determine_folder_segments(
         self,
@@ -1975,30 +1690,7 @@ class CacheInfinityService:
         entries: list[IndexedEntry],
         backend,
     ) -> dict[str, int]:
-        files_total = 0
-        dirs_total = 0
-        cached_files = 0
-        for entry in entries:
-            if entry.is_dir:
-                dirs_total += 1
-                continue
-            files_total += 1
-            entry_path = (entry.path or "").lstrip("/")
-            if not entry_path:
-                continue
-            entry_rel = PurePosixPath(entry_path)
-            backend_rel = descriptor.backend_relative_folder / entry_rel
-            backend_path = backend.resolve(backend_rel)
-            if backend_path.exists():
-                cached_files += 1
-        uncached = max(files_total - cached_files, 0)
-        return {
-            "entries_total": len(entries),
-            "files_total": files_total,
-            "dirs_total": dirs_total,
-            "cached_files": cached_files,
-            "uncached_files": uncached,
-        }
+        return self.config_service.descriptor_counts(descriptor, entries, backend)
 
     def _persist_state_snapshot(self) -> None:
         settings_path = self.settings.config_path
@@ -2014,89 +1706,28 @@ class CacheInfinityService:
 
     # Cachelink helpers -------------------------------------------------
     def _load_cachelinks_document(self, path: Path) -> dict:
-        if not path.exists():
-            return {"cachelinks": {}}
-        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(doc, dict):
-            doc = {"cachelinks": {}}
-        root = doc.get("cachelinks")
-        if not isinstance(root, dict):
-            doc["cachelinks"] = {}
-        return doc
+        return self.config_service.load_cachelinks_document(path)
 
     def _write_cachelinks_document(self, document: dict, path: Path) -> None:
-        self._backup_file(path, "cachelinks")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-        new_settings = load_settings(self.settings.config_dir)
-        self.apply_settings(new_settings, self.credentials)
-        self.ensure_filesystems()
+        self.config_service.write_cachelinks_document(document, path)
 
     def _folder_segments(self, path: str | None) -> tuple[str, ...]:
-        if not path:
-            return tuple()
-        segments = tuple(segment for segment in path.strip().strip("/").split("/") if segment)
-        return segments
+        return self.config_service.folder_segments(path)
 
     def _collect_folder_nodes(self, document: dict) -> set[str]:
-        nodes: set[str] = {""}
-
-        def recurse(prefix: str, node: dict) -> None:
-            for key, value in sorted(node.items()):
-                new_path = "/".join(filter(None, [prefix, key]))
-                nodes.add(new_path)
-                if isinstance(value, dict) and not self._is_leaf_mapping(value):
-                    recurse(new_path, value)
-
-        root = document.get("cachelinks")
-        if isinstance(root, dict):
-            recurse("", root)
-        return nodes
+        return self.config_service.collect_folder_nodes(document)
 
     def _node_contains_entries(self, node: dict) -> bool:
-        for value in node.values():
-            if self._is_leaf_mapping(value):
-                return True
-            if isinstance(value, dict) and self._node_contains_entries(value):
-                return True
-        return False
+        return self.config_service.node_contains_entries(node)
 
     def _is_leaf_mapping(self, node: object) -> bool:
-        return isinstance(node, dict) and "url" in node and "subfolder" in node
+        return self.config_service.is_leaf_mapping(node)
 
     def _locate_cachelink_leaf(self, descriptor: CachelinkDescriptor) -> tuple[dict, dict]:
-        doc = self._load_cachelinks_document(descriptor.source_file)
-        node = doc.get("cachelinks")
-        if not isinstance(node, dict):
-            raise ConfigError("cachelinks root missing")
-        for segment in descriptor.path_segments[:-1]:
-            child = node.get(segment)
-            if not isinstance(child, dict):
-                raise ConfigError(f"Cachelink folder '{segment}' not found for descriptor {descriptor.canonical_id}")
-            node = child
-        leaf = node.get(descriptor.path_segments[-1])
-        if not isinstance(leaf, dict):
-            raise ConfigError(f"Cachelink entry '{descriptor.canonical_id}' not found in source")
-        return doc, leaf
+        return self.config_service.locate_cachelink_leaf(descriptor)
 
     def _cachelink_entry_snapshot(self, descriptor: CachelinkDescriptor) -> dict[str, object]:
-        snapshot = self._build_cachelink_snapshot(descriptor)
-        try:
-            _, leaf = self._locate_cachelink_leaf(descriptor)
-            source_url = leaf.get("url", descriptor.source_url)
-            subfolder = leaf.get("subfolder", descriptor.subfolder)
-        except ConfigError:
-            source_url = descriptor.source_url
-            subfolder = descriptor.subfolder
-        return {
-            "canonical_id": descriptor.canonical_id,
-            "name": descriptor.path_segments[-1],
-            "url": source_url,
-            "subfolder": subfolder,
-            "mode": snapshot["mode"],
-            "files_total": snapshot["files_total"],
-            "cached_files": snapshot["cached_files"],
-        }
+        return self.config_service.cachelink_entry_snapshot(descriptor)
 
     # Storage helpers --------------------------------------------------
     def _resolve_storage_directory(

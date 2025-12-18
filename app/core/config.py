@@ -27,6 +27,257 @@ _CONFIG_ENV = "CACHEINFINITY_CONFIG_DIR"
 
 
 from .errors import ConfigError
+from typing import Callable, Optional
+from pathlib import Path
+from datetime import datetime
+import gzip
+import shutil
+import logging
+from tempfile import TemporaryDirectory
+import yaml
+
+# Configuration Service Classes
+class ConfigService:
+    """Configuration service for managing configuration state and persistence."""
+
+    def __init__(self, service):
+        """Initialize configuration service with reference to main service."""
+        self._service = service
+        self._logger = logging.getLogger(__name__)
+
+    def mutate_settings_file(self, mutator: Callable[[dict], None]) -> None:
+        """Apply a mutation to the settings file and reload configuration."""
+        settings_path = self._service.settings.settings_path
+        raw = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+        mutator(raw)
+        self._backup_file(settings_path, "settings")
+        settings_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        new_settings = load_settings(self._service.settings.config_dir)
+        self._service.apply_settings(new_settings, self._service.credentials)
+        self._service.ensure_filesystems()
+        self._persist_state_snapshot()
+
+    def mutate_share_user(self, share_name: str, username: str, policy: dict[str, bool] | None) -> None:
+        """Mutate user policy for a specific share."""
+        def mutator(doc: dict) -> None:
+            webdav = doc.setdefault("webdav", {})
+            share_doc = webdav.get(share_name)
+            if not isinstance(share_doc, dict):
+                raise ConfigError(f"Share '{share_name}' is not defined in settings.yaml")
+            users_doc = share_doc.setdefault("users", {})
+            if policy is None:
+                users_doc.pop(username, None)
+            else:
+                users_doc[username] = {
+                    "login": bool(policy.get("login", False)),
+                    "read": bool(policy.get("read", False)),
+                    "write": bool(policy.get("write", False)),
+                    "cache": bool(policy.get("cache", False)),
+                }
+
+        self.mutate_settings_file(mutator)
+
+    def validate_config_edit(self, target: Path, new_text: str) -> None:
+        """Validate a configuration edit before applying it."""
+        config_dir = self._service.settings.config_dir.resolve()
+        target_path = target.resolve() if target.is_absolute() else (config_dir / target)
+        try:
+            relative = target_path.relative_to(config_dir)
+        except ValueError as exc:
+            raise ConfigError(f"Cannot edit file outside config directory: {target}") from exc
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            shutil.copytree(config_dir, tmp_path, dirs_exist_ok=True)
+            staged_target = tmp_path / relative
+            staged_target.parent.mkdir(parents=True, exist_ok=True)
+            staged_target.write_text(new_text, encoding="utf-8")
+            load_settings(tmp_path)
+
+    def backup_file(self, source: Path, label: str) -> None:
+        """Create a backup of a configuration file."""
+        if not source.exists():
+            return
+        backups = self._service.settings.config_dir / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        backup_path = backups / f"{timestamp}-{label}.yaml.gz"
+        data = source.read_bytes()
+        with gzip.open(backup_path, "wb") as handle:
+            handle.write(data)
+
+    def persist_state_snapshot(self) -> None:
+        """Persist current state snapshot to database and state store."""
+        settings_path = self._service.settings.config_path
+        cachelinks_path = self._service.settings.config_dir / "cachelinks.yaml"
+        settings_text = settings_path.read_text(encoding="utf-8") if settings_path.exists() else None
+        cachelinks_text = cachelinks_path.read_text(encoding="utf-8") if cachelinks_path.exists() else None
+        if settings_text is None:
+            return
+        if hasattr(self._service, "index_db") and self._service.index_db:
+            self._service.index_db.save_config_snapshot(settings_text, cachelinks_text)
+        if hasattr(self._service, "_state_store") and self._service._state_store:
+            self._service._state_store.save_state(settings_text, cachelinks_text)
+
+    def load_cachelinks_document(self, path: Path) -> dict:
+        """Load cachelinks document from file."""
+        if not path.exists():
+            return {"cachelinks": {}}
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(doc, dict):
+            doc = {"cachelinks": {}}
+        root = doc.get("cachelinks")
+        if not isinstance(root, dict):
+            doc["cachelinks"] = {}
+        return doc
+
+    def write_cachelinks_document(self, document: dict, path: Path) -> None:
+        """Write cachelinks document to file and reload configuration."""
+        self.backup_file(path, "cachelinks")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        new_settings = load_settings(self._service.settings.config_dir)
+        self._service.apply_settings(new_settings, self._service.credentials)
+        self._service.ensure_filesystems()
+
+    def folder_segments(self, path: str | None) -> tuple[str, ...]:
+        """Convert path string to tuple of segments."""
+        if not path:
+            return tuple()
+        segments = tuple(segment for segment in path.strip().strip("/").split("/") if segment)
+        return segments
+
+    def collect_folder_nodes(self, document: dict) -> set[str]:
+        """Collect all folder nodes from cachelinks document."""
+        nodes: set[str] = {""}
+
+        def recurse(prefix: str, node: dict) -> None:
+            for key, value in sorted(node.items()):
+                new_path = "/".join(filter(None, [prefix, key]))
+                nodes.add(new_path)
+                if isinstance(value, dict) and not self.is_leaf_mapping(value):
+                    recurse(new_path, value)
+
+        root = document.get("cachelinks")
+        if isinstance(root, dict):
+            recurse("", root)
+        return nodes
+
+    def node_contains_entries(self, node: dict) -> bool:
+        """Check if a node contains any cachelink entries."""
+        for value in node.values():
+            if self.is_leaf_mapping(value):
+                return True
+            if isinstance(value, dict) and self.node_contains_entries(value):
+                return True
+        return False
+
+    def is_leaf_mapping(self, node: object) -> bool:
+        """Check if a node is a cachelink leaf mapping."""
+        return isinstance(node, dict) and "url" in node and "subfolder" in node
+
+    def locate_cachelink_leaf(self, descriptor) -> tuple[dict, dict]:
+        """Locate cachelink leaf in document and return document and leaf."""
+        doc = self.load_cachelinks_document(descriptor.source_file)
+        node = doc.get("cachelinks")
+        if not isinstance(node, dict):
+            raise ConfigError("cachelinks root missing")
+        for segment in descriptor.path_segments[:-1]:
+            child = node.get(segment)
+            if not isinstance(child, dict):
+                raise ConfigError(f"Cachelink folder '{segment}' not found for descriptor {descriptor.canonical_id}")
+            node = child
+        leaf = node.get(descriptor.path_segments[-1])
+        if not isinstance(leaf, dict):
+            raise ConfigError(f"Cachelink entry '{descriptor.canonical_id}' not found in source")
+        return doc, leaf
+
+    def cachelink_entry_snapshot(self, descriptor) -> dict[str, object]:
+        """Create snapshot of cachelink entry."""
+        snapshot = self.build_cachelink_snapshot(descriptor)
+        try:
+            _, leaf = self.locate_cachelink_leaf(descriptor)
+            source_url = leaf.get("url", descriptor.source_url)
+            subfolder = leaf.get("subfolder", descriptor.subfolder)
+        except ConfigError:
+            source_url = descriptor.source_url
+            subfolder = descriptor.subfolder
+        return {
+            "canonical_id": descriptor.canonical_id,
+            "name": descriptor.path_segments[-1],
+            "url": source_url,
+            "subfolder": subfolder,
+            "mode": snapshot["mode"],
+            "files_total": snapshot["files_total"],
+            "cached_files": snapshot["cached_files"],
+        }
+
+    def build_cachelink_snapshot(self, descriptor, degraded: dict[str, object] | None = None) -> dict[str, object]:
+        """Build comprehensive snapshot of cachelink state."""
+        state = self._service.index_db.ensure_target(descriptor, descriptor.remote_listing_url)
+        entries = self._service.index_db.list_entries_for_descriptor(descriptor)
+
+        # Check if we have backends before trying to access primary
+        if self._service.backend_registry.storages:
+            backend = self._service.backend_registry.primary
+            counts = self.descriptor_counts(descriptor, entries, backend)
+        else:
+            self._logger.info("No backends configured - using zero counts for cachelink snapshot")
+            counts = {
+                "entries_total": len(entries),
+                "files_total": 0,
+                "dirs_total": 0,
+                "cached_files": 0,
+                "uncached_files": 0,
+            }
+
+        snapshot = {
+            "canonical_id": descriptor.canonical_id,
+            "backend_path": descriptor.backend_relative_folder.as_posix(),
+            "remote_url": descriptor.remote_listing_url,
+            "download_root": descriptor.download_root,
+            "identifier": descriptor.identifier,
+            "mode": descriptor.mode.value,
+            "entries_total": counts["entries_total"],
+            "files_total": counts["files_total"],
+            "dirs_total": counts["dirs_total"],
+            "cached_files": counts["cached_files"],
+            "uncached_files": counts["uncached_files"],
+            "last_full_index_at": state.last_full_index_at.isoformat() if state.last_full_index_at else None,
+            "last_check_at": state.last_check_at.isoformat() if state.last_check_at else None,
+            "needs_full_reindex": state.needs_full_reindex,
+            "source_file": str(descriptor.source_file),
+        }
+        if degraded:
+            snapshot["last_error"] = degraded.get("last_error")
+            snapshot["last_error_at"] = degraded.get("last_error_at")
+        return snapshot
+
+    def descriptor_counts(self, descriptor, entries: list, backend) -> dict[str, int]:
+        """Calculate counts for descriptor entries."""
+        files_total = 0
+        dirs_total = 0
+        cached_files = 0
+        for entry in entries:
+            if entry.is_dir:
+                dirs_total += 1
+                continue
+            files_total += 1
+            entry_path = (entry.path or "").lstrip("/")
+            if not entry_path:
+                continue
+            entry_rel = PurePosixPath(entry_path)
+            backend_rel = descriptor.backend_relative_folder / entry_rel
+            backend_path = backend.resolve(backend_rel)
+            if backend_path.exists():
+                cached_files += 1
+        uncached = max(files_total - cached_files, 0)
+        return {
+            "entries_total": len(entries),
+            "files_total": files_total,
+            "dirs_total": dirs_total,
+            "cached_files": cached_files,
+            "uncached_files": uncached,
+        }
 
 
 class ConfigMigrationError(Exception):
