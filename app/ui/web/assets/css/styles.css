@@ -444,6 +444,12 @@ label {
   font-style: italic;
 }
 
+.empty.error {
+  color: var(--danger);
+  font-style: normal;
+  font-weight: 500;
+}
+
 @media (max-width: 960px) {
   .layout {
     grid-template-columns: 1fr;

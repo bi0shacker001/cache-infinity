@@ -7,10 +7,15 @@
 let currentUserTab = 'webui';
 
 // Initialize users page
-export function initUsers() {
+function initUsers() {
   console.log('Users page initialized - loading users data');
   setActiveUserTab(currentUserTab);
   setupUsersEventListeners();
+}
+
+// Make the init function available globally for the page loader
+if (typeof window !== 'undefined') {
+  window.initUsers = initUsers;
 }
 
 function setupUsersEventListeners() {
@@ -147,7 +152,8 @@ function escapeHtml(value) {
     .replace(/&/g, '&')
     .replace(/</g, '<')
     .replace(/>/g, '>')
-    .replace(/"/g, '"');
+    .replace(/"/g, '"')
+    .replace(/'/g, '&#39;');
 }
 
 // Initialize event listeners for users actions

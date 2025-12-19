@@ -8,10 +8,15 @@ let settingsDetail = null;
 let settingsLoaded = false;
 
 // Initialize settings page
-export function initSettings() {
+function initSettings() {
   console.log('Settings page initialized - loading settings data');
   loadSettingsDetail();
   setupSettingsEventListeners();
+}
+
+// Make the init function available globally for the page loader
+if (typeof window !== 'undefined') {
+  window.initSettings = initSettings;
 }
 
 function setupSettingsEventListeners() {
@@ -606,6 +611,16 @@ async function handleSettingsImport(event) {
 }
 
 // Helper functions
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&')
+    .replace(/</g, '<')
+    .replace(/>/g, '>')
+    .replace(/"/g, '"')
+    .replace(/'/g, '&#39;');
+}
+
 function parseNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const num = Number(value);

@@ -17,9 +17,26 @@ async function fetchJSON(path, opts = {}) {
   if (options.body && !options.headers) {
     options.headers = { 'Content-Type': 'application/json' };
   }
-  const resp = await fetchWithAuth(path, options);
-  if (resp.status === 204) return {};
-  return await resp.json();
+
+  // Add timeout handling to prevent hanging requests
+  const timeout = opts.timeout || 10000; // Default 10 second timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    options.signal = controller.signal;
+    const resp = await fetchWithAuth(path, options);
+    clearTimeout(timeoutId);
+
+    if (resp.status === 204) return {};
+    return await resp.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${timeout}ms`);
+    }
+    throw error;
+  }
 }
 
 // Navigation functions

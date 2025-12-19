@@ -142,7 +142,7 @@ class WebUIApp:
         if path == "/favicon.ico" and method == "GET":
             _LOGGER.debug("Serving favicon")
             return self._respond(start_response, "204 No Content", "image/x-icon", b"")
-        if not self.service.has_ui_credentials():
+        if not self.management.rd_user_admin_exists():
             _LOGGER.warning("Web UI access denied - no credentials configured")
             return self._respond(
                 start_response,
@@ -412,6 +412,25 @@ class WebUIApp:
             _LOGGER.debug("Handling user deletion")
             if 'users' in self.handlers:
                 return self.handlers['users'].handle_user_disable(environ, start_response)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        # Add WebDAV user management endpoints
+        if path == "/api/webdav-users" and method == "GET":
+            _LOGGER.debug("Serving WebDAV users list")
+            if 'users' in self.handlers:
+                return self._json_response(start_response, {"shares": self.management.rd_user_webdav()["shares"]})
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path == "/api/webdav-users" and method == "POST":
+            _LOGGER.debug("Handling WebDAV user creation/update")
+            if 'users' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['users'].handle_webdav_user_upsert)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path.startswith("/api/webdav-users/") and method == "DELETE":
+            _LOGGER.debug("Handling WebDAV user deletion")
+            if 'users' in self.handlers:
+                return self.handlers['users'].handle_webdav_user_delete(environ, start_response)
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
         # Add missing API endpoints for maintenance
@@ -1144,10 +1163,24 @@ class UsersHandlers:
     def handle_webdav_user_upsert(self, payload: dict[str, object], start_response):
         """Handle WebDAV user creation or update."""
         try:
-            # WebDAV user management would need additional implementation
-            # For now, return not implemented
-            return self._json_error(start_response, "WebDAV user management not implemented", status="501 Not Implemented")
+            _LOGGER.info("handle_webdav_user_upsert called with payload keys: %s", list(payload.keys()) if payload else [])
+
+            self.management.upsert_user(
+                username=payload.get("username") or "",
+                password=payload.get("password"),
+                enabled=bool(payload.get("enabled", True)),
+                is_admin=False,
+                purpose="webdav",
+                share=payload.get("share") or "",
+                login=bool(payload.get("login", True)),
+                read=bool(payload.get("read", True)),
+                write=bool(payload.get("write", True)),
+                cache=bool(payload.get("cache", True))
+            )
+            _LOGGER.info("WebDAV user upsert successful")
+            return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
+            _LOGGER.error("WebDAV user upsert failed: %s", exc, exc_info=True)
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def handle_webdav_user_delete(self, environ, start_response):
@@ -1160,9 +1193,17 @@ class UsersHandlers:
         share = unquote(parts[0])
         username = unquote(parts[1])
         try:
-            # WebDAV user management would need additional implementation
-            return self._json_error(start_response, "WebDAV user management not implemented", status="501 Not Implemented")
+            _LOGGER.info("handle_webdav_user_delete called for share: %s, username: %s", share, username)
+
+            self.management.disable_user(
+                username=username,
+                purpose="webdav",
+                share=share
+            )
+            _LOGGER.info("WebDAV user deletion successful")
+            return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
+            _LOGGER.error("WebDAV user deletion failed: %s", exc, exc_info=True)
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _json_response(self, start_response, payload: dict[str, object], status: str = "200 OK"):

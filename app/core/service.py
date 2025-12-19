@@ -549,96 +549,6 @@ class CacheInfinityService:
             )
         return degraded
 
-    def list_admin_users(self) -> list[dict[str, object]]:
-        return self.index_db.list_users(purpose="webui")
-
-    def upsert_admin_user(
-        self,
-        username: str,
-        *,
-        password: Optional[str] = None,
-        enabled: bool = True,
-        is_admin: bool = True,
-    ) -> None:
-        if not username:
-            raise ConfigError("Username is required")
-        self.index_db.upsert_auth_user(
-            username,
-            password_plain=password,
-            enabled=enabled,
-            is_admin=is_admin,
-        )
-
-    def disable_admin_user(self, username: str) -> None:
-        self.index_db.disable_auth_user(username, purpose="webui")
-
-    def describe_webdav_users(self) -> dict[str, object]:
-        credentials = {rec["username"]: rec for rec in self.index_db.list_webdav_credentials()}
-        shares: list[dict[str, object]] = []
-        for share in self.settings.shares.values():
-            users: list[dict[str, object]] = []
-            for username, policy in share.users.items():
-                if username == "anonymous":
-                    continue
-                cred = credentials.get(username)
-                users.append(
-                    {
-                        "username": username,
-                        "login": bool(policy.login),
-                        "read": bool(policy.read),
-                        "write": bool(policy.write),
-                        "cache": bool(policy.cache),
-                        "enabled": bool(cred["enabled"]) if cred else False,
-                    }
-                )
-            shares.append(
-                {
-                    "name": share.name,
-                    "frontend": share.frontend_folder.as_posix(),
-                    "backend": share.backend_folder.as_posix(),
-                    "users": users,
-                }
-            )
-        return {"shares": shares}
-
-    def upsert_webdav_user(
-        self,
-        *,
-        share: str,
-        username: str,
-        password: Optional[str],
-        enabled: bool,
-        login: bool,
-        read: bool,
-        write: bool,
-        cache: bool,
-    ) -> None:
-        if share not in self.settings.shares:
-            raise ConfigError(f"Unknown share '{share}'")
-        self.index_db.upsert_auth_user(
-            username,
-            password_plain=password,
-            enabled=enabled,
-            is_admin=False,
-            purpose="webdav",
-        )
-        self._mutate_share_user(
-            share,
-            username,
-            {
-                "login": bool(login),
-                "read": bool(read),
-                "write": bool(write),
-                "cache": bool(cache),
-            },
-        )
-
-    def remove_webdav_user(self, share: str, username: str, *, disable_credentials: bool = False) -> None:
-        if share not in self.settings.shares:
-            raise ConfigError(f"Unknown share '{share}'")
-        self._mutate_share_user(share, username, None)
-        if disable_credentials:
-            self.index_db.disable_auth_user(username, purpose="webdav")
 
     def trigger_reindex(self, canonical_id: str) -> None:
         """Trigger reindexing for a specific cachelink."""
@@ -1563,8 +1473,6 @@ class CacheInfinityService:
 
         self._mutate_settings_file(mutator)
 
-    def has_ui_credentials(self) -> bool:
-        return self.index_db.any_admin_users()
 
     def validate_ui_credentials(self, username: str, password: str) -> bool:
         return self.index_db.validate_credentials(username, password)

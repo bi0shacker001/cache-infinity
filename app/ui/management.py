@@ -428,14 +428,156 @@ class ManagementLayer:
             logger.error("Failed to preview cachelink: %s", e)
             raise
 
-    # User Management
+    # New User Management Methods with Streamlined Naming Convention
+    def mng_user_admin(
+        self,
+        action: str,
+        username: str,
+        password: Optional[str] = None,
+        enabled: bool = True,
+        is_admin: bool = True
+    ) -> Dict[str, Any]:
+        """Manage admin users - create, update, disable.
+        Actions: 'create', 'update', 'disable'
+        """
+        try:
+            if action == 'disable':
+                self.service.index_db.disable_auth_user(username, purpose="webui")
+                return {"status": "success", "message": f"Admin user {username} disabled"}
+            else:
+                # create or update
+                self.service.index_db.upsert_auth_user(
+                    username,
+                    password_plain=password,
+                    enabled=enabled,
+                    is_admin=is_admin,
+                    purpose="webui"
+                )
+                return {"status": "success", "message": f"Admin user {username} {action}d"}
+        except Exception as e:
+            logger.error("Failed to manage admin user: %s", e)
+            raise
+
+    def rd_user_admin(self) -> List[Dict[str, Any]]:
+        """Read admin users directly from database."""
+        try:
+            return self.service.index_db.list_users(purpose="webui")
+        except Exception as e:
+            logger.error("Failed to read admin users: %s", e)
+            raise
+
+    def rd_user_admin_exists(self) -> bool:
+        """Check if any admin users exist in database."""
+        try:
+            return self.service.index_db.any_admin_users()
+        except Exception as e:
+            logger.error("Failed to check admin users existence: %s", e)
+            raise
+
+    def rd_user_admin_validate(self, username: str, password: str) -> bool:
+        """Validate UI credentials directly against database."""
+        try:
+            return self.service.index_db.validate_credentials(
+                username, password, purpose="webui", require_admin=True
+            )
+        except Exception as e:
+            logger.error("Failed to validate admin credentials: %s", e)
+            raise
+
+    def mng_user_webdav(
+        self,
+        action: str,
+        share: str,
+        username: str,
+        password: Optional[str] = None,
+        enabled: bool = True,
+        login: bool = True,
+        read: bool = True,
+        write: bool = True,
+        cache: bool = True
+    ) -> Dict[str, Any]:
+        """Manage WebDAV users - create, update, remove.
+        Actions: 'create', 'update', 'remove'
+        """
+        try:
+            if action == 'remove':
+                # Remove from share and optionally disable credentials
+                self._mutate_share_user(share, username, None)
+                self.service.index_db.disable_auth_user(username, purpose="webdav")
+                return {"status": "success", "message": f"WebDAV user {username} removed"}
+            else:
+                # create or update
+                self.service.index_db.upsert_auth_user(
+                    username,
+                    password_plain=password,
+                    enabled=enabled,
+                    is_admin=False,
+                    purpose="webdav"
+                )
+                self._mutate_share_user(
+                    share,
+                    username,
+                    {
+                        "login": bool(login),
+                        "read": bool(read),
+                        "write": bool(write),
+                        "cache": bool(cache),
+                    }
+                )
+                return {"status": "success", "message": f"WebDAV user {username} {action}d"}
+        except Exception as e:
+            logger.error("Failed to manage WebDAV user: %s", e)
+            raise
+
+    def rd_user_webdav(self) -> Dict[str, Any]:
+        """Get WebDAV users directly from database and settings."""
+        try:
+            logger.info("ManagementLayer.rd_user_webdav() called")
+
+            # Get credentials directly from the database
+            credentials = {rec["username"]: rec for rec in self.service.index_db.list_webdav_credentials()}
+            logger.debug("Retrieved %d WebDAV credentials from database", len(credentials))
+
+            # Get shares from settings
+            shares: list[dict[str, object]] = []
+            for share in self.service.settings.shares.values():
+                users: list[dict[str, object]] = []
+                for username, policy in share.users.items():
+                    if username == "anonymous":
+                        continue
+                    cred = credentials.get(username)
+                    users.append(
+                        {
+                            "username": username,
+                            "login": bool(policy.login),
+                            "read": bool(policy.read),
+                            "write": bool(policy.write),
+                            "cache": bool(policy.cache),
+                            "enabled": bool(cred["enabled"]) if cred else False,
+                        }
+                    )
+                shares.append(
+                    {
+                        "name": share.name,
+                        "frontend": share.frontend_folder.as_posix(),
+                        "backend": share.backend_folder.as_posix(),
+                        "users": users,
+                    }
+                )
+            logger.info("Generated WebDAV users data for %d shares", len(shares))
+            return {"shares": shares}
+        except Exception as e:
+            logger.error("Failed to read WebDAV users: %s", e, exc_info=True)
+            raise
+
+    # User Management (Legacy methods - will be updated to use new naming)
     def list_users(self, purpose: str = "webui") -> List[Dict[str, Any]]:
         """List users for a specific purpose (webui, webdav)."""
         try:
             if purpose == "webui":
-                return self.service.list_admin_users()
+                return self.rd_user_admin()
             elif purpose == "webdav":
-                return self.service.describe_webdav_users()["shares"]
+                return self.rd_user_webdav()["shares"]
             else:
                 raise ValueError(f"Unknown purpose: {purpose}")
         except Exception as e:
@@ -448,42 +590,48 @@ class ManagementLayer:
         password: Optional[str] = None,
         enabled: bool = True,
         is_admin: bool = True,
-        purpose: str = "webui"
+        purpose: str = "webui",
+        share: Optional[str] = None,
+        login: bool = True,
+        read: bool = True,
+        write: bool = True,
+        cache: bool = True
     ) -> Dict[str, Any]:
         """Create or update a user."""
         try:
             if purpose == "webui":
-                self.service.upsert_admin_user(
-                    username=username,
-                    password=password,
-                    enabled=enabled,
-                    is_admin=is_admin
-                )
+                return self.mng_user_admin("update", username, password, enabled, is_admin)
             elif purpose == "webdav":
-                # This would need additional parameters for webdav users
-                raise NotImplementedError("WebDAV user management not fully implemented")
+                if not share:
+                    raise ValueError("Share name is required for WebDAV users")
+                return self.mng_user_webdav("update", share, username, password, enabled, login, read, write, cache)
             else:
                 raise ValueError(f"Unknown purpose: {purpose}")
-            
-            return {"status": "success", "message": f"User {username} updated"}
         except Exception as e:
             logger.error("Failed to upsert user: %s", e)
             raise
 
-    def disable_user(self, username: str, purpose: str = "webui") -> Dict[str, Any]:
+    def disable_user(self, username: str, purpose: str = "webui", share: Optional[str] = None) -> Dict[str, Any]:
         """Disable a user."""
         try:
             if purpose == "webui":
-                self.service.disable_admin_user(username)
+                return self.mng_user_admin("disable", username)
             elif purpose == "webdav":
-                # This would need additional logic for webdav users
-                raise NotImplementedError("WebDAV user management not fully implemented")
+                if not share:
+                    raise ValueError("Share name is required for WebDAV users")
+                return self.mng_user_webdav("remove", share, username)
             else:
                 raise ValueError(f"Unknown purpose: {purpose}")
-            
-            return {"status": "success", "message": f"User {username} disabled"}
         except Exception as e:
             logger.error("Failed to disable user: %s", e)
+            raise
+
+    def describe_webdav_users(self) -> Dict[str, Any]:
+        """Get detailed WebDAV user information from the database."""
+        try:
+            return self.rd_user_webdav()
+        except Exception as e:
+            logger.error("Failed to describe WebDAV users: %s", e, exc_info=True)
             raise
 
     # Configuration Management
@@ -607,7 +755,7 @@ class ManagementLayer:
     def has_admin_users(self) -> bool:
         """Check if any admin users exist."""
         try:
-            return self.service.has_ui_credentials()
+            return self.rd_user_admin_exists()
         except Exception as e:
             logger.error("Failed to check admin users: %s", e)
             return False

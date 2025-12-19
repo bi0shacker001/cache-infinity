@@ -202,17 +202,14 @@ def run_server(args) -> None:
     
     service.start_background_tasks()
     
-    # Start Web UI if enabled and credentials available
+    # Start Web UI if enabled
     ui_server = None
     ui_thread = None
     if not args.disable_ui:
-        if service.has_ui_credentials():
-            ui_host = args.ui_host or args.host
-            ui_app = _UIReloadableApp(service)
-            ui_server = cheroot_wsgi.Server((ui_host, args.ui_port), ui_app)
-            ui_thread = _start_server_async(ui_server, label="CacheInfinity WebUI")
-        else:
-            _LOGGER.warning("Web UI disabled: no credentials available")
+        ui_host = args.ui_host or args.host
+        ui_app = _UIReloadableApp(service)
+        ui_server = cheroot_wsgi.Server((ui_host, args.ui_port), ui_app)
+        ui_thread = _start_server_async(ui_server, label="CacheInfinity WebUI")
     else:
         _LOGGER.info("Web UI disabled via flag")
 
