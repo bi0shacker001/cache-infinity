@@ -86,9 +86,9 @@ tls:
 
 # Cookies Configuration
 cookies:
-  archive.org:
-    cookie_jar: /config/cookies/archive_org.txt
-    credfile: /config/credentials/archive_org.txt
+  example.org:
+    date: Wed Dec 17 15:47:55 EST 2025
+    cookie_data: IyBOZXRzY2FwZSBIVFRQIENvb2tpZSBGaWxlCiMgVGhpcyBpcyBhIGhhcm1sZXNzIGV4YW1wbGUgd2l0aCBmYWtlIHZhbHVlcy4KIyBGb3JtYXQ6IGRvbWFpbglpbmNsdWRlU3ViZG9tYWlucwlwYXRoCXNlY3VyZQlleHBpcnkJbmFtZQl2YWx1ZQoKLmV4YW1wbGUuY29tCVRSVUUJLwlGQUxTRQkxODkzNDU2MDAwCXNlc3Npb25pZAlub3QtYS1yZWFsLXNlc3Npb24KZXhhbXBsZS5vcmcJRkFMU0UJLwlUUlVFCTE4OTM0NTYwMDAJY3NyZnRva2VuCWZha2VfY3NyZl8xMjM0NTYK
   the-eye.eu:
     cookie_jar: /config/cookies/the_eye_eu.txt
 
