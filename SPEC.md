@@ -19,8 +19,13 @@ The project is inspired by Infinite Mac’s **Infinite Drive** and adapts that e
 * **WebDAV frontend:** WsgiDAV with a custom provider (virtual tree + read-through caching + write-through backend).
 * **Backend storage:** one or more backend roots. Backend is the canonical storage for cached files and all user-authored content.
 * **Local staging:** local volume for downloads/extractions before copying to backend.
-* **Indexer:** refreshes remote listings daily.
+* **Indexer:** refreshes remote listings on a schedule.
 * **Fetcher:** `curl` for downloads (HTTP and later FTP).
+* **Interfaces:**
+
+  * **End-user interface** (`app/hosting/browser_interface.py`): browses and reads content.
+  * **Admin WebUI** (`app/ui/web/*`): administrative configuration and maintenance actions.
+  * **Admin API** (`app/ui/api.py`): exposes **read-only** administrative and status information over the service port; authenticated using the admin user/permission model and implemented through the admin management layer.
 
 ## 3. Terminology
 
@@ -31,138 +36,90 @@ The project is inspired by Infinite Mac’s **Infinite Drive** and adapts that e
 
 ## 4. Configuration
 
-Throughout this document `$CONFIG` refers to the runtime configuration directory.
-Inside Docker the default mount is `/config`, but operators may point CacheInfinity
-to any path via CLI or environment overrides.
+CacheInfinity is **database-backed** at runtime. Disk is treated as an input/output surface, not the live source of truth.
 
-### 4.1 Config directory
+Note: when using SQLite, the database backend stores its state in a fixed file named `cacheinfinity.db` inside the config directory. This is part of the database backend (not a configuration export file), even though it is accessed through the storage/configuration layer.
 
-* CacheInfinity treats the database as the canonical configuration store. YAML files
-  are optional conveniences that seed the database on first boot and receive periodic
-  exports for auditing/backups.
-* On startup CacheInfinity reads configuration in this order:
-  1. Existing database snapshot (if present).
-  2. Otherwise, merge `$CONFIG/settings.yaml`, `$CONFIG/cachelinks.yaml`, files under
-     `$CONFIG/cachelinks/**/*.yaml`, and credentials (following the precedence chain
-     `/etc/cacheinfinity/` → `$HOME/.config/cacheinfinity/` → `$CONFIG` CLI/env).
-  3. If no files exist, synthesize defaults plus a stub admin user (`admin/password`)
-     and immediately persist them to the database.
-* `$CONFIG/settings.yaml` is the single authoritative file for:
-  * backends
-  * staging
-  * limits
-  * cookies (paths only)
-  * WebDAV shares and per-share authorization policy
-  * inline `cachelinks` definitions
-* Additional cachelink-only YAML files may live in:
-  * `$CONFIG/cachelinks.yaml`
-  * any file under `$CONFIG/cachelinks/**/*.yaml`
-* All cachelink documents (inline or separate) must wrap definitions inside a top-level `cachelinks:` mapping.
-* On startup CacheInfinity must (re)generate `$CONFIG/config.yaml.defaults`, a fully commented reference file covering every supported setting. This file is documentation only.
-* CacheInfinity runs as a dedicated daemon user (systemd: `cache-infinite`, Docker: non-root user). Config resolution follows this precedence:
-  1. `/etc/cacheinfinity/` (system scope, lowest precedence)
-  2. `$HOME/.config/cacheinfinity/` (user scope, overrides system files)
-  3. `$CONFIG` passed via CLI/environment (highest precedence; defaults to `/config` in Docker)
-  Settings are merged shallowly; later layers override earlier ones per file. When CacheInfinity exports YAML, it writes to `$CONFIG` only and moves the previous file into `$CONFIG/backups/`.
+### 4.1 When CacheInfinity touches disk
 
-Defaults:
+CacheInfinity reads/writes configuration on disk only in these situations (no other runtime config files are used):
 
-* Docker: `$CONFIG` (defaults to `/config` inside the reference container)
-* systemd: `/etc/cacheinfinity/config`
+* `config.yml` (optional last-resort DB connectivity)
+* operator-supplied bootstrap YAML (`--bootstrap <path>`) and operator-requested bootstrap YAML backups/exports
+* TLS certificate/key files (when using manual TLS)
+* logs (always written to the `logs/` subfolder of the config directory; location not configurable)
 
-The config directory must be overridable by CLI flag and/or environment variable.
-On startup CacheInfinity must (re)generate a commented `$CONFIG/config.yaml.defaults`
-file that documents every supported setting. This file is for reference only and must
-never be treated as live configuration.
+Note: the SQLite database file `cacheinfinity.db` inside the config directory is part of the SQLite database backend, not a configuration export file.
 
-### 4.2 `settings.yaml`
+1. **Startup (required):** determine database connectivity using the precedence chain **CLI flags → environment variables → `config.yml` (last resort)**.
+2. **Startup (optional):** if `--bootstrap <path>` is provided, import a **bootstrap YAML** into the database after validation.
+3. **On-demand backup/export:** when an operator requests a backup, export durable configuration to disk in YAML format.
+4. **Logs:** write operational logs under `<config-dir>/logs/`.
 
-Recommended structure:
+CacheInfinity does not watch YAML files on disk for changes during normal operation.
+
+### 4.2 `config.yml` (database access only)
+
+`config.yml` is a last-resort input and contains **only** database access information (engine/type, URL/path, credentials).
+
+Example:
 
 ```yaml
-settings:
-  paths:
-    backend_1:
-      backend_mounted: true
-      backend_mount_root: /PATH/TO/MOUNTROOT
-      backend_cache_root: /PATH/TO/CACHE_ROOT
-
-    backend_2:
-      backend_mounted: false
-      backend_cache_root: /PATH/TO/CACHE_ROOT/subfolder
-
-    staging:
-      size_gb: 25
-      staging_mounted: true
-      staging_mount_root: /PATH/TO/STAGING
-
-limits:
-  max_zip_total_gb: 20
-  one_zip_cache_at_a_time: true
-
-cookies:
-  archive.org:
-    cookie_jar: /PATH/TO/COOKIEJAR.txt
-    credfile: /PATH/TO/ARCHIVE_CREDENTIALS.txt
-  the-eye.eu:
-    cookie_jar: /PATH/TO/COOKIEJAR.txt
-
-webdav:
-  share_games:
-    backend_folder: /games
-    frontend_folder: /games
-    writable: true
-    cachelink_overlay: true
-    users:
-      anonymous:
-        login: false
-        read: false
-        write: false
-        cache: false
-      exampleuser1:
-        login: true
-        read: true
-        write: true
-        cache: true
+config:
+  database:
+    engine: postgres          # postgres | sqlite
+    url: postgresql://user:pass@db/cacheinfinity
+    # For sqlite: omit `url`. SQLite is always <config-dir>/cacheinfinity.db (fixed).
 ```
 
-### 4.3 Default template
+Rules:
 
-On startup CacheInfinity must (re)generate `config.yaml.defaults` inside the config directory with a fully commented example configuration.
+* `config.yml` must never contain cachelinks, share permissions, cookies, TLS settings, indexing budgets, or other operational settings.
+* Environment variables and CLI flags override `config.yml`.
 
-Notes:
+### 4.3 Bootstrap YAML (optional import via `--bootstrap`)
 
-* YAML keys must be unique per mapping.
-* All share users default to `login/read/write/cache: false`; set `true` explicitly where needed.
-* Reserved username `anonymous` controls unauthenticated access. If omitted or set to `login: false`, anonymous requests are rejected.
-* Cachelinks may also be defined in `$CONFIG/cachelinks.yaml` or under `$CONFIG/cachelinks/**`, but every document must have the `cachelinks:` root.
-* Every time CacheInfinity ingests `settings.yaml` or cachelink documents it must copy a gzipped snapshot into `$CONFIG/backups/` using a timestamped filename. Config exports happen whenever the database changes; the daemon does **not** monitor files for external edits. To modify a running instance use the Web UI or CLI.
+A **bootstrap YAML** is any YAML file containing durable configuration that CacheInfinity can import.
 
-### 4.4 Multi-backend rules
+* Import occurs only when `--bootstrap <path>` is provided.
+* The bootstrap YAML **must not** contain database access information.
+* The importer validates known sections, **logs and ignores** unknown/unmapped keys, and imports what it can.
+* If the database already contains configuration, `--bootstrap` performs a **best-effort merge**:
 
-* **backend_1** is the canonical WebDAV filesystem root.
-* Additional backends must have `backend_cache_root` located under `backend_1.backend_cache_root`.
-* Shares reference paths relative to backend_1 cache root.
+  * keys present in the bootstrap YAML update the database
+  * keys absent are left unchanged
+  * invalid sections/values are skipped with clear error logs
 
-### 4.5 Configuration persistence & backups
+The bootstrap YAML may contain: settings (paths/limits), cachelinks, users/permissions, shares, cookies, TLS, and other durable configuration.
 
-* The database (`config_state` tables) is authoritative once initialized. YAML files
-  are regenerated copies meant for review or cold backups.
-* Runtime edits originate from the Web UI or CLI (`cacheinfinity admin`). Each change
-  updates the database first, then rewrites formatted YAML under `$CONFIG/` and stores
-  gzipped snapshots in `$CONFIG/backups/<timestamp>-<type>.yaml.gz`. Prior files are
-  moved into the backup directory before rewriting.
-* CacheInfinity does **not** watch YAML/credential files for changes anymore. To apply
-  manual file edits you must either wipe the database (fresh bootstrap) or import via
-  the CLI (`cacheinfinity admin import-config` / `import-cachelinks`) which runs the
-  same validation pipeline and updates both DB and files.
-* Operators can opt out of DB persistence only for air-gapped environments by setting
-  `database.persist_config: false`; in that mode the Web UI and CLI mutating commands
-  are disabled and the service falls back to in-memory config derived from YAML.
+Cookie import/export uses the same canonical representation as the database:
+
+* per-domain records with `domain`, `captured_at`, and `cookies_b64` (Base64 of the full Netscape `cookies.txt` content)
+* import may optionally accept a raw Netscape `cookies.txt` payload and will normalize newlines then encode it before storing
+
+It must **not** contain transient runtime/indexing results (remote listings, access logs, per-file remote metadata, etc.).
+
+### 4.4 Backups and exports
+
+When an operator requests a backup/export, CacheInfinity writes a YAML snapshot to disk.
+
+* The export uses the same logical schema as bootstrap import (the same pipeline in reverse).
+* Cookies are exported per-domain with `domain`, `captured_at`, and `cookies_b64` (Base64 of the full Netscape `cookies.txt` content).
+* The exported YAML includes only durable configuration (settings, cachelinks, users, share policies, cookie references, TLS, etc.).
+* The export must not include remote-discovered indexing data, access logs, or other collected metadata.
+* Backup filenames are programmatic and include a date/time stamp (and may be optionally compressed).
+
+### 4.5 Logs
+
+Logs are always written to the `logs/` subfolder of the config directory (fixed location).
+
+* Log output is not configurable beyond log level.
+* Log level is controlled by `LOG_LEVEL` (highest precedence: CLI flag → environment variable → default `INFO`).
+* Logs must include enough context to diagnose issues (share, path, cachelink id, remote URL/domain, exception message).
 
 ## 5. WebDAV shares
 
-Shares are defined under `settings.yaml:webdav`.
+Shares are defined as part of the durable configuration stored in the database (typically imported via bootstrap YAML or managed via the admin interfaces).
 
 ### 5.1 Share schema
 
@@ -188,43 +145,30 @@ Each share:
 * Remote sources are never modified.
 * If a backend file exists at the same path as a virtual entry, the backend file takes precedence for reads.
 
-## 6. Credentials (file-based)
+## 6. Users and authentication
 
-Credentials are stored outside `settings.yaml`.
+User accounts, credentials, and authorization policies are stored in the database as durable configuration.
 
-### 6.1 Credential file
-
-Recommended path:
-
-* systemd: `/etc/cacheinfinity/credentials/users.yaml`
-* Docker: `$CONFIG/credentials/users.yaml` (recommended default), but must be overridable.
-
-### 6.2 Credential schema
-
-```yaml
-users:
-  exampleuser1:
-    enabled: true
-    password_plain: "change-me"          # OPTIONAL
-    password_hash: "$argon2id$..."        # OPTIONAL
-    digest_ha1:                           # OPTIONAL
-      "/games": "<H(A1) for realm /games>"
-      "/software": "<H(A1) for realm /software>"
-```
-
-### 6.3 Rules
-
-* An enabled user must have at least one of: `password_plain`, `password_hash`, or `digest_ha1`.
-* `password_plain` may be used for bootstrapping/derivation and then removed.
+* Users and credentials are created/updated via the **admin WebUI**, **admin CLI**, or imported via **bootstrap YAML**.
+* No credential files are required or used at runtime.
+* Authentication for the admin surfaces (admin WebUI + admin API) uses the admin user/permission model.
+* The admin API is **read-only** and must not implement write operations directly; it routes through the admin management layer for authorization and data access.
 
 ## 7. Mount trees (cachelinks)
 
-Mount trees are YAML files under the config directory (excluding `settings.yaml`). Cachelinks are also persisted in the database for low-latency access; disk files remain the source of truth but edits flow both ways (see §4.5).
+Cachelinks (mount trees) define how remote sources appear in the virtual tree.
+
+* Cachelinks are persisted in the database for low-latency access.
+* Disk YAML is used for **bootstrap/import** and for **exports/backups**, not as a live source that is automatically reloaded.
 
 ### 7.1 File layout
 
-* All cachelink documents (`settings.yaml`, `$CONFIG/cachelinks.yaml`, and files within
-  `$CONFIG/cachelinks/`) must wrap definitions under a top-level `cachelinks:` key.
+Cachelinks are provided via durable configuration:
+
+* via **bootstrap YAML** import (`--bootstrap <path>`), or
+* via the admin interfaces (admin WebUI / admin CLI).
+
+Bootstrap YAML documents that include cachelinks must wrap definitions under a top-level `cachelinks:` key.
 
 ### 7.2 Destination path derivation
 
@@ -264,16 +208,12 @@ Required:
 
 ### 7.6 Database mirroring
 
-* Cachelinks are imported from disk only during initial bootstrap (when the database
-  is empty) or when explicitly requested via the CLI import commands. After that,
-  the database is canonical and disk files are considered exports.
-* The Web UI may edit cachelinks directly in the database; such edits must immediately emit updated YAML to `$CONFIG/cachelinks.yaml` (or the appropriate file) and trigger the normal reload pipeline.
-* Conflicts are resolved last-writer-wins based on mtime (disk edits) versus DB revision timestamps.
-* Map IDs in YAML are synthetic. The authoritative key inside the database is `(backend path, url, subfolder)`. When CacheInfinity rewrites cachelink files it:
-  * backs up the previous document into `$CONFIG/backups/`,
-  * groups entries by backend folder, sorts each group alphabetically by the concatenated `url + subfolder`,
-  * reassigns identifiers sequentially as `map0001`, `map0002`, … for as many entries as exist, ignoring any prior id.
-* User-provided cachelinks in YAML are still ingested even if their keys do not follow the `mapNNNN` pattern—the importer only cares about backend path + URL/subfolder. On the next rewrite they will be normalized to the deterministic ordering above.
+Cachelinks are stored in the SQL database and used by the runtime.
+
+* **Import (startup):** cachelinks may be supplied via `--bootstrap <path>` (bootstrap YAML) and are imported into the database after validation.
+* **Export (operator-requested):** cachelinks are included when an operator requests a configuration backup/export to disk.
+* CacheInfinity does **not** watch cachelink YAML files for changes during normal operation.
+* Disk files are not merged with database state after startup; any on-disk YAML is treated as either bootstrap input or a backup export.
 
 ## 8. Source behavior
 
@@ -304,10 +244,12 @@ Normalization rules:
 * Only zip files referenced in `subfolder` are treated as containers.
 
 ## 9. Indexing (daily recache)
+
 Indexing follows a tiered, access-aware policy:
 
 * Every cachelink is a target. Directory-level targets (per subfolder) are recommended when upstream listings expose those boundaries.
 * Scheduler constraints:
+
   * Full reindex no less than every 60 days (hard cap) and no more frequently than every 7 days unless `allow_early_full_on_change` and hotness permit.
   * Cheap checks daily (bounded by `max_cheap_checks_per_day`).
   * Idle catch-up rate: one target every 10 minutes. First access can trigger one-per-minute indexing to avoid long warm-ups.
@@ -320,9 +262,16 @@ Indexing follows a tiered, access-aware policy:
 
 ### 9.1 Database expectations
 
-* SQLite path defaults to `$CONFIG/cacheinfinity.db`. Override via `database.sqlite.path` if needed.
-* PostgreSQL DSN can be provided under `database.postgres_dsn` or `CACHEINFINITY_DATABASE_URL`.
-* Docker Compose deployments must include a dedicated PostgreSQL container. The WebDAV service points to it via `CACHEINFINITY_DATABASE_URL` and does not expose the DB port publicly.
+* CacheInfinity always runs with a **config directory** (mandatory startup input via CLI flag or environment variable).
+* Default engine: **SQLite**.
+
+  * SQLite uses a fixed filename `cacheinfinity.db` located inside the config directory.
+  * The SQLite file path is **not configurable**.
+* Optional engine: **PostgreSQL**.
+
+  * PostgreSQL connectivity is provided via CLI/env (or `config.yml` as last resort).
+  * Docker Compose deployments should include a dedicated PostgreSQL container. The WebDAV service points to it via `CACHEINFINITY_DATABASE_URL` and does not expose the DB port publicly.
+* Optional: Redis may be enabled as a performance cache for index metadata; the SQL database remains authoritative.
 * On startup the service must auto-create/upgrade required tables (targets, files, events, access logs).
 
 ## 10. Read-through caching
@@ -351,15 +300,34 @@ Indexing follows a tiered, access-aware policy:
 
 ### 10.3 Cookie-aware downloads
 
-* Each remote domain referenced by cachelinks may also appear under `cookies:` in `settings.yaml`.
-* Supported per-domain keys:
-  * `cookie_jar`: absolute path to a writable cookie jar file (place under `$CONFIG` for Docker).
-  * `credfile` (optional, recommended for Archive.org): plaintext file with `username=` / `password=`. CacheInfinity must run `curl --dump-header cookie.txt -u "$user:$pass" -H "Connection: keep-alive" https://archive.org/account/login` to refresh the jar before downloads when cookies are stale.
-* Downloader behaviour:
-  * Pass the cookie jar to `curl` (`-b` / `-c`).
-  * If an authenticated download fails with 401/403 and a `credfile` exists, regenerate cookies and retry.
-  * For unauthenticated domains, rely on the jar contents only.
-* Cookie jars must remain writable. If `$CONFIG` is partially read-only (e.g., container mount), dedicate a writable subdirectory for jars and reference it in `cookie_jar`.
+Cookie state is stored in the database (not as on-disk cookie jars).
+
+#### 10.3.1 Storage format
+
+Cookies are stored per **domain** with:
+
+* `domain`
+* `captured_at` (timestamp)
+* `cookies_b64`: Base64 of the full Netscape `cookies.txt` content
+
+Encoding rules:
+
+1. Accept a Netscape-style `cookies.txt` payload.
+2. Normalize/validate newlines.
+3. Treat the entire file as a single string.
+4. Base64-encode that string and store it as `cookies_b64`.
+
+#### 10.3.2 Use during downloads
+
+* For a request to a remote domain, the fetcher looks up the most recent cookie record for that domain.
+* The fetcher decodes `cookies_b64` back into Netscape `cookies.txt` content.
+* The fetcher supplies the decoded cookie content to `curl` for the duration of the transfer (implementation detail).
+* CacheInfinity must not persist per-domain cookie jar files on disk as part of configuration; the database record remains authoritative.
+
+#### 10.3.3 Refresh / capture
+
+* Cookie capture/refresh is an **admin action** (via admin WebUI / admin CLI).
+* The system records `captured_at` on every update.
 
 ### 10.4 Robust downloader pipeline
 
@@ -375,7 +343,7 @@ Indexing follows a tiered, access-aware policy:
 ### 10.5 Fallback and proxying
 
 * After exhausting retries, CacheInfinity must log the failure (with cachelink id, remote URL, error) and return an informative 5xx to the client. Optional admin-configured redirects to the origin are allowed, but CacheInfinity only considers a miss “cached” when it successfully downloads the bytes itself. Passive metadata/index operations never populate the cache.
-* When a failure stems from authentication (expired cookies), regenerate cookies (if `credfile` present) and mark the target for early reindex/refresh before the next attempt.
+* When a failure stems from authentication (expired/invalid cookies), return an appropriate error and allow an administrator to refresh cookies via the admin interfaces. The system may also mark the target for early reindex/refresh before the next attempt.
 
 ## 11. Zip caching policy
 
@@ -430,9 +398,66 @@ Client UIs vary; custom properties remain queryable via PROPFIND.
 
 ### 14.1 Repository layout
 
-* `/app`: application code
-* `/docker`: Docker-related files
-* `config/`: example configuration files (for reference / seeding `$CONFIG`)
+Top-level:
+
+* `/app`: main application package containing all CacheInfinity core functionality.
+* `/docker`: Docker-related files (Dockerfile, .dockerignore, compose stack).
+* `bootstrap/`: example bootstrap YAML files (and a sample `config.yml` for database connectivity).
+
+#### 14.1.1 `/app` package structure
+
+* `app/auth/`: authentication and security management
+
+  * `credentials.py`: user credential management, authentication store, and session handling
+  * `tls.py`: TLS certificate management and automation for secure communications
+* `app/cache/`: caching logic and checksum validation
+
+  * `cachelinks.py`: virtual filesystem overlay for organizing remote content
+  * `checksum.py`: checksum calculation and validation for file integrity
+* `app/core/`: core application infrastructure and configuration management
+
+  * `config.py`: configuration loading, validation, and runtime configuration model
+  * `errors.py`: custom exception classes and error handling utilities
+  * `logging.py`: centralized logging configuration and utilities
+  * `server.py`: core server loop (startup/shutdown)
+  * `services.py`: service orchestration and lifecycle management
+* `app/db/`: database layer (configuration state, metadata, migrations)
+
+  * `adapter.py`: database access shim for pluggable backends
+  * `backupmgmt.py`: database backup and restore management
+  * `dbmanage.py`: database controller (migrations, maintenance utilities)
+  * `schema.py`: active schema plus query parsing logic for seamless upgrades
+  * `app/db/backends/`:
+
+    * `postgresql.py`: PostgreSQL connection logic with pooling
+    * `sqlite.py`: SQLite connection logic (development/testing)
+    * `redis.py`: optional Redis caching layer for performance optimization
+* `app/hosting/`: end-user interface implementations
+
+  * `browser_interface.py`: user-facing browser interface (served alongside WebDAV port)
+  * `frontend.py`: interface adapter (uniform interface for all frontends)
+  * `webdav.py`: WebDAV provider for remote filesystem access
+* `app/net/`: network operations and data transfer
+
+  * `fetcher.py`: download manager (primarily using curl) for remote file retrieval
+  * `indexer.py`: background indexing worker for remote content discovery
+* `app/storage/`: storage management (backend, config dir, staging)
+
+  * `backend.py`: backend storage manager; handles all reads and writes to backend storage
+  * `configuration.py`: configuration directory manager; handles all reads and writes to the config directory
+  * `staging.py`: staging storage manager; handles all reads and writes to staging storage
+* `app/ui/`: admin interface and management layer
+
+  * `api.py`: admin API endpoints exposed over the WebDAV port (not the WebUI)
+  * `cli.py`: command-line interface for administration and automation
+  * `backend.py`: management layer for WebUI operations and user interactions (old name: `management.py`)
+  * `app/ui/web/`: web-based UI assets
+
+    * `webcore.py`: WebUI application core and page routing
+    * `assets/`: static web assets (CSS/JS/HTML templates)
+* `app/utils/`: utilities and helpers
+
+  * `filemanager.py`: browser-based file management module
 
 ### 14.2 TLS and reverse proxy
 
@@ -447,7 +472,9 @@ CacheInfinity should be designed to run behind a reverse proxy that handles TLS 
 
 CacheInfinity should also support terminating TLS itself (without an external proxy) for simpler deployments.
 
-##### `settings.yaml` TLS configuration
+##### TLS configuration (durable config)
+
+TLS settings are part of the durable configuration (typically imported via bootstrap YAML and/or managed via admin interfaces).
 
 Add a `tls:` block (top-level):
 
@@ -485,334 +512,77 @@ tls:
       # - "*.example.com"
     staging: false
 
-    # The DNS provider plugin name used by certbot (e.g., cloudflare, route53, rfc2136, etc.)
-    provider: cloudflare
+    # The DNS provider plugin name used by certbot (e.g., cloudflare, route53, rfc2136, etc.)    provider: cloudflare
+    # DNS provider credentials are supplied via environment variables or stored as durable configuration (DB-backed).
+    # CacheInfinity must not require any additional DNS credential files on disk.
 
-    # Provider credentials file (INI) must exist in the config folder.
-    # Convention: $CONFIG/dns-<provider>.ini
-    credentials_ini: $CONFIG/dns-cloudflare.ini
-
-    # Optional: DNS propagation wait (plugin/provider-dependent)
-    propagation_seconds: 60
 ```
-
-Rules:
-
-* Authenticated access (any share user other than `anonymous` with `login: true`) **requires** TLS. Either enable TLS or set `tls.mode: external`.
-* If `tls.enabled: true` and `tls.mode: manual`, the cert/key files must exist and be readable by the service user.
-* If `tls.enabled: true` and `tls.mode: http`, CacheInfinity must:
-
-  * invoke certbot to obtain certificates when missing
-  * renew certificates periodically
-  * reload/restart the WebDAV server after renewal
-* If `tls.enabled: true` and `tls.mode: dns-01`, CacheInfinity must:
-
-  * invoke certbot with the selected DNS provider plugin
-  * use the INI credentials file located under `$CONFIG` (mounted config directory)
-  * renew periodically and reload/restart after renewal
-  * treat the INI credentials as sensitive (must not be world-readable)
-
-Notes:
-
-* DNS-01 proves control of your DNS by setting a TXT record under `_acme-challenge.<domain>` and can be used when HTTP-01 cannot; it also enables wildcard certificates.
-* HTTP-01 standalone issuance/renewal requires inbound access to port 80 and that no other service is bound to port 80 during issuance/renewal.
 
 ### 14.3 Docker deployment
 
 * Container layout:
+
   * `/app`: application code
   * `/backend`: canonical cache storage mount
   * `/staging`: download/extraction workspace
-  * `$CONFIG` (default `/config`): runtime configuration, credentials, cookie jars
-* Docker artifacts reside in `/docker` (Dockerfile, .dockerignore, compose stack).
+  * `/config` (mounted config directory):
+
+    * optional `config.yml` (last-resort DB connectivity)
+    * SQLite database file `cacheinfinity.db` (when using SQLite)
+    * operator-requested bootstrap YAML backups/exports
+    * TLS certificate/key files (manual TLS mode only)
+    * logs (always written under `/config/logs/`)
 * Compose requirements:
-  * Service `cacheinfinity` using the published `siliconautomaton/cache-infinity` image.
-  * Service `db` running PostgreSQL on a private network with a persistent volume (`./volumes/db:/var/lib/postgresql/data`).
-  * Mounts: host backend → `/backend`, host staging → `/staging`, host config → `/config`.
-  * `environment:` block must set `UID`, `GID`, and `CACHEINFINITY_DATABASE_URL=postgresql://...@db/cacheinfinity`.
-  * WebDAV port exposed as needed (plain HTTP when behind reverse proxy; HTTPS if CacheInfinity terminates TLS itself).
-  * Compose file path: `/docker/compose.yaml` (invoked via `docker compose -f docker/compose.yaml up -d`).
 
-## 15. Web UI
-
-CacheInfinity ships with a comprehensive Web UI served alongside WebDAV (distinct path) that provides complete administrative control over all aspects of the system. The Web UI is the primary interface for managing CacheInfinity—all administrative functions must be accessible through it.
-
-### 15.1 UI Layout and Navigation
-
-* **Sidebar navigation:** The UI uses a sidebar-only navigation system with the following main sections:
-  * Overview: Dashboard with statistics and system status
-  * Storage: Backend storage management and file browser
-  * Cachelinks: Cachelink management and configuration
-  * Cookies: Cookie management for authenticated domains
-  * Users: Complete user management (WebUI, WebDAV, authentication methods)
-  * Settings: All configuration settings
-  * Maintenance: System maintenance operations
-* **Category sub-options:** Within each main section, sub-options appear in the top bar (not as separate tabs). For example, the Users section has sub-options for Web UI Users, WebDAV Users, and Authentication configuration.
-* **No top-level tabs:** The previous tab-based navigation is removed; all navigation is through the sidebar.
-
-### 15.2 Overview Dashboard
-
-* Displays live statistics: backend usage, staging usage, cache hit/miss counters, indexing backlog, recent errors, and download throughput.
-* Dashboard statistics include: backend/staging utilization, cache hit/miss counters, indexing backlog, checksum catalog entry counts, degraded cachelinks, and download throughput.
-* Lists all configured shares with user counts and status.
-
-### 15.3 Storage Management
-
-* **Backend storage management:**
-  * List all configured backend storage locations
-  * Display mount status, usage statistics (total/used/free), and paths
-  * Add, edit, and remove backend storage configurations
-  * View storage utilization across all backends
-* **File browser:**
-  * Browse files and directories on the cache drive (backend storage)
-  * Navigate through directory structure with breadcrumb navigation
-  * View file metadata (size, modification time)
-  * Upload files directly to backend storage
-  * Delete files from backend storage
-  * Overlay files: manage files that overlay virtual cachelink entries
-
-### 15.4 Cachelink Management
-
-* Lists all indexed cachelinks with metadata (remote URL, file counts, cached status, mode).
-* Provides forms to add/remove cachelinks. Newly added cachelinks must immediately persist to the DB, rewrite YAML, enqueue an indexing job, and surface the metadata gathered.
-* Shows cachelink status including last index time, error states, and degradation status.
-
-### 15.5 Cookie Management
-
-* **Domain discovery:** Automatically lists all domains from cachelinks associated with current shares, plus any domains explicitly configured in settings.
-* **Cookie status display:** For each domain, shows:
-  * `cookie_present`: Boolean indicating if a cookie file exists and has content (stored in database/cookie jar)
-  * `auth_fail`: Boolean indicating if an authentication failure (401/403) has occurred since the last time the cookie was successfully updated
-  * Last error message and timestamp
-  * Last update timestamp
-  * Whether the domain supports credential-based cookie generation
-* **Cookie operations:**
-  * **Upload cookies.txt:** Button to upload a cookies.txt file for any domain. The file is stored in the configured cookie jar path for that domain.
-  * **Update credentials:** For domains that support credential-based cookie generation (have a `credfile` configured), provides a form to update username/password credentials used for cookie generation.
-  * **Refresh cookie:** Regenerate cookies using stored credentials (for domains with credfile support).
-* **Visual indicators:** Cookie list items are colorized:
-  * Green border: Cookie present and no auth failures
-  * Red border: Auth failure detected
-  * Yellow border: No cookie present
-* **Scrollable list:** The cookie management interface uses a scrollable list to handle many domains.
-
-### 15.6 User Management
-
-The Users section provides complete user management across all authentication methods:
-
-* **Web UI Users:**
-  * List, create, update, and disable Web UI admin accounts
-  * Set passwords and admin privileges
-  * Enable/disable accounts
-* **WebDAV Users:**
-  * Manage users per share with granular permissions (login, read, write, cache)
-  * Assign users to shares
-  * Set per-share user policies
-* **Authentication Methods:**
-  * **OIDC Configuration:**
-    * Enable/disable OIDC authentication
-    * Configure issuer URL, client ID, client secret, redirect URI
-    * Set allowed scopes
-    * Configure insecure HTTP allowance
-  * **LDAP Configuration:**
-    * Enable/disable LDAP authentication
-    * Configure LDAP URI, bind DN, bind password
-    * Set user base DN and user filter
-    * Configure STARTTLS and CA certificate
-  * **Proxy Header Authentication:**
-    * Enable/disable proxy header authentication
-    * Configure header name (default: X-Forwarded-User)
-    * Enable/disable automatic user creation
-
-### 15.7 Settings Management
-
-* **Complete settings editor:**
-  * Full `settings.yaml` editor with syntax highlighting
-  * All configuration options accessible:
-    * Backend storage paths and mount configuration
-    * Staging area configuration
-    * Operational limits (zip caching, etc.)
-    * Cookie domain configurations
-    * WebDAV shares and user policies
-    * TLS configuration (manual, external modes)
-    * Database configuration (SQLite/PostgreSQL)
-    * Indexing settings and budgets
-    * Authentication settings (OIDC, LDAP, proxy header)
-* **Validation:** All edits are validated against the schema before applying. Invalid edits are rejected with detailed error messages.
-* **Persistence:** Changes apply to the database first, then immediately flush to disk (`settings.yaml`), create a gzipped snapshot in `$CONFIG/backups/`, and trigger the reload pipeline.
-
-### 15.8 Maintenance Operations
-
-* Trigger manual reindexing for specific cachelinks
-* View degraded targets (cachelinks with errors)
-* System health monitoring
-* Configuration backup/restore
-
-### 15.9 Technical Requirements
-
-* Runs on a **dedicated control port** (separate from WebDAV) for isolation. Default binding is `0.0.0.0:8090`, configurable via CLI flags.
-* Requires authentication; uses WebUI credentials (stored in database). Treat the Web UI as the primary configuration interface—config YAMLs are a synchronized backup/export that the daemon rewrites after each successful change.
-* **API-first design:** All UI operations use RESTful API endpoints living under `/api/...`. The SPA must always issue absolute `/api/…` requests (never relative to the current path) so reverse proxies or alternate mount points do not break functionality.
-* **Session authentication:** Login uses the dedicated HTML form which sets an HTTP-only session cookie; Basic Auth is not used. The session cookie must be honored across all UI/API requests on the control port.
-* **Responsive design:** UI must work on desktop and tablet devices. Mobile support is optional.
-* **Real-time updates:** Status information refreshes automatically (every 15 seconds for overview, on-demand for other sections).
-
-Implementation notes:
-
-* UI reads from the database for speed (avoiding repeated disk scans).
-* Any DB-level edit (via API/UI) must be mirrored to disk synchronously; the export pipeline rewrites YAML/backups immediately after the transaction commits.
-* The UI must remain responsive while indexing/downloading proceed in the background; use async jobs or worker threads for long operations.
-* File uploads use multipart/form-data encoding.
-* Cookie management extracts domains from cachelink URLs automatically.
-
-Ports:
-
-* If using a reverse proxy (recommended): publish CacheInfinity internally; publish HTTPS at the proxy.
-* If using built-in TLS: publish HTTPS port from CacheInfinity.
-* If using built-in Let’s Encrypt `standalone` challenge: port 80 must be available during issuance/renewal.
+  * Service `cacheinfinity` for the WebDAV server.
+  * Optional service `db` running PostgreSQL on a private network with a persistent volume.
+  * Mounts: host backend → `/backend`, host staging → `/staging`, host config dir → `/config`.
+  * Environment should set `UID`, `GID`, and (when using PostgreSQL) `CACHEINFINITY_DATABASE_URL=postgresql://...@db/cacheinfinity`.
+  * Ports: expose WebDAV externally as needed. Prefer plain HTTP behind a reverse proxy; enable built-in TLS only when you need direct HTTPS.
 
 ### 14.4 systemd deployment
 
-* Run as a dedicated service account named `cache-infinite`.
-* Recommended config dir: `/etc/cacheinfinity/config`
-* Must support a systemd unit file (`cacheinfinity.service`).
-* Daily indexing may be driven either internally or by an optional systemd timer.
+* Run CacheInfinity as a dedicated service account.
+* Provide the config directory explicitly (mandatory). Example arguments:
 
-## 16. Database
+  * `--config-dir /var/lib/cacheinfinity/config`
+  * `--backend /var/lib/cacheinfinity/backend`
+  * `--staging /var/lib/cacheinfinity/staging`
+* Database connectivity should be provided via systemd environment variables (preferred) or `config.yml` (last resort).
+* The service must be able to write logs and, when using SQLite, write `cacheinfinity.db` inside the config directory.
 
-CacheInfinity persists cache metadata (checksums, logical size, cached size, fetch
-status, timestamps) in a database so that cache visibility survives restarts and
-multi-instance deployments.
+## 15. Admin interfaces
 
-### 16.1 Engines
+### 15.1 Admin WebUI
 
-* Default: SQLite file located under `$CONFIG/cacheinfinity.db`.
-* Preferred: PostgreSQL DSN provided in `settings.yaml` or via `CACHEINFINITY_DATABASE_URL`.
-* Drivers must support concurrent access; PostgreSQL is recommended for production and
-  Docker Compose deployments.
+* `app/ui/web/*` provides administrative configuration and maintenance actions.
+* All writes flow through the admin management layer (`app/ui/backend.py`, old name `management.py`).
 
-### 16.2 Configuration schema
+### 15.2 Admin API
 
-Add a top-level `database:` block to `settings.yaml`:
+* `app/ui/api.py` exposes read-only administrative and status endpoints.
+* It is authenticated using the admin user/permission model.
+* The API must not implement write operations directly.
 
-```yaml
-database:
-  engine: sqlite           # or postgres
-  sqlite:
-    path: $CONFIG/cacheinfinity.db
-  # postgres:
-  #   postgres_dsn: postgresql://cacheinfinity:cacheinfinity@db/cacheinfinity
-```
+### 15.3 Admin CLI
 
-Rules:
+* `app/ui/cli.py` provides scriptable administration.
+* Minimum commands:
 
-* SQLite path defaults to `$CONFIG/cacheinfinity.db` when omitted.
-* PostgreSQL engine requires an explicit DSN.
-* `CACHEINFINITY_DATABASE_URL` overrides file-based configuration when set.
-* On startup the service must auto-create required tables/indices if they are missing.
+  * users: list/add/disable/permissions
+  * cachelinks: list/add/remove
+  * bootstrap: import/merge (`--bootstrap`)
+  * backup: export durable configuration to a bootstrap YAML file
+  * cookies: set/list/delete per-domain cookie records
 
-### 16.3 Docker expectations
+## 16. Error handling and observability
 
-* Docker Compose must include a dedicated PostgreSQL container reachable on a private
-  network.
-* The CacheInfinity container must set `CACHEINFINITY_DATABASE_URL` to point at that DB.
-* DB volumes should be mounted under `./volumes/db` (host) → `/var/lib/postgresql/data` (container).
+* All errors must map to clear log entries including: share, path, cachelink id, remote URL/domain, and exception message.
+* Failures during downloads must not corrupt backend state.
+* Indexing failures must be recorded per-target with last error and next-eligible retry time.
 
-### 16.4 Administrative CLI
+## 17. Security notes
 
-Provide a first-party command-line tool (`cacheinfinity admin …`) that mirrors the Web UI/API operations so operators can script changes without HTTP calls.
-
-* The CLI must reuse the same validation rules as the Web UI and operate against the database-first configuration (mutations flow through the existing persistence layer, which rewrites YAML/backups).
-* Supported actions (minimum):
-  * list/add/update/disable user accounts (set plaintext password, hashed password, or digest values),
-  * list/add/remove cachelinks (arguments: backend path, URL, subfolder),
-  * import/export configuration and cachelinks from/to YAML (only supported pathway for applying manual file edits to a live database),
-  * trigger reindexing for a cachelink or entire namespace,
-  * regenerate per-domain cookie jars when `credfile` entries exist.
-* CLI subcommands should align with forthcoming API payloads so tooling can switch between CLI and HTTP without different schemas.
-
-### 16.5 Checksum catalogs
-
-* `$CONFIG/checksums/` is scanned recursively on startup and during reloads for CSV or JSON checksum datasets (Redump, No-Intro, in-house manifests, etc.). Supported column names: `name`/`filename`/`path`, `size`, and any of `sha256`/`sha1`/`md5`/`crc32`.
-* Parsed entries are imported into a dedicated `checksum_catalog` table so they survive restarts and can be queried by the Web UI/API. Stats must expose the total catalog entry count.
-* When indexing encounters a file that lacks a checksum from the source listing, the scheduler must look up the filename in the catalog and attach the strongest available digest before storing the entry.
-* TorrentZip CRC comments embedded inside Myrient downloads must be captured after a successful fetch and recorded as `crc32` digests linked to the indexed entry.
-* Backend cache writes must record their own SHA-256 digests in the database for audit/comparison against future source changes.
-
-## 17. Error handling
-
-### 17.1 Principles
-
-* Fail safe: never corrupt backend data.
-* Prefer serving cached/backend content when available.
-* If a configuration reload fails validation, keep the last known-good configuration.
-* All errors must be logged with enough context to diagnose (share, path, cachelink id, remote URL, exception message).
-
-### 17.2 WebDAV/HTTP error mapping
-
-* **Backend out of space** when attempting to write cached bytes or user uploads: return **HTTP 507 Insufficient Storage**.
-* **Permission denied** (share/user policy): 403.
-* **Not found** (path not in backend and not in virtual index): 404.
-* **Remote unavailable / fetch failure**: 502 or 503 with a clear log entry.
-
-### 17.3 Download and staging failure handling
-
-* Always download to staging first.
-* Use atomic moves/renames when copying from staging into backend.
-* If a download fails or is interrupted:
-
-  * do not write partial data into backend
-  * clean up the partial staging artifact
-
-* If extraction fails (zip mode):
-
-  * do not leave partially extracted data in backend (prefer extract to a temp dir then atomically move into place).
-
-### 17.4 Indexer failure handling
-
-* If daily indexing fails for a cachelink, keep the last successful index for that cachelink and record the failure state.
-
-## 18. Configuration lifecycle
-
-Configuration changes must be reflected promptly without depending on file-system
-watchers. The running daemon always consults the database for authoritative state.
-
-### 18.1 What is reloadable
-
-Reload must apply to:
-
-* settings (paths, limits, TLS, cookies, indexing budgets, etc.)
-* cachelinks (stored inline or imported from cachelink documents)
-* credentials and user accounts
-
-### 18.2 Change sources
-
-* Web UI and HTTP API: edits flow through the validation layer, commit to the database,
-  and immediately notify the runtime so new requests observe the updated state.
-* CLI (`cacheinfinity admin …`): uses the same validation layer as the Web UI. Import
-  commands (`import-config`, `import-cachelinks`, `import-users`) are the only
-  supported pathway for applying manual YAML edits to a running instance.
-* SIGHUP or `cacheinfinity admin reload`: force the process to reread the current
-  database snapshot (useful after manual DB maintenance).
-
-### 18.3 Reload semantics
-
-* Every change is validated before it reaches the database. Atomic transactions ensure
-  either the full update succeeds or nothing applies.
-* After committing, the runtime swaps in the freshly materialized config for new
-  WebDAV and Web UI requests while existing requests finish with the old view.
-* When YAML exports occur (either because of DB changes or explicit CLI export),
-  the previous files move into `$CONFIG/backups/` and the new files reflect the
-  database order/format (deterministic `mapNNNN` naming).
-
-### 18.4 TLS reload
-
-* TLS configuration changes triggered via Web UI or CLI must reconfigure listeners
-  without requiring a full restart when the chosen backend supports it. Otherwise,
-  emit a controlled restart message so operators can restart gracefully.
-
-### 18.5 systemd integration
-
-* Provide a systemd unit with an `ExecReload=` action that triggers the same in-process
-  reload path as the CLI (e.g., `kill -HUP $MAINPID`). This causes the service to
-  rehydrate configuration from the database and refresh TLS/listeners as needed.
+* Prefer running behind a reverse proxy for TLS and rate limiting.
+* Admin surfaces must require authentication and authorization.
+* End-user interface must not expose administrative write actions.
