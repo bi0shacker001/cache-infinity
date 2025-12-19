@@ -8,9 +8,9 @@ CacheInfinity exposes a WebDAV filesystem (consumed by Nextcloud and other DAV c
 * Remote content (Archive.org, Myrient, other HTTP(S)/FTP/FTPS sources) appears as virtual files/folders sourced from a progressive index.
 * File bytes are fetched on-demand and cached into backend storage via a staging-first pipeline.
 * Users can also create/modify/delete files; these writes pass through transparently to backend storage.
-* The design prioritizes “no unnecessary downloads”: once backend contains data (or there is no CacheInfinity-managed checksum), it is trusted.
+* The design prioritizes "no unnecessary downloads": once backend contains data (or there is no CacheInfinity-managed checksum), it is trusted.
 
-The project is inspired by Infinite Mac’s **Infinite Drive** and adapts that experience to WebDAV environments with extra controls for staging volumes, cookie management, and Docker/systemd deployment.
+The project is inspired by Infinite Mac's **Infinite Drive** and adapts that experience to WebDAV environments with extra controls for staging volumes, cookie management, and Docker/systemd deployment.
 
 > **Documentation Note:** `SPEC.md`, `README.md`, `TODO.md`, and `ISSUES.md` are **living documents**. They evolve with the codebase and should be treated as the authoritative description of the current design, outstanding work, and known issues. Always review them together when planning changes.
 
@@ -20,7 +20,7 @@ The project is inspired by Infinite Mac’s **Infinite Drive** and adapts that e
 * **Backend storage:** one or more backend roots. Backend is the canonical storage for cached files and all user-authored content.
 * **Local staging:** local volume for downloads/extractions before copying to backend.
 * **Indexer:** refreshes remote listings on a schedule.
-* **Fetcher:** `curl` for downloads (HTTP and later FTP).
+* **Fetcher:** **PycURL-based** downloader for HTTP(S) and FTP transfers.
 * **Interfaces:**
 
   * **End-user interface** (`app/hosting/browser_interface.py`): browses and reads content.
@@ -130,7 +130,8 @@ Each share:
 * `users` (required): map of username → flags.
 * `writable` (optional, default `true`): share-level switch for write operations.
 * `cachelink_overlay` (optional, default `true`): whether the share shows CacheInfinity virtual entries.
-* Reserved username `anonymous` controls unauthenticated access. If omitted or `login: false`, anonymous requests are rejected.
+
+Reserved username `anonymous` controls unauthenticated access. If omitted or `login: false`, anonymous requests are rejected.
 
 ### 5.2 Per-user flags
 
@@ -253,7 +254,7 @@ Indexing follows a tiered, access-aware policy:
   * Full reindex no less than every 60 days (hard cap) and no more frequently than every 7 days unless `allow_early_full_on_change` and hotness permit.
   * Cheap checks daily (bounded by `max_cheap_checks_per_day`).
   * Idle catch-up rate: one target every 10 minutes. First access can trigger one-per-minute indexing to avoid long warm-ups.
-* Access events (even when served from backend) credit parent/grandparent directories as “hot”. Hotness decays over `indexing.hot_window_days`.
+* Access events (even when served from backend) credit parent/grandparent directories as "hot". Hotness decays over `indexing.hot_window_days`.
 * Budgets (`daily_full_reindex_budget`, `daily_cheap_check_budget`) ensure daily progress without hammering upstreams.
 * Cheap checks prefer conditional requests (ETag / Last-Modified). Without headers, fetch the listing and compare normalized hashes. `ListingNotModified` short-circuits work.
 * Failed cache fetches (remote 404/5xx during user GET) mark the relevant target as `needs_full_reindex` (subject to min interval) to refresh metadata.
@@ -321,7 +322,7 @@ Encoding rules:
 
 * For a request to a remote domain, the fetcher looks up the most recent cookie record for that domain.
 * The fetcher decodes `cookies_b64` back into Netscape `cookies.txt` content.
-* The fetcher supplies the decoded cookie content to `curl` for the duration of the transfer (implementation detail).
+* The fetcher supplies the decoded cookie content to **PycURL** for the duration of the transfer (implementation detail).
 * CacheInfinity must not persist per-domain cookie jar files on disk as part of configuration; the database record remains authoritative.
 
 #### 10.3.3 Refresh / capture
@@ -331,18 +332,19 @@ Encoding rules:
 
 ### 10.4 Robust downloader pipeline
 
-* CacheInfinity uses `curl` for all HTTP(S) transfers with the following behaviours:
+* CacheInfinity uses **PycURL** for all HTTP(S) and FTP transfers with the following behaviours:
 
-  * resume partial downloads (`--continue-at -`)
-  * retry transient failures (`--retry`, `--retry-delay`, `--retry-connrefused`)
+  * resume partial downloads
+  * retry transient failures with exponential backoff
   * enforce reasonable timeouts and minimum transfer speeds
-  * log failures with domain, cachelink id, destination path, and curl stderr
+  * log failures with domain, cachelink id, destination path, and transfer details
+  * support both HTTP and FTP protocols with unified interface
 
 * All downloads occur inside staging. Temporary files must be cleaned up on errors.
 
 ### 10.5 Fallback and proxying
 
-* After exhausting retries, CacheInfinity must log the failure (with cachelink id, remote URL, error) and return an informative 5xx to the client. Optional admin-configured redirects to the origin are allowed, but CacheInfinity only considers a miss “cached” when it successfully downloads the bytes itself. Passive metadata/index operations never populate the cache.
+* After exhausting retries, CacheInfinity must log the failure (with cachelink id, remote URL, error) and return an informative 5xx to the client. Optional admin-configured redirects to the origin are allowed, but CacheInfinity only considers a miss "cached" when it successfully downloads the bytes itself. Passive metadata/index operations never populate the cache.
 * When a failure stems from authentication (expired/invalid cookies), return an appropriate error and allow an administrator to refresh cookies via the admin interfaces. The system may also mark the target for early reindex/refresh before the next attempt.
 
 ## 11. Zip caching policy
@@ -407,56 +409,45 @@ Top-level:
 #### 14.1.1 `/app` package structure
 
 * `app/auth/`: authentication and security management
-
   * `credentials.py`: user credential management, authentication store, and session handling
   * `tls.py`: TLS certificate management and automation for secure communications
 * `app/cache/`: caching logic and checksum validation
-
   * `cachelinks.py`: virtual filesystem overlay for organizing remote content
   * `checksum.py`: checksum calculation and validation for file integrity
 * `app/core/`: core application infrastructure and configuration management
-
   * `config.py`: configuration loading, validation, and runtime configuration model
   * `errors.py`: custom exception classes and error handling utilities
   * `logging.py`: centralized logging configuration and utilities
   * `server.py`: core server loop (startup/shutdown)
   * `services.py`: service orchestration and lifecycle management
 * `app/db/`: database layer (configuration state, metadata, migrations)
-
   * `adapter.py`: database access shim for pluggable backends
   * `backupmgmt.py`: database backup and restore management
   * `dbmanage.py`: database controller (migrations, maintenance utilities)
   * `schema.py`: active schema plus query parsing logic for seamless upgrades
   * `app/db/backends/`:
-
     * `postgresql.py`: PostgreSQL connection logic with pooling
     * `sqlite.py`: SQLite connection logic (development/testing)
     * `redis.py`: optional Redis caching layer for performance optimization
 * `app/hosting/`: end-user interface implementations
-
   * `browser_interface.py`: user-facing browser interface (served alongside WebDAV port)
   * `frontend.py`: interface adapter (uniform interface for all frontends)
   * `webdav.py`: WebDAV provider for remote filesystem access
 * `app/net/`: network operations and data transfer
-
-  * `fetcher.py`: download manager (primarily using curl) for remote file retrieval
+  * `fetcher.py`: **PycURL-based** download manager for remote file retrieval
   * `indexer.py`: background indexing worker for remote content discovery
 * `app/storage/`: storage management (backend, config dir, staging)
-
   * `backend.py`: backend storage manager; handles all reads and writes to backend storage
   * `configuration.py`: configuration directory manager; handles all reads and writes to the config directory
   * `staging.py`: staging storage manager; handles all reads and writes to staging storage
 * `app/ui/`: admin interface and management layer
-
   * `api.py`: admin API endpoints exposed over the WebDAV port (not the WebUI)
   * `cli.py`: command-line interface for administration and automation
   * `backend.py`: management layer for WebUI operations and user interactions (old name: `management.py`)
   * `app/ui/web/`: web-based UI assets
-
     * `webcore.py`: WebUI application core and page routing
     * `assets/`: static web assets (CSS/JS/HTML templates)
 * `app/utils/`: utilities and helpers
-
   * `filemanager.py`: browser-based file management module
 
 ### 14.2 TLS and reverse proxy
@@ -484,8 +475,8 @@ tls:
 
   # mode:
   # - manual: use provided cert/key
-  # - http: obtain/renew via Let’s Encrypt HTTP-01 using certbot
-  # - dns-01: obtain/renew via Let’s Encrypt DNS-01 using certbot + a DNS provider plugin
+  # - http: obtain/renew via Let's Encrypt HTTP-01 using certbot
+  # - dns-01: obtain/renew via Let's Encrypt DNS-01 using certbot + a DNS provider plugin
   # - external: TLS terminated upstream (CacheInfinity serves plain HTTP but assumes secure transport)
   mode: manual
 
@@ -493,7 +484,7 @@ tls:
   cert_path: /PATH/TO/fullchain.pem
   key_path: /PATH/TO/privkey.pem
 
-  # http mode (Let’s Encrypt HTTP-01):
+  # http mode (Let's Encrypt HTTP-01):
   http:
     email: you@example.com
     domains:
@@ -503,7 +494,7 @@ tls:
     webroot_path: /PATH/TO/WEBROOT   # required if challenge == webroot
     staging: false                   # use LE staging endpoint for testing if true
 
-  # dns-01 mode (Let’s Encrypt DNS-01):
+  # dns-01 mode (Let's Encrypt DNS-01):
   dns01:
     email: you@example.com
     domains:
@@ -511,7 +502,6 @@ tls:
       # wildcard certs are allowed with DNS-01
       # - "*.example.com"
     staging: false
-
     # The DNS provider plugin name used by certbot (e.g., cloudflare, route53, rfc2136, etc.)    provider: cloudflare
     # DNS provider credentials are supplied via environment variables or stored as durable configuration (DB-backed).
     # CacheInfinity must not require any additional DNS credential files on disk.
@@ -526,14 +516,12 @@ tls:
   * `/backend`: canonical cache storage mount
   * `/staging`: download/extraction workspace
   * `/config` (mounted config directory):
-
     * optional `config.yml` (last-resort DB connectivity)
     * SQLite database file `cacheinfinity.db` (when using SQLite)
     * operator-requested bootstrap YAML backups/exports
     * TLS certificate/key files (manual TLS mode only)
     * logs (always written under `/config/logs/`)
 * Compose requirements:
-
   * Service `cacheinfinity` for the WebDAV server.
   * Optional service `db` running PostgreSQL on a private network with a persistent volume.
   * Mounts: host backend → `/backend`, host staging → `/staging`, host config dir → `/config`.
