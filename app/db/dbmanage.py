@@ -33,7 +33,8 @@ class DatabaseManager:
     @classmethod
     def from_settings(cls, settings: "DatabaseSettings") -> "DatabaseManager":
         """Create a DatabaseManager from database settings."""
-        return cls(IndexDatabase(settings))
+        adapter = DBAdapter(settings)
+        return cls(IndexDatabase(adapter))
 
     def create_tables(self) -> bool:
         """Ensure all required database tables exist."""
@@ -67,6 +68,11 @@ class DatabaseManager:
 
     def __getattr__(self, name: str):
         return getattr(self.index_db, name)
+
+    def table_has_rows(self, table: str) -> bool:
+        """Return True if the given table has any rows."""
+        row = self.adapter.fetchone(f"SELECT 1 FROM {table} LIMIT 1")
+        return bool(row)
         
     def backup_database(self, backup_path: Path) -> bool:
         """Create a backup of the database.

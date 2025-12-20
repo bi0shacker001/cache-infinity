@@ -7,11 +7,10 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Protocol
 
 from cache.cachelinks import CachelinkDescriptor
 from core.errors import ConfigError
-from db.adapter import DBAdapter
 from auth.credentials import CredentialStore
 
 
@@ -63,14 +62,25 @@ class CatalogChecksum:
     size: int | None = None
 
 
+class _DBAdapter(Protocol):
+    def execute(self, sql: str, params: Sequence[object] | None = None): ...
+    def executemany(self, sql: str, seq: Iterable[Sequence[object]]): ...
+    def fetchone(self, sql: str, params: Sequence[object] | None = None) -> dict | None: ...
+    def fetchall(self, sql: str, params: Sequence[object] | None = None) -> list[dict]: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def close(self) -> None: ...
+
+
 class IndexDatabase:
     """Persistent storage for indexing state."""
 
-    def __init__(self, settings: 'DatabaseSettings'):
+    def __init__(self, db_adapter: "_DBAdapter"):
         import logging
         self._logger = logging.getLogger(__name__)
-        self._logger.info("Initializing IndexDatabase with settings: %s", settings.engine)
-        self._db = DBAdapter(settings)
+        engine = getattr(db_adapter, "engine", "unknown")
+        self._logger.info("Initializing IndexDatabase with adapter engine: %s", engine)
+        self._db = db_adapter
         self._lock = threading.RLock()
         self._init_schema()
 

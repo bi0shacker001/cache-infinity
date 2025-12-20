@@ -32,11 +32,11 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory 
     - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
   ui: #Folder. Admin interface components and management layer
-    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces  -- CAN ONLY BE IMPORTED BY: core.services
-    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services
+    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces  -- CAN ONLY BE IMPORTED BY: core.services, hosting.*  --CAN ONLY IMPORT INTERNALLY: ui.backend
+    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services  --CAN ONLY IMPORT INTERNALLY: ui.backend
     - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py -- CAN ONLY BE IMPORTED BY: ui.*
     web: #Folder. Web-based user interface assets
-      - webcore.py #File. WebUI application core and page routing --CAN ONLY BE IMPORTED BY: core.services
+      - webcore.py #File. WebUI application core and page routing --CAN ONLY BE IMPORTED BY: core.services --CAN ONLY IMPORT INTERNALLY: ui.backend
       assets: #Folder. Static web assets (CSS, JavaScript, HTML)
         css: #Folder. Cascading Style Sheets for UI theming
           - components.css #File. UI component styling

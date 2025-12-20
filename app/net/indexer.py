@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 
 from auth.credentials import CookieJarDefinition
 from core.config import IndexingSettings
-from db.adapter import DBAdapter
 from cache.cachelinks import CachelinkDescriptor
 
 _logger = logging.getLogger(__name__)

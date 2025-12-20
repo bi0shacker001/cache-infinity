@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from ..core.services import CacheInfinityService
-    from ..db.schema import IndexDatabase
 
 logger = logging.getLogger(__name__)
 

@@ -13,7 +13,7 @@ from core.errors import ConfigError
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from db.schema import IndexDatabase
+    from db.dbmanage import DatabaseManager
 
 class ConfigExportError(Exception):
     """Raised when configuration export fails."""
@@ -26,11 +26,11 @@ class ConfigImportError(Exception):
 class DatabaseBackupManager:
     """Manages database backup and restore operations using bootstrap.yml."""
 
-    def __init__(self, index_db: 'IndexDatabase', config_dir: Path):
-        """Initialize backup manager with IndexDatabase.
+    def __init__(self, index_db: "DatabaseManager", config_dir: Path):
+        """Initialize backup manager with DatabaseManager.
 
         Args:
-            index_db: IndexDatabase instance for database operations
+            index_db: DatabaseManager instance for database operations
             config_dir: Path to the configuration directory
         """
         self.index_db = index_db
@@ -210,7 +210,7 @@ class DatabaseBackupManager:
         return warnings
 
     def _collect_all_configuration(self) -> dict:
-        """Collect all configuration from IndexDatabase.
+        """Collect all configuration from DatabaseManager.
 
         Returns:
             Dictionary containing all configuration in bootstrap.yml format

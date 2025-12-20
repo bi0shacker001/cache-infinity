@@ -36,7 +36,6 @@ from core.config import ConfigError, Settings, load_two_file_settings, load_data
 from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
 from net.fetcher import Fetcher
 from db.dbmanage import DatabaseManager
-from db.schema import IndexedEntry
 from net.indexer import RemoteListingFetcher, Indexer
 from storage.staging import StagingArea
 from ui.web.webcore import WebUIApp
@@ -1596,7 +1595,7 @@ class CacheInfinityService:
     def _descriptor_counts(
         self,
         descriptor: CachelinkDescriptor,
-        entries: list[IndexedEntry],
+        entries: list[dict[str, object]],
         backend,
     ) -> dict[str, int]:
         return self.config_service.descriptor_counts(descriptor, entries, backend)

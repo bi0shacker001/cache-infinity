@@ -293,7 +293,7 @@ class ConfigMigration:
         
         Args:
             config_dir: Path to the configuration directory
-            index_db: IndexDatabase instance
+            index_db: DatabaseManager instance
         """
         self.config_dir = config_dir
         self.index_db = index_db
@@ -317,8 +317,7 @@ class ConfigMigration:
             ]
             
             for table in tables:
-                row = self.index_db._db.fetchone(f"SELECT 1 FROM {table} LIMIT 1")
-                if row:
+                if self.index_db.table_has_rows(table):
                     return False  # Database has data, no migration needed
             
             return True  # Database is empty, migration needed
@@ -1138,9 +1137,9 @@ def load_database_backed_settings(config_dir: Path, args, env, bootstrap_path: O
         # Load database settings first (from config.yml)
         database_settings = load_database_settings(config_dir, args, env)
         
-        # Initialize database
-        from db.index import IndexDatabase
-        index_db = IndexDatabase(database_settings)
+        # Initialize database via dbmanage
+        from db.dbmanage import DatabaseManager
+        index_db = DatabaseManager.from_settings(database_settings)
         
         # Initialize migration system
         migration = ConfigMigration(config_dir, index_db)
