@@ -1,7 +1,7 @@
 app: #Folder. Main application package containing all CacheInfinity core functionality
   auth: #Folder. Authentication and security management components
     - credentials.py #File. User credential management, authentication store, and session handling
-    - tls.py #File. TLS certificate management and automation for secure communications
+    - tls.py #File. TLS certificate management and automation for secure communications. Also handles
   cache: #Folder. Caching logic and checksum validation systems
     - cachelinks.py #File. Virtual file system management for remote content organization
     - checksum.py #File. Checksum calculation and validation for file integrity verification
@@ -9,31 +9,32 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - config.py #File. Configuration loading, validation, and management system
     - errors.py #File. Custom exception classes and error handling utilities
     - logging.py #File. Centralized logging configuration and utilities
-    - server.py #File. WSGI server configuration and WebDAV/WebUI hosting
-    - service.py #File. Main service orchestration and lifecycle management
-  db: #Folder. Database abstraction layer and adapters
-    - adapter.py #File. Database connection management and query execution
-    - backupmgmt.py #File. Configuration backup and snapshot management
-    - dbmanage.py #File. Database migration and maintenance utilities
-    - index.py #File. Indexing metadata storage and access patterns tracking
+    - server.py #File. Core server loop. Handles startup and shutdown of the server overall
+    - services.py #File. Service orchestration and lifecycle management
+  db: #Folder. All database functionality
+    - adapter.py #File. Database access shim to allow transparent background provider management
+    - backupmgmt.py #File. Database backup and restore management.
+    - dbmanage.py #File. Database controller. Also handles migration and maintenance utilities
+    - schema.py #File. Contains active database schema, as well as query parsing logic, to ensure correct data location and seamless upgrades.
     backends: #Folder. Database backend implementations
-      - postgresql.py #File. PostgreSQL database adapter with connection pooling
+      - postgresql.py #File. PostgreSQL database connection logic with connection pooling
       - redis.py #File. Redis caching layer for performance optimization
-      - sqlite.py #File. SQLite database adapter for development and testing
-  hosting: #Folder. WebDAV and browser interface implementations
+      - sqlite.py #File. SQLite database connection logic for development and testing
+  hosting: #Folder. End user interface implementations
     - browser_interface.py #File. User-facing browser interface for CacheInfinity operations
+    - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions.
     - webdav.py #File. WebDAV provider for remote file system access
   net: #Folder. Network operations and data transfer components
-    - fetcher.py #File. Download manager using curl for remote file retrieval
+    - fetcher.py #File. Download manager (primarily using curl) for remote file retrieval
     - indexer.py #File. Background indexing worker for remote content discovery
   storage: #Folder. Storage management and staging area handling
-    - backend.py #File. Backend storage management for cached content
-    - configuration.py #File. Storage configuration and mount point management
-    - staging.py #File. Staging area management for downloads and processing
-  ui: #Folder. User interface components and management layer
-    - api.py #File. WebUI API endpoints for frontend integration
+    - backend.py #File. Backend storage management for cached content. Handles ALL reads and writes to backend storage
+    - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory
+    - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
+  ui: #Folder. Admin interface components and management layer
+    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces
     - cli.py #File. Command-line interface for administration and automation
-    - management.py #File. Management layer for WebUI operations and user interactions
+    - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py
     web: #Folder. Web-based user interface assets
       - webcore.py #File. WebUI application core and page routing
       assets: #Folder. Static web assets (CSS, JavaScript, HTML)
@@ -61,4 +62,4 @@ app: #Folder. Main application package containing all CacheInfinity core functio
           - storage.html #File. Storage management page
           - users.html #File. User administration page
   utils: #Folder. Utility functions and helper modules
-    - filemanager.py #File. File system operations and path utilities
+    - filemanager.py #File. Graphical module for managing files in a browser

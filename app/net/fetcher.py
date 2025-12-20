@@ -1,20 +1,31 @@
-"""Download management (curl-based) for CacheInfinity networking."""
+"""Download management (PycURL-based) for CacheInfinity networking."""
 
 from __future__ import annotations
 
-import hashlib
+import io
 import logging
-import subprocess
 import time
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Callable
-from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
+from auth.credentials import CookieJarDefinition
 from cache.checksum import ChecksumCalculator
 
 _logger = logging.getLogger(__name__)
+
+
+def _import_pycurl():
+    try:
+        import pycurl  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "pycurl is required for CacheInfinity networking. "
+            "Install project dependencies (including 'pycurl') to enable downloads/indexing."
+        ) from exc
+    return pycurl
 
 
 @dataclass
@@ -42,9 +53,9 @@ class DownloadProgress:
 
 
 class Fetcher:
-    """Manages downloads using curl with robust retry and resume capabilities."""
+    """Manages downloads using PycURL with robust retry and resume capabilities."""
     
-    def __init__(self, cookie_jars: Dict[str, 'CookieJarDefinition'],
+    def __init__(self, cookie_jars: Dict[str, CookieJarDefinition],
                  max_retries: int = 3, retry_delay: int = 5,
                  verify_checksums: bool = True, max_concurrent: int = 3):
         """Initialize fetcher.
@@ -79,7 +90,7 @@ class Fetcher:
                       resume: bool = True, timeout: int = 300,
                       expected_checksum: Optional[str] = None,
                       progress_callback: Optional[Callable[[DownloadProgress], None]] = None) -> DownloadResult:
-        """Download a file using curl with cookie support and checksum verification.
+        """Download a file using PycURL with cookie support and checksum verification.
         
         Args:
             url: URL to download from
@@ -92,93 +103,96 @@ class Fetcher:
         Returns:
             DownloadResult with operation status and checksum
         """
+        pycurl = _import_pycurl()
         start_time = time.time()
         domain = self._extract_domain(url)
-        
-        # Check concurrency limit
-        with self._download_lock:
-            if self._active_downloads >= self.max_concurrent:
-                _logger.warning(f"Max concurrent downloads reached ({self.max_concurrent}), waiting...")
-                # Wait for a download to complete
-                while self._active_downloads >= self.max_concurrent:
-                    time.sleep(1)
-            
-            self._active_downloads += 1
-        
+
+        while True:
+            with self._download_lock:
+                if self._active_downloads < self.max_concurrent:
+                    self._active_downloads += 1
+                    break
+            time.sleep(0.2)
+
         try:
+            last_error: str | None = None
             for attempt in range(self.max_retries + 1):
                 try:
-                    # Prepare curl command with enhanced options
-                    cmd = self._build_curl_command(url, destination, domain, resume, timeout)
-                    
-                    # Execute download with progress monitoring
-                    result = self._execute_download_with_progress(cmd, destination, progress_callback)
-                    
-                    if result.success:
-                        # Check if file was created and has content
-                        if destination.exists() and destination.stat().st_size > 0:
-                            duration = time.time() - start_time
-                            size = destination.stat().st_size
-                            
-                            # Calculate checksum if verification is enabled
-                            checksum = None
-                            verified = False
-                            
-                            if self.verify_checksums and size > 0:
-                                try:
-                                    checksum = self.checksum_calc.calculate_sha256(destination)
-                                    
-                                    if expected_checksum:
-                                        verified = checksum.lower() == expected_checksum.lower()
-                                        if not verified:
-                                            _logger.warning(
-                                                f"Checksum verification failed for {destination}: "
-                                                f"expected {expected_checksum}, got {checksum}"
-                                            )
-                                    else:
-                                        _logger.info(f"Calculated checksum for {destination}: {checksum}")
-                                            
-                                except Exception as e:
-                                    _logger.warning(f"Failed to calculate checksum for {destination}: {e}")
-                            
-                            _logger.info(f"Download successful: {destination} ({size} bytes)")
-                            return DownloadResult(
-                                success=True,
-                                file_path=destination,
-                                size=size,
-                                duration=duration,
-                                checksum=checksum,
-                                verified=verified if expected_checksum else True
-                            )
-                        else:
-                            raise Exception("Download completed but file is missing or empty")
-                            
-                    else:
-                        # Download failed, prepare for retry
-                        if destination.exists() and not resume:
-                            destination.unlink()  # Remove incomplete file if not resuming
-                        
-                        if attempt < self.max_retries:
-                            _logger.info(f"Download attempt {attempt + 1} failed, retrying in {self.retry_delay} seconds...")
-                            time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
-                            continue
-                        else:
-                            duration = time.time() - start_time
-                            return DownloadResult(
-                                success=False,
-                                file_path=None,
-                                size=0,
-                                duration=duration,
-                                error_message=result.error_message
-                            )
-                            
-                except Exception as e:
-                    error_msg = f"Download attempt {attempt + 1} failed: {str(e)}"
-                    _logger.warning(error_msg)
-                    
+                    if destination.exists() and not resume:
+                        destination.unlink()
+                    ok, status_code, error_message = self._download_once(
+                        pycurl,
+                        url=url,
+                        destination=destination,
+                        domain=domain,
+                        resume=resume,
+                        timeout=timeout,
+                        progress_callback=progress_callback,
+                    )
+
+                    if ok:
+                        if not destination.exists() or destination.stat().st_size <= 0:
+                            raise RuntimeError("Download reported success but destination is empty")
+
+                        duration = time.time() - start_time
+                        size = destination.stat().st_size
+
+                        checksum = None
+                        verified = False
+                        if self.verify_checksums and size > 0:
+                            try:
+                                checksum = self.checksum_calc.calculate_sha256(destination)
+                                if expected_checksum:
+                                    verified = checksum.lower() == expected_checksum.lower()
+                                    if not verified:
+                                        _logger.warning(
+                                            "Checksum verification failed for %s: expected %s, got %s",
+                                            destination,
+                                            expected_checksum,
+                                            checksum,
+                                        )
+                                else:
+                                    _logger.info("Calculated checksum for %s: %s", destination, checksum)
+                            except Exception as exc:
+                                _logger.warning("Failed to calculate checksum for %s: %s", destination, exc)
+
+                        _logger.info("Download successful: %s (%d bytes)", destination, size)
+                        return DownloadResult(
+                            success=True,
+                            file_path=destination,
+                            size=size,
+                            duration=duration,
+                            error_message=None,
+                            checksum=checksum,
+                            verified=verified if expected_checksum else True,
+                        )
+
+                    last_error = error_message or f"HTTP {status_code}" if status_code else "Download failed"
+
+                    is_retryable_http = status_code in (408, 429) or (status_code is not None and 500 <= status_code <= 599)
+                    is_retryable = status_code is None or is_retryable_http
+
+                    if attempt < self.max_retries and is_retryable:
+                        delay = self.retry_delay * (2 ** attempt)
+                        _logger.info("Download attempt %d failed (%s), retrying in %ds", attempt + 1, last_error, delay)
+                        time.sleep(delay)
+                        continue
+
+                    duration = time.time() - start_time
+                    return DownloadResult(
+                        success=False,
+                        file_path=None,
+                        size=0,
+                        duration=duration,
+                        error_message=last_error,
+                    )
+                except Exception as exc:
+                    last_error = f"Download attempt {attempt + 1} failed: {exc}"
+                    _logger.warning(last_error)
                     if attempt < self.max_retries:
-                        _logger.info(f"Retrying in {self.retry_delay} seconds...")
-                        time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                        delay = self.retry_delay * (2 ** attempt)
+                        _logger.info("Retrying in %ds...", delay)
+                        time.sleep(delay)
                     else:
                         duration = time.time() - start_time
                         return DownloadResult(
@@ -186,132 +200,109 @@ class Fetcher:
                             file_path=None,
                             size=0,
                             duration=duration,
-                            error_message=error_msg
+                            error_message=last_error,
                         )
-            
-            # This should never be reached, but just in case
+
             duration = time.time() - start_time
-            return DownloadResult(
-                success=False,
-                file_path=None,
-                size=0,
-                duration=duration,
-                error_message="Unknown download error"
-            )
-            
+            return DownloadResult(success=False, file_path=None, size=0, duration=duration, error_message=last_error)
         finally:
             with self._download_lock:
                 self._active_downloads -= 1
     
-    def _execute_download_with_progress(self, cmd: list[str], destination: Path,
-                                       progress_callback: Optional[Callable[[DownloadProgress], None]] = None) -> DownloadResult:
-        """Execute download with progress monitoring."""
+    def _download_once(
+        self,
+        pycurl,
+        *,
+        url: str,
+        destination: Path,
+        domain: str,
+        resume: bool,
+        timeout: int,
+        progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
+    ) -> tuple[bool, int | None, str | None]:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        cookie_definition = self.cookie_jars.get(domain)
+        cookie_path = (
+            cookie_definition.cookie_jar
+            if cookie_definition and cookie_definition.cookie_jar and cookie_definition.cookie_jar.exists()
+            else None
+        )
+        userpwd = self._read_basic_auth(cookie_definition.credfile) if cookie_definition else None
+
+        start_ts = time.time()
+        existing_size = destination.stat().st_size if resume and destination.exists() else 0
+        mode = "ab" if existing_size > 0 else "wb"
+
+        header_lines: list[bytes] = []
+        downloaded_ref: dict[str, float] = {"dlnow": float(existing_size)}
+
+        def _emit_progress(dltotal: float, dlnow: float) -> int:
+            now = time.time()
+            elapsed = max(0.001, now - start_ts)
+            downloaded_ref["dlnow"] = dlnow
+            progress = DownloadProgress(
+                downloaded=int(dlnow),
+                total=int(dltotal) if dltotal else 0,
+                speed=float(dlnow) / elapsed,
+                elapsed=elapsed,
+                status="downloading",
+            )
+            for callback in self._progress_callbacks:
+                try:
+                    callback(url, progress)
+                except Exception:
+                    pass
+            if progress_callback:
+                try:
+                    progress_callback(progress)
+                except Exception:
+                    pass
+            return 0
+
+        curl = pycurl.Curl()
         try:
-            # Create a temporary file for progress tracking
-            progress_file = destination.with_suffix(destination.suffix + '.progress')
-            
-            # Add progress file to curl command
-            cmd.extend(['--write-out', '@-', '--progress-bar'])
-            
-            # Execute download
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=cmd[-1] + 60 if '--max-time' in cmd else 360  # Add buffer time
-            )
-            
-            # Check result
-            if result.returncode == 0:
-                return DownloadResult(
-                    success=True,
-                    file_path=destination,
-                    size=destination.stat().st_size if destination.exists() else 0,
-                    duration=0  # Will be calculated by caller
-                )
-            else:
-                return DownloadResult(
-                    success=False,
-                    file_path=None,
-                    size=0,
-                    duration=0,
-                    error_message=f"curl failed with code {result.returncode}: {result.stderr}"
-                )
-                
-        except subprocess.TimeoutExpired:
-            return DownloadResult(
-                success=False,
-                file_path=None,
-                size=0,
-                duration=0,
-                error_message="Download timed out"
-            )
-        except Exception as e:
-            return DownloadResult(
-                success=False,
-                file_path=None,
-                size=0,
-                duration=0,
-                error_message=f"Download failed: {str(e)}"
-            )
-    
-    def _build_curl_command(self, url: str, destination: Path,
-                            domain: str, resume: bool, timeout: int) -> list[str]:
-        """Build curl command for download with enhanced cookie support.
-        
-        Args:
-            url: URL to download from
-            destination: Path where to save the file
-            domain: Domain of the URL
-            resume: Whether to resume partial downloads
-            timeout: Download timeout in seconds
-            
-        Returns:
-            List of command arguments for subprocess
-        """
-        cmd = [
-            "curl",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--retry", "3",
-            "--retry-delay", "5",
-            "--retry-connrefused",
-            "--connect-timeout", str(30),
-            "--max-time", str(timeout),
-            "--continue-at", "-" if resume else "0",
-            "--output", str(destination),
-            "--max-redirs", "10",
-            "--location-trusted",  # Allow cookies to be sent to redirect hosts
-            "--compressed",  # Support for compressed responses
-            "--speed-limit", "1024",  # Minimum speed in bytes/sec (1KB/s)
-            "--speed-time", "30",  # Timeout if speed is below limit for 30 seconds
-            "--tcp-fastopen",  # Use TCP Fast Open if available
-            "--ipv4"  # Prefer IPv4 to avoid IPv6 issues
-        ]
-        
-        # Add cookie jar if available for domain
-        cookie_jar = self.cookie_jars.get(domain)
-        if cookie_jar and cookie_jar.cookie_jar.exists():
-            cmd.extend(["--cookie", str(cookie_jar.cookie_jar)])
-            cmd.extend(["--cookie-jar", str(cookie_jar.cookie_jar)])
-            
-        # Add credentials if available
-        if cookie_jar and cookie_jar.credfile and cookie_jar.credfile.exists():
-            try:
-                # Try to read credentials from credfile
-                with open(cookie_jar.credfile, 'r') as f:
-                    credentials = f.read().strip()
-                    if ':' in credentials:
-                        cmd.extend(["--user", credentials])
-            except Exception as e:
-                _logger.warning(f"Failed to read credentials from {cookie_jar.credfile}: {e}")
-            
-        # Add URL at the end
-        cmd.append(url)
-        
-        return cmd
+            with destination.open(mode) as handle:
+                curl.setopt(pycurl.URL, url)
+                curl.setopt(pycurl.FOLLOWLOCATION, 1)
+                curl.setopt(pycurl.MAXREDIRS, 10)
+                curl.setopt(pycurl.CONNECTTIMEOUT, 30)
+                curl.setopt(pycurl.TIMEOUT, timeout)
+                curl.setopt(pycurl.NOSIGNAL, 1)
+                curl.setopt(pycurl.USERAGENT, "CacheInfinity/0.1")
+                curl.setopt(pycurl.WRITEDATA, handle)
+                curl.setopt(pycurl.HEADERFUNCTION, header_lines.append)
+                curl.setopt(pycurl.SSL_VERIFYPEER, 1)
+                curl.setopt(pycurl.SSL_VERIFYHOST, 2)
+                curl.setopt(pycurl.LOW_SPEED_LIMIT, 1024)
+                curl.setopt(pycurl.LOW_SPEED_TIME, 30)
+                curl.setopt(pycurl.IPRESOLVE, pycurl.IPRESOLVE_V4)
+                curl.setopt(pycurl.ACCEPT_ENCODING, "")
+
+                if existing_size > 0:
+                    curl.setopt(pycurl.RESUME_FROM, int(existing_size))
+
+                if cookie_path is not None:
+                    curl.setopt(pycurl.COOKIEFILE, str(cookie_path))
+                    curl.setopt(pycurl.COOKIEJAR, str(cookie_path))
+
+                if userpwd:
+                    curl.setopt(pycurl.USERPWD, userpwd)
+
+                curl.setopt(pycurl.NOPROGRESS, 0)
+                curl.setopt(pycurl.XFERINFOFUNCTION, lambda dlt, dln, ult, uln: _emit_progress(dlt, dln))
+
+                curl.perform()
+                status_code = int(curl.getinfo(pycurl.RESPONSE_CODE) or 0)
+        except pycurl.error as exc:
+            errno, message = exc.args
+            return False, None, f"PycURL error {errno}: {message}"
+        finally:
+            curl.close()
+
+        if status_code in (200, 206):
+            return True, status_code, None
+        return False, status_code, f"HTTP {status_code}"
         
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL.
@@ -322,9 +313,35 @@ class Fetcher:
         Returns:
             Domain string
         """
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        return parsed.netloc
+        return urlparse(url).netloc
+
+    def _read_basic_auth(self, credfile: Path | None) -> str | None:
+        if not credfile or not credfile.exists():
+            return None
+        try:
+            payload = credfile.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError as exc:
+            _logger.warning("Failed to read credentials from %s: %s", credfile, exc)
+            return None
+
+        if ":" in payload and "\n" not in payload:
+            return payload
+
+        username = None
+        password = None
+        for line in payload.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key == "username":
+                username = value
+            elif key == "password":
+                password = value
+        if username and password:
+            return f"{username}:{password}"
+        return None
     
     def check_file_availability(self, url: str, timeout: int = 30) -> bool:
         """Check if a file is available for download.
@@ -336,28 +353,27 @@ class Fetcher:
         Returns:
             True if file is available, False otherwise
         """
+        pycurl = _import_pycurl()
         try:
-            cmd = [
-                "curl",
-                "--silent",
-                "--head",
-                "--fail",
-                "--connect-timeout", str(timeout),
-                "--max-time", str(timeout),
-                url
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout + 10
-            )
-            
-            return result.returncode == 0
-            
-        except Exception as e:
-            _logger.warning(f"Failed to check file availability: {e}")
+            curl = pycurl.Curl()
+            try:
+                sink = io.BytesIO()
+                curl.setopt(pycurl.URL, url)
+                curl.setopt(pycurl.NOBODY, 1)
+                curl.setopt(pycurl.FOLLOWLOCATION, 1)
+                curl.setopt(pycurl.MAXREDIRS, 10)
+                curl.setopt(pycurl.CONNECTTIMEOUT, min(30, timeout))
+                curl.setopt(pycurl.TIMEOUT, timeout)
+                curl.setopt(pycurl.NOSIGNAL, 1)
+                curl.setopt(pycurl.USERAGENT, "CacheInfinity/0.1")
+                curl.setopt(pycurl.WRITEDATA, sink)
+                curl.perform()
+                status_code = int(curl.getinfo(pycurl.RESPONSE_CODE) or 0)
+                return 200 <= status_code < 400
+            finally:
+                curl.close()
+        except Exception as exc:
+            _logger.warning("Failed to check file availability: %s", exc)
             return False
             
     def get_download_progress(self, destination: Path) -> Dict[str, Any]:
@@ -398,20 +414,21 @@ class Fetcher:
         Returns:
             True if cookies were refreshed successfully, False otherwise
         """
+        pycurl = _import_pycurl()
         cookie_jar = self.cookie_jars.get(domain)
         if not cookie_jar or not cookie_jar.credfile or not cookie_jar.credfile.exists():
             _logger.warning(f"No credentials available for domain: {domain}")
             return False
+
+        if not cookie_jar.cookie_jar:
+            _logger.warning("No cookie jar path configured for domain: %s", domain)
+            return False
         
         try:
-            # Read credentials
-            with open(cookie_jar.credfile, 'r') as f:
-                credentials = f.read().strip()
-                if ':' not in credentials:
-                    _logger.error(f"Invalid credentials format for domain: {domain}")
-                    return False
-                
-                username, password = credentials.split(':', 1)
+            userpwd = self._read_basic_auth(cookie_jar.credfile)
+            if not userpwd:
+                _logger.error("Invalid credentials format for domain: %s", domain)
+                return False
             
             # Try to refresh cookies by making a request to a known endpoint
             # This would typically be a login endpoint specific to the domain
@@ -424,34 +441,34 @@ class Fetcher:
             if not refresh_url:
                 _logger.warning(f"No known refresh endpoint for domain: {domain}")
                 return False
-            
-            # Build curl command to refresh cookies
-            cmd = [
-                "curl",
-                "--silent",
-                "--show-error",
-                "--fail",
-                "--location",
-                "--connect-timeout", "30",
-                "--max-time", "60",
-                "--user", f"{username}:{password}",
-                "--cookie-jar", str(cookie_jar.cookie_jar),
-                refresh_url
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=90
-            )
-            
-            if result.returncode == 0:
-                _logger.info(f"Successfully refreshed cookies for domain: {domain}")
+
+            sink = io.BytesIO()
+            curl = pycurl.Curl()
+            try:
+                curl.setopt(pycurl.URL, refresh_url)
+                curl.setopt(pycurl.FOLLOWLOCATION, 1)
+                curl.setopt(pycurl.MAXREDIRS, 10)
+                curl.setopt(pycurl.CONNECTTIMEOUT, 30)
+                curl.setopt(pycurl.TIMEOUT, 60)
+                curl.setopt(pycurl.NOSIGNAL, 1)
+                curl.setopt(pycurl.USERAGENT, "CacheInfinity/0.1")
+                curl.setopt(pycurl.WRITEDATA, sink)
+                curl.setopt(pycurl.SSL_VERIFYPEER, 1)
+                curl.setopt(pycurl.SSL_VERIFYHOST, 2)
+                curl.setopt(pycurl.COOKIEFILE, str(cookie_jar.cookie_jar))
+                curl.setopt(pycurl.COOKIEJAR, str(cookie_jar.cookie_jar))
+                curl.setopt(pycurl.USERPWD, userpwd)
+                curl.perform()
+                status_code = int(curl.getinfo(pycurl.RESPONSE_CODE) or 0)
+            finally:
+                curl.close()
+
+            if 200 <= status_code < 400:
+                _logger.info("Successfully refreshed cookies for domain: %s", domain)
                 return True
-            else:
-                _logger.warning(f"Failed to refresh cookies for domain {domain}: {result.stderr}")
-                return False
+
+            _logger.warning("Failed to refresh cookies for domain %s: HTTP %d", domain, status_code)
+            return False
                 
         except Exception as e:
             _logger.error(f"Error refreshing cookies for domain {domain}: {e}")

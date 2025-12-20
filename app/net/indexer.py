@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import hashlib
 import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse, parse_qs
-import requests
-from bs4 import BeautifulSoup
-import ftplib
+from html.parser import HTMLParser
 from datetime import datetime, timedelta
 
 from auth.credentials import CookieJarDefinition
@@ -21,13 +20,120 @@ from cache.cachelinks import CachelinkDescriptor
 _logger = logging.getLogger(__name__)
 
 
+def _import_pycurl():
+    try:
+        import pycurl  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "pycurl is required for CacheInfinity networking. "
+            "Install project dependencies (including 'pycurl') to enable downloads/indexing."
+        ) from exc
+    return pycurl
+
+
+def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw in raw_lines:
+        line = raw.decode("iso-8859-1", errors="replace").strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip().lower()] = value.strip()
+    return headers
+
+
+class _AnchorHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_a = False
+        self._href: str | None = None
+        self._text_parts: list[str] = []
+        self.links: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        href = None
+        for key, value in attrs:
+            if key.lower() == "href" and value:
+                href = value
+                break
+        if href is None:
+            return
+        self._in_a = True
+        self._href = href
+        self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_a:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._in_a:
+            return
+        text = "".join(self._text_parts).strip()
+        href = self._href or ""
+        self.links.append((href, text))
+        self._in_a = False
+        self._href = None
+        self._text_parts = []
+
+
 class RemoteListingFetcher:
     """Fetcher for remote directory listings with support for multiple protocols."""
     
     def __init__(self):
         """Initialize remote listing fetcher."""
-        self._session = None
+        self._pycurl = _import_pycurl()
         _logger.info("RemoteListingFetcher initialized")
+
+    def _fetch_bytes(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout_s: int = 30,
+    ) -> tuple[bytes, dict[str, Any]]:
+        buffer = io.BytesIO()
+        header_lines: list[bytes] = []
+        curl = self._pycurl.Curl()
+        try:
+            curl.setopt(self._pycurl.URL, url)
+            curl.setopt(self._pycurl.FOLLOWLOCATION, 1)
+            curl.setopt(self._pycurl.MAXREDIRS, 10)
+            curl.setopt(self._pycurl.CONNECTTIMEOUT, min(30, timeout_s))
+            curl.setopt(self._pycurl.TIMEOUT, timeout_s)
+            curl.setopt(self._pycurl.NOSIGNAL, 1)
+            curl.setopt(self._pycurl.USERAGENT, "CacheInfinity/0.1")
+            curl.setopt(self._pycurl.WRITEDATA, buffer)
+            curl.setopt(self._pycurl.HEADERFUNCTION, header_lines.append)
+            curl.setopt(self._pycurl.SSL_VERIFYPEER, 1)
+            curl.setopt(self._pycurl.SSL_VERIFYHOST, 2)
+
+            if headers:
+                curl.setopt(
+                    self._pycurl.HTTPHEADER,
+                    [f"{key}: {value}" for key, value in headers.items()],
+                )
+
+            curl.perform()
+            status_code = int(curl.getinfo(self._pycurl.RESPONSE_CODE) or 0)
+        except self._pycurl.error as exc:
+            errno, message = exc.args
+            raise RuntimeError(f"PycURL transfer failed ({errno}): {message}") from exc
+        finally:
+            curl.close()
+
+        parsed_headers = _parse_headers(header_lines)
+        metadata: dict[str, Any] = {
+            "status_code": status_code,
+            "content_type": parsed_headers.get("content-type", ""),
+            "last_modified": parsed_headers.get("last-modified", ""),
+            "content_length": parsed_headers.get("content-length", ""),
+            "etag": parsed_headers.get("etag", ""),
+            "url": url,
+        }
+        return buffer.getvalue(), metadata
     
     def fetch(self, url: str, parse_entries: bool = True) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch remote directory listing.
@@ -66,56 +172,40 @@ class RemoteListingFetcher:
                     cached_etag = result.get('etag')
                     cached_modified = result.get('last_modified')
             
-            # Make request with headers to mimic browser and conditional requests
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+            # Make request with conditional headers if available
+            headers: dict[str, str] = {}
             
             # Add conditional headers if we have cached values
             if cached_etag:
-                headers['If-None-Match'] = cached_etag
+                headers["If-None-Match"] = cached_etag
             if cached_modified:
-                headers['If-Modified-Since'] = cached_modified
-            
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            metadata = {
-                'status_code': response.status_code,
-                'content_type': response.headers.get('content-type', ''),
-                'last_modified': response.headers.get('last-modified', ''),
-                'content_length': response.headers.get('content-length', ''),
-                'etag': response.headers.get('etag', ''),
-                'url': url
-            }
-            
+                headers["If-Modified-Since"] = cached_modified
+
+            body, metadata = self._fetch_bytes(url, headers=headers, timeout_s=30)
+
             # Handle 304 Not Modified
-            if response.status_code == 304:
+            if metadata.get("status_code") == 304:
                 _logger.info(f"Target {target_id}: Listing unchanged (304 Not Modified)")
-                return [], {'status': 'not_modified', 'url': url}
+                return [], {"status": "not_modified", "url": url}
+
+            if int(metadata.get("status_code") or 0) >= 400:
+                return [], {"error": f"HTTP {metadata.get('status_code')}", "url": url}
             
             # Cache the new ETag/Last-Modified
             if target_id and hasattr(self, 'db_adapter') and self.db_adapter:
                 self.db_adapter.execute("""
                     INSERT OR REPLACE INTO indexing_cache (target_id, etag, last_modified, cached_at)
                     VALUES (?, ?, ?, ?)
-                """, (target_id, metadata['etag'], metadata['last_modified'], int(time.time())))
+                """, (target_id, metadata.get("etag", ""), metadata.get("last_modified", ""), int(time.time())))
                 self.db_adapter.commit()
             
             if not parse_entries:
                 return [], metadata
             
             # Parse HTML directory listing
-            entries = self._parse_html_directory(response.text, url)
+            entries = self._parse_html_directory(body.decode("utf-8", errors="replace"), url)
             return entries, metadata
             
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 304:
-                _logger.info(f"Target {target_id}: Listing unchanged (304 Not Modified)")
-                return [], {'status': 'not_modified', 'url': url}
-            else:
-                _logger.error(f"HTTP error for {url}: {e}")
-                return [], {'error': str(e), 'url': url}
         except Exception as exc:
             _logger.error(f"HTTP listing fetch failed for {url}: {exc}")
             return [], {'error': str(exc), 'url': url}
@@ -123,35 +213,12 @@ class RemoteListingFetcher:
     def _fetch_ftp_listing(self, url: str, parse_entries: bool) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch FTP directory listing."""
         try:
-            parsed = urlparse(url)
-            host = parsed.hostname
-            port = parsed.port or 21
-            path = parsed.path or '/'
-            
-            # Connect to FTP server
-            ftp = ftplib.FTP()
-            ftp.connect(host, port, timeout=30)
-            ftp.login()  # Anonymous login
-            
-            # Change to directory
-            if path != '/':
-                ftp.cwd(path)
-            
-            # Get directory listing
-            entries = []
-            metadata = {
-                'host': host,
-                'port': port,
-                'path': path,
-                'url': url
-            }
-            
+            body, metadata = self._fetch_bytes(url, headers=None, timeout_s=30)
+
+            entries: list[dict[str, Any]] = []
             if parse_entries:
-                file_list = []
-                ftp.retrlines('LIST', file_list.append)
-                entries = self._parse_ftp_directory(file_list, url)
-            
-            ftp.quit()
+                lines = body.decode("utf-8", errors="replace").splitlines()
+                entries = self._parse_ftp_directory(lines, url)
             return entries, metadata
             
         except Exception as exc:
@@ -161,13 +228,10 @@ class RemoteListingFetcher:
     def _parse_html_directory(self, html_content: str, base_url: str) -> List[Dict[str, Any]]:
         """Parse HTML directory listing."""
         entries = []
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Look for common directory listing patterns
-        # This is a simplified parser - real implementation would be more robust
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            text = link.get_text().strip()
+        parser = _AnchorHTMLParser()
+        parser.feed(html_content)
+
+        for href, text in parser.links:
             
             # Skip parent directory links
             if href in ['../', '..', '/']:
@@ -220,7 +284,7 @@ class Indexer:
     """Manages indexing of remote sources and listing updates."""
     
     def __init__(self, settings: IndexingSettings, cookie_jars: Dict[str, CookieJarDefinition],
-                 db_adapter: Optional[DatabaseAdapter] = None):
+                 db_adapter: Any | None = None):
         """Initialize indexer.
         
         Args:
@@ -230,10 +294,11 @@ class Indexer:
         """
         self.settings = settings
         self.cookie_jars = cookie_jars
-        self.db_adapter = db_adapter
+        # CacheInfinityService passes IndexDatabase here; Indexer currently expects a DBAdapter-like surface.
+        self.db_adapter = getattr(db_adapter, "_db", db_adapter)
         self._last_index_times: Dict[str, int] = {}
         self._fetcher = RemoteListingFetcher()
-        self._fetcher.db_adapter = db_adapter  # Make db_adapter available to fetcher
+        self._fetcher.db_adapter = self.db_adapter  # Make db_adapter available to fetcher
         _logger.info("Indexer initialized")
         
     def should_reindex(self, target_id: str) -> bool:
