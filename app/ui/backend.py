@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from ..core.service import CacheInfinityService
-    from ..db.index import IndexDatabase
+    from ..core.services import CacheInfinityService
+    from ..db.schema import IndexDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -786,7 +786,7 @@ class ManagementLayer:
 
 def create_cli_management() -> ManagementLayer:
     """Create a ManagementLayer for CLI usage based on env configuration."""
-    from ..core.service import CacheInfinityService
+    from ..core.services import CacheInfinityService
 
     config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR")
     if not config_dir_raw:

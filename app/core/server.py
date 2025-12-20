@@ -14,7 +14,7 @@ import cheroot.wsgi as cheroot_wsgi
 from cheroot.ssl import pyopenssl
 
 from core.config import ConfigError, TLSSettings, load_two_file_settings, load_database_backed_settings, validate_settings
-from core.service import CacheInfinityService
+from core.services import CacheInfinityService
 from core.logging import configure_logging
 
 _LOGGER = logging.getLogger(__name__)

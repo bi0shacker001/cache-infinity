@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote
 from typing import TYPE_CHECKING, Callable, Dict, Any
 
 if TYPE_CHECKING:  # pragma: no cover
-    from ..service import CacheInfinityService
+    from ..services import CacheInfinityService
     from ..backend import ManagementLayer
 
 from ..backend import ManagementLayer

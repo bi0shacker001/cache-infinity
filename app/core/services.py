@@ -35,7 +35,8 @@ from cache.checksum import ChecksumCatalog
 from core.config import ConfigError, Settings, load_two_file_settings, load_database_backed_settings, ConfigService
 from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
 from net.fetcher import Fetcher
-from db.index import IndexDatabase, IndexedEntry
+from db.dbmanage import DatabaseManager
+from db.schema import IndexedEntry
 from net.indexer import RemoteListingFetcher, Indexer
 from storage.staging import StagingArea
 from ui.web.webcore import WebUIApp
@@ -137,7 +138,7 @@ class CacheInfinityService:
         _LOGGER.info("DEBUG: Database settings - engine: %s, postgres_dsn: %s",
                     settings.database.engine, getattr(settings.database, 'postgres_dsn', 'N/A'))
 
-        index_db = IndexDatabase(settings.database)
+        index_db = DatabaseManager.from_settings(settings.database)
         _LOGGER.info("Initialized database connection with engine: %s", settings.database.engine)
 
         # DEBUG: Test database connection immediately after initialization

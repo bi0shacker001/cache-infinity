@@ -12,31 +12,31 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - server.py #File. Core server loop. Handles startup and shutdown of the server overall
     - services.py #File. Service orchestration and lifecycle management
   db: #Folder. All database functionality. Database flow: dbmanage.py (formats/maintains data using schema.py) -> adapter.py (routes WHERE data is written) -> backends/* (implement HOW the DB is accessed)
-    - adapter.py #File. Database access shim that routes WHERE data is written; never touches the database directly.
-    - backupmgmt.py #File. Database backup and restore management.
-    - dbmanage.py #File. Database controller. Formats data using schema.py and runs maintenance tasks before handing off to adapter.py.
-    - schema.py #File. Active database schema and query logic. Used by dbmanage.py to format and validate DB data.
+    - adapter.py #File. Database access shim that routes WHERE data is written; never touches the database directly. -- CAN ONLY BE IMPORTED BY: db.dbmanage
+    - backupmgmt.py #File. Database backup and restore management. -- CAN ONLY BE IMPORTED BY: ui.backend, core.services
+    - dbmanage.py #File. Database controller. Formats data using schema.py and runs maintenance tasks before handing off to adapter.py. 
+    - schema.py #File. Active database schema and query logic. Used by dbmanage.py to format and validate DB data. -- CAN ONLY BE IMPORTED BY: dbmanage.py
     backends: #Folder. Database backend implementations; implement HOW data is written/read.
-      - postgresql.py #File. PostgreSQL database connection logic with connection pooling
-      - redis.py #File. Redis caching layer for performance optimization
-      - sqlite.py #File. SQLite database connection logic for development and testing
+      - postgresql.py #File. PostgreSQL database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
+      - redis.py #File. Redis caching layer for performance optimization -- CAN ONLY BE IMPORTED BY: db.adapter
+      - sqlite.py #File. SQLite database connection logic for development and testing -- CAN ONLY BE IMPORTED BY: db.adapter
   hosting: #Folder. End user interface implementations
-    - browser_interface.py #File. User-facing browser interface for CacheInfinity operations
-    - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions.
-    - webdav.py #File. WebDAV provider for remote file system access
+    - browser_interface.py #File. User-facing browser interface for CacheInfinity operations -- CAN ONLY BE IMPORTED BY: core.services
+    - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions. -- CAN ONLY BE IMPORTED BY: hosting.*
+    - webdav.py #File. WebDAV provider for remote file system access -- CAN ONLY BE IMPORTED BY: core.services
   net: #Folder. Network operations and data transfer components
     - fetcher.py #File. Download manager (primarily using curl) for remote file retrieval
     - indexer.py #File. Background indexing worker for remote content discovery
   storage: #Folder. Storage management and staging area handling
     - backend.py #File. Backend storage management for cached content. Handles ALL reads and writes to backend storage
-    - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory
+    - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory 
     - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
   ui: #Folder. Admin interface components and management layer
-    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces
-    - cli.py #File. Command-line interface for administration and automation
-    - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py
+    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces  -- CAN ONLY BE IMPORTED BY: core.services
+    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services
+    - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py -- CAN ONLY BE IMPORTED BY: ui.*
     web: #Folder. Web-based user interface assets
-      - webcore.py #File. WebUI application core and page routing
+      - webcore.py #File. WebUI application core and page routing --CAN ONLY BE IMPORTED BY: core.services
       assets: #Folder. Static web assets (CSS, JavaScript, HTML)
         css: #Folder. Cascading Style Sheets for UI theming
           - components.css #File. UI component styling

@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
 from .adapter import DBAdapter
+from .schema import IndexDatabase
 
 if TYPE_CHECKING:
-    from db.schema import IndexDatabase
+    from core.config import DatabaseSettings
 
 _logger = logging.getLogger(__name__)
 
@@ -19,7 +20,7 @@ _logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Manages database operations and maintenance tasks."""
 
-    def __init__(self, index_db: "IndexDatabase"):
+    def __init__(self, index_db: IndexDatabase):
         """Initialize database manager.
 
         Args:
@@ -28,6 +29,11 @@ class DatabaseManager:
         self.index_db = index_db
         self.adapter: DBAdapter = index_db._db
         _logger.info("Database manager initialized")
+
+    @classmethod
+    def from_settings(cls, settings: "DatabaseSettings") -> "DatabaseManager":
+        """Create a DatabaseManager from database settings."""
+        return cls(IndexDatabase(settings))
 
     def create_tables(self) -> bool:
         """Ensure all required database tables exist."""
@@ -38,6 +44,29 @@ class DatabaseManager:
         except Exception as exc:
             _logger.error("Failed to initialize database schema: %s", exc)
             return False
+
+    def close(self) -> None:
+        """Close database connections."""
+        self.index_db.close()
+
+    # Direct adapter passthroughs for callers that need low-level access
+    def execute(self, sql: str, params: tuple | None = None):
+        return self.adapter.execute(sql, params or ())
+
+    def fetchone(self, sql: str, params: tuple | None = None) -> dict | None:
+        return self.adapter.fetchone(sql, params or ())
+
+    def fetchall(self, sql: str, params: tuple | None = None) -> list[dict]:
+        return self.adapter.fetchall(sql, params or ())
+
+    def commit(self) -> None:
+        self.adapter.commit()
+
+    def rollback(self) -> None:
+        self.adapter.rollback()
+
+    def __getattr__(self, name: str):
+        return getattr(self.index_db, name)
         
     def backup_database(self, backup_path: Path) -> bool:
         """Create a backup of the database.
