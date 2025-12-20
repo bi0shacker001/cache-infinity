@@ -617,7 +617,7 @@ async function exportSettings() {
     const blob = new Blob([text], { type: 'text/yaml' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = 'settings.yaml';
+    link.download = 'bootstrap.yml';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

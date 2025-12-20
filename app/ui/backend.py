@@ -20,13 +20,16 @@ import os
 import secrets
 import signal
 import socket
+import tempfile
 import threading
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
-    from ..core.services import CacheInfinityService
+    from ..core.server import CacheInfinityService
+
+from ..db.backupmgmt import DatabaseBackupManager
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +257,15 @@ class LocalControlServer:
         action = payload.get("action")
         args = payload.get("args") or {}
         mgmt = self._management
+
+        auth = payload.get("auth") or {}
+        auth_result = mgmt.authenticate_request(
+            auth.get("username", ""),
+            auth.get("password", ""),
+        )
+        if not auth_result.get("authenticated"):
+            error = auth_result.get("error") or "Authentication failed"
+            raise PermissionError(error)
 
         if command == "status":
             return mgmt.get_system_status()
@@ -993,7 +1005,14 @@ class LocalControlServer:
     def get_config_payload(self) -> Dict[str, Any]:
         """Get current configuration payload."""
         try:
-            return self.service.get_config_payload()
+            config_dir = self.service.settings.config_dir
+            index_db = self.service.index_db.index_db
+            manager = DatabaseBackupManager(index_db, config_dir)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir) / "bootstrap.yml"
+                manager.export_config_to_yaml(tmp_path)
+                settings_text = tmp_path.read_text(encoding="utf-8")
+            return {"settings_text": settings_text}
         except Exception as e:
             logger.error("Failed to get config payload: %s", e)
             raise
@@ -1005,10 +1024,20 @@ class LocalControlServer:
     ) -> Dict[str, Any]:
         """Update configuration from text."""
         try:
-            self.service.update_config_from_webui(
-                settings_text=settings_text,
-                cachelinks_text=cachelinks_text
-            )
+            config_dir = self.service.settings.config_dir
+            index_db = self.service.index_db.index_db
+            manager = DatabaseBackupManager(index_db, config_dir)
+            if settings_text:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_path = Path(tmp_dir) / "bootstrap.yml"
+                    tmp_path.write_text(settings_text, encoding="utf-8")
+                    manager.import_config_from_yaml(tmp_path)
+            if cachelinks_text:
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_path = Path(tmp_dir) / "cachelinks.yml"
+                    tmp_path.write_text(cachelinks_text, encoding="utf-8")
+                    self.service.config_service.import_cachelinks_from_file(tmp_path)
+            self.service.config_service.reload_settings()
             return {"status": "success", "message": "Configuration updated"}
         except Exception as e:
             logger.error("Failed to update config: %s", e)
@@ -1025,7 +1054,7 @@ class LocalControlServer:
     def update_settings_detail(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Update settings from detailed payload."""
         try:
-            self.service.update_settings_detail(payload)
+            self.service.config_service.update_settings_detail(payload)
             return {"status": "success", "message": "Settings updated"}
         except Exception as e:
             logger.error("Failed to update settings detail: %s", e)
@@ -1087,6 +1116,29 @@ class LocalControlServer:
             
         except Exception as e:
             return {'authenticated': False, 'error': str(e)}
+
+    def authenticate_session(self, token: str) -> str | None:
+        """Validate a session token and return the username if valid."""
+        try:
+            return self.service.auth_manager.validate_session_token(token)
+        except Exception as e:
+            logger.error("Failed to validate session token: %s", e)
+            return None
+
+    def login_user(self, username: str, password: str) -> str | None:
+        """Authenticate a user and return a session token."""
+        try:
+            return self.service.auth_manager.authenticate_user(username, password, purpose="webui")
+        except Exception as e:
+            logger.error("Failed to authenticate user: %s", e)
+            return None
+
+    def logout_session(self, token: str) -> None:
+        """Invalidate a session token."""
+        try:
+            self.service.auth_manager.logout_user(token)
+        except Exception as e:
+            logger.error("Failed to logout session: %s", e)
 
     def validate_credentials(
         self,
@@ -1164,7 +1216,7 @@ def _runtime_dir(config_dir: Path) -> Path:
 
 def create_cli_management() -> ManagementLayer:
     """Create a ManagementLayer for CLI usage based on env configuration."""
-    from ..core.services import CacheInfinityService
+    from ..core.server import CacheInfinityService
 
     config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR")
     if not config_dir_raw:

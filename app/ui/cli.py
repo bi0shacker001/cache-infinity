@@ -11,6 +11,8 @@ import socket
 from pathlib import Path
 from typing import Any
 
+from ..auth.credentials import get_cli_api_key
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -28,10 +30,15 @@ def _require_file(path: str) -> Path:
 class LocalControlClient:
     def __init__(self, socket_path: Path) -> None:
         self._socket_path = socket_path
+        self._api_key = get_cli_api_key()
+        if not self._api_key:
+            raise RuntimeError("CLI API key unavailable")
 
     def request(self, payload: dict) -> dict:
         if not self._socket_path.exists():
             raise RuntimeError(f"Local control socket not found: {self._socket_path}")
+        payload = dict(payload)
+        payload["auth"] = {"username": "api-key", "password": self._api_key}
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.connect(str(self._socket_path))
             sock.sendall(json.dumps(payload).encode("utf-8"))
@@ -428,6 +435,28 @@ def _handle_settings(client: LocalControlClient, args) -> int:
     raise ValueError("Unknown settings action")
 
 
+def _handle_backup(client: LocalControlClient, args) -> int:
+    if args.action == "export":
+        payload = client.request({"command": "settings", "action": "get-config"})
+        settings_text = payload.get("settings_text", "")
+        output_path = Path(args.output)
+        output_path.write_text(settings_text, encoding="utf-8")
+        print(f"ok: {output_path}")
+        return 0
+    if args.action == "import":
+        settings_text = _require_file(args.file).read_text(encoding="utf-8")
+        client.request(
+            {
+                "command": "settings",
+                "action": "update-config",
+                "args": {"settings_text": settings_text},
+            }
+        )
+        print("ok")
+        return 0
+    raise ValueError("Unknown backup action")
+
+
 def _handle_maintenance(client: LocalControlClient, args) -> int:
     if args.action == "degraded":
         _print_json(client.request({"command": "maintenance", "action": "degraded"}).get("degraded", []))
@@ -588,6 +617,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
     settings_update_config.add_argument("--settings-file")
     settings_update_config.add_argument("--cachelinks-file")
 
+    backup = subparsers.add_parser("backup", help="Import/export bootstrap configuration")
+    backup_sub = backup.add_subparsers(dest="action", required=True)
+    backup_export = backup_sub.add_parser("export", help="Export bootstrap YAML to a file")
+    backup_export.add_argument("--output", default="bootstrap.yml")
+    backup_import = backup_sub.add_parser("import", help="Import bootstrap YAML from a file")
+    backup_import.add_argument("--file", required=True)
+
     maintenance = subparsers.add_parser("maintenance", help="Maintenance operations")
     maintenance_sub = maintenance.add_subparsers(dest="action", required=True)
     maintenance_sub.add_parser("degraded", help="List degraded targets")
@@ -611,6 +647,9 @@ def main() -> int:
     if not runtime_path.exists():
         raise RuntimeError(f"No running server found (missing {runtime_path})")
     payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    config_dir = payload.get("config_dir")
+    if config_dir and not (os.environ.get("CACHEINFINITY_CONFIG_DIR") or os.environ.get("CONFIG_DIR")):
+        os.environ["CACHEINFINITY_CONFIG_DIR"] = str(config_dir)
     pid = payload.get("pid")
     if isinstance(pid, int) and pid > 0:
         try:
@@ -638,6 +677,8 @@ def main() -> int:
         return _handle_keys(client, args)
     if args.command == "settings":
         return _handle_settings(client, args)
+    if args.command == "backup":
+        return _handle_backup(client, args)
     if args.command == "maintenance":
         return _handle_maintenance(client, args)
     raise SystemExit("Unknown command")

@@ -21,6 +21,7 @@ class WebUIAPI:
         Args:
             service: Reference to the main CacheInfinity service
         """
+        self.service = service
         self.management = ManagementLayer(service)
         _logger.debug("WebUI API initialized")
     
@@ -30,20 +31,26 @@ class WebUIAPI:
         Args:
             app: Flask application instance
         """
+        def _require_admin_auth():
+            auth = request.authorization
+            if not auth or not auth.username:
+                return jsonify({"error": "Authentication required"}), 401, {
+                    "WWW-Authenticate": 'Basic realm="CacheInfinity Admin API"'
+                }
+            if not self.management.rd_user_admin_validate(auth.username, auth.password or ""):
+                return jsonify({"error": "Invalid credentials"}), 401, {
+                    "WWW-Authenticate": 'Basic realm="CacheInfinity Admin API"'
+                }
+            return None
+
         @app.route('/api/status', methods=['GET'])
         def get_status():
             """Get system status."""
             try:
-                status = {
-                    'status': 'running',
-                    'version': '1.0.0',
-                    'uptime': '00:00:00',
-                    'storage': {
-                        'primary': str(self.service.datadir_registry.primary.definition.datadir_cache_root),
-                        'staging': str(self.service.staging.definition.staging_mount_root)
-                    }
-                }
-                return jsonify(status)
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify(self.management.get_system_status())
             except Exception as exc:
                 _logger.error(f"Failed to get status: {exc}")
                 return jsonify({'error': str(exc)}), 500
@@ -52,46 +59,62 @@ class WebUIAPI:
         def list_files():
             """List files in storage."""
             try:
-                location = request.args.get('location', 'datadir_1')
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                location = request.args.get('location', 'datadir')
                 path = request.args.get('path', '/')
-                
-                # This would implement actual file listing
-                files = [
-                    {'name': 'test.txt', 'is_dir': False, 'size': 1024, 'modified': '2024-01-01'},
-                    {'name': 'test_dir', 'is_dir': True, 'size': 0, 'modified': '2024-01-01'}
-                ]
-                
-                return jsonify({'files': files, 'location': location, 'path': path})
+                sort_by = request.args.get('sort_by')
+                sort_order = request.args.get('sort_order')
+                view_mode = request.args.get('view_mode')
+                show_hidden = request.args.get('show_hidden', 'false').lower() == 'true'
+                search_query = request.args.get('search_query', '')
+                result = self.management.list_storage_entries(
+                    location=location,
+                    relative_path=path,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                    view_mode=view_mode,
+                    show_hidden=show_hidden,
+                    search_query=search_query,
+                )
+                return jsonify(result)
             except Exception as exc:
                 _logger.error(f"Failed to list files: {exc}")
                 return jsonify({'error': str(exc)}), 500
         
         @app.route('/api/storage/upload', methods=['POST'])
         def upload_file():
-            """Upload a file."""
+            """Upload a file (read-only API)."""
             try:
-                # This would implement actual file upload
-                return jsonify({'message': 'Upload successful'})
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'error': 'Admin API is read-only'}), 405
             except Exception as exc:
                 _logger.error(f"Failed to upload file: {exc}")
                 return jsonify({'error': str(exc)}), 500
         
         @app.route('/api/storage/folder', methods=['POST'])
         def create_folder():
-            """Create a folder."""
+            """Create a folder (read-only API)."""
             try:
-                # This would implement actual folder creation
-                return jsonify({'message': 'Folder created'})
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'error': 'Admin API is read-only'}), 405
             except Exception as exc:
                 _logger.error(f"Failed to create folder: {exc}")
                 return jsonify({'error': str(exc)}), 500
         
         @app.route('/api/storage/entries', methods=['DELETE'])
         def delete_entry():
-            """Delete a file or folder."""
+            """Delete a file or folder (read-only API)."""
             try:
-                # This would implement actual deletion
-                return jsonify({'message': 'Entry deleted'})
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'error': 'Admin API is read-only'}), 405
             except Exception as exc:
                 _logger.error(f"Failed to delete entry: {exc}")
                 return jsonify({'error': str(exc)}), 500
@@ -100,16 +123,10 @@ class WebUIAPI:
         def list_cachelinks():
             """List all cachelinks."""
             try:
-                # This would implement actual cachelink listing
-                cachelinks = [
-                    {
-                        'canonical_id': 'games/psx/map0001',
-                        'url': 'https://example.com',
-                        'subfolder': '/',
-                        'mode': 'plain'
-                    }
-                ]
-                return jsonify({'cachelinks': cachelinks})
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'cachelinks': self.management.describe_cachelinks()})
             except Exception as exc:
                 _logger.error(f"Failed to list cachelinks: {exc}")
                 return jsonify({'error': str(exc)}), 500
@@ -118,6 +135,9 @@ class WebUIAPI:
         def list_users():
             """List all users."""
             try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
                 users = self.management.list_users()
                 return jsonify({'users': users})
             except Exception as exc:
@@ -126,23 +146,12 @@ class WebUIAPI:
         
         @app.route('/api/users', methods=['POST'])
         def create_user():
-            """Create or update a user."""
+            """Create or update a user (read-only API)."""
             try:
-                data = request.get_json()
-                username = data.get('username')
-                password = data.get('password')
-                enabled = data.get('enabled', True)
-                is_admin = data.get('is_admin', False)
-                
-                self.management.upsert_user(
-                    username=username,
-                    password=password,
-                    enabled=enabled,
-                    is_admin=is_admin,
-                    purpose="webui"
-                )
-                
-                return jsonify({'message': f'User {username} updated successfully'})
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'error': 'Admin API is read-only'}), 405
             except Exception as exc:
                 _logger.error(f"Failed to create user: {exc}")
                 return jsonify({'error': str(exc)}), 500

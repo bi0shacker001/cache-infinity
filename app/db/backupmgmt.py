@@ -264,14 +264,9 @@ class DatabaseBackupManager:
         # Collect cookies - convert database format to bootstrap.yml format
         cookies = {}
         for cookie in self.index_db.get_all_cookies():
-            # Write cookie content to file for bootstrap.yml format
-            cookie_file_path = self.config_dir / "cookies" / f"{cookie['domain'].replace('.', '_')}.txt"
-            cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
-            cookie_file_path.write_text(cookie['cookie_content'], encoding="utf-8")
-
             cookies[cookie['domain']] = {
-                'cookie_jar': str(cookie_file_path),
-                'credfile': str(cookie['credfile_path']) if cookie['credfile_path'] else None
+                'cookie_jar': cookie.get('cookie_content') or "",
+                'captured_at': cookie.get('captured_at'),
             }
 
         bootstrap_data['cookies'] = cookies
@@ -568,10 +563,18 @@ class DatabaseBackupManager:
                     warnings.append(f"Cookie {domain} must be a dictionary")
                     continue
 
+                cookie_content = cookie_data.get('cookie_jar', '')
+                if isinstance(cookie_content, str):
+                    jar_path = Path(cookie_content)
+                    if not jar_path.is_absolute():
+                        jar_path = self.config_dir / jar_path
+                    if jar_path.exists():
+                        cookie_content = jar_path.read_text(encoding="utf-8")
+
                 cookie_db = {
                     'domain': domain.lower(),
-                    'cookie_content': cookie_data.get('cookie_jar', ''),
-                    'credfile_path': str(cookie_data.get('credfile')) if cookie_data.get('credfile') else None
+                    'cookie_content': cookie_content,
+                    'captured_at': cookie_data.get('captured_at'),
                 }
 
                 self.index_db.save_cookie(cookie_db)

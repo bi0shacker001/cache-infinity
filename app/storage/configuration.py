@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -28,21 +27,21 @@ class ConfigurationManager:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         _logger.debug(f"Configuration manager initialized with directory: {config_dir}")
         
-    def get_settings_path(self) -> Path:
-        """Get the path to the main settings file.
+    def get_database_path(self) -> Path:
+        """Get the path to the database configuration file.
         
         Returns:
-            Path to settings.yaml
+            Path to database.yml
         """
-        return self.config_dir / "settings.yaml"
-        
-    def get_cachelinks_path(self) -> Path:
-        """Get the path to the cachelinks file.
+        return self.config_dir / "database.yml"
+
+    def get_bootstrap_path(self) -> Path:
+        """Get the path to the bootstrap configuration file.
         
         Returns:
-            Path to cachelinks.yaml
+            Path to bootstrap.yml
         """
-        return self.config_dir / "cachelinks.yaml"
+        return self.config_dir / "bootstrap.yml"
         
     def get_credentials_path(self) -> Path:
         """Get the path to the credentials directory.
@@ -117,7 +116,9 @@ class ConfigurationManager:
         """
         # Sanitize domain name for filename
         safe_domain = domain.replace('.', '_').replace(':', '_')
-        return self.config_dir / f"cookies_{safe_domain}.txt"
+        cookies_dir = self.config_dir / "cookies"
+        cookies_dir.mkdir(exist_ok=True)
+        return cookies_dir / f"{safe_domain}.txt"
         
     def get_dns_credentials_path(self, provider: str) -> Path:
         """Get the path for a DNS provider's credentials file.
@@ -140,9 +141,8 @@ class ConfigurationManager:
             True if the file is a configuration file
         """
         config_files = {
-            'settings.yaml',
-            'cachelinks.yaml',
-            'config.yaml.defaults'
+            'database.yml',
+            'bootstrap.yml',
         }
         
         # Check if file is in config directory
@@ -152,8 +152,10 @@ class ConfigurationManager:
             return False
             
         # Check if it's a known config file or in config subdirectories
-        return (file_path.name in config_files or
-                'credentials' in str(file_path) or
-                'backups' in str(file_path) or
-                file_path.suffix in {'.yaml', '.yml', '.ini'} and
-                file_path.name.startswith(('cookies_', 'dns-')))
+        return (
+            file_path.name in config_files
+            or "credentials" in str(file_path)
+            or "cookies" in str(file_path)
+            or "backups" in str(file_path)
+            or (file_path.suffix in {".yaml", ".yml", ".ini"} and file_path.name.startswith("dns-"))
+        )

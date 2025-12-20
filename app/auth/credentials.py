@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import secrets
 import sys
 import threading
@@ -11,12 +13,71 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import yaml
 
 # Removed TwoFileSettings import to break circular dependency
 # Settings are now managed through the database adapter
+from db.dbmanage import DatabaseManager, load_database_settings
+
+_HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
+_HASH_SCHEME_SHA256 = "sha256"
+_HASH_DEFAULT_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, *, iterations: int = _HASH_DEFAULT_ITERATIONS) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    )
+    return f"{_HASH_SCHEME_PBKDF2}${iterations}${salt}${digest.hex()}"
+
+
+def _normalize_password_hash(password_hash: str | None) -> str | None:
+    if not password_hash:
+        return None
+    if "$" in password_hash:
+        return password_hash
+    return f"{_HASH_SCHEME_SHA256}${password_hash}"
+
+
+def _verify_password_hash(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    if "$" not in stored_hash:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest() == stored_hash
+    parts = stored_hash.split("$")
+    scheme = parts[0]
+    if scheme == _HASH_SCHEME_PBKDF2 and len(parts) == 4:
+        try:
+            iterations = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+            expected = parts[3]
+        except ValueError:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+        ).hex()
+        return secrets.compare_digest(digest, expected)
+    if scheme == _HASH_SCHEME_SHA256:
+        if len(parts) == 2:
+            expected = parts[1]
+            digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+        if len(parts) == 3:
+            salt = parts[1]
+            expected = parts[2]
+            digest = hashlib.sha256(f"{salt}{password}".encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+    return False
 
 
 class CredentialError(RuntimeError):
@@ -101,16 +162,17 @@ class CookieJarDefinition:
     """Definition of a cookie jar for authenticated domains."""
     
     domain: str
-    cookie_jar: Path
+    cookie_content: str = ""
+    cookie_jar: Optional[Path] = None
     credfile: Optional[Path] = None
     
     def validate(self) -> None:
         """Validate the cookie jar definition."""
         if not self.domain:
             raise CredentialError("Cookie jar domain is required")
-        if not self.cookie_jar:
-            raise CredentialError("Cookie jar path is required")
-        if not self.cookie_jar.exists():
+        if not (self.cookie_content or self.cookie_jar):
+            raise CredentialError("Cookie jar content or path is required")
+        if self.cookie_jar and not self.cookie_jar.exists():
             raise CredentialError(f"Cookie jar file not found: {self.cookie_jar}")
 
 
@@ -303,10 +365,19 @@ class AuthConfigManager:
                 return False
             
             stored_plain = result.get('password_plain')
-            stored_hash = result.get('password_hash')
+            stored_hash = _normalize_password_hash(result.get('password_hash'))
             
             # Check plain text password first (for backward compatibility)
             if stored_plain and stored_plain == password:
+                if not stored_hash:
+                    stored_hash = _hash_password(password)
+                    if purpose != "cli" and username != "cli-backend":
+                        stored_plain = None
+                    self.db_adapter.execute(
+                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ? AND purpose = ?",
+                        (stored_plain, stored_hash, username, purpose),
+                    )
+                    self.db_adapter.commit()
                 return True
             
             # Check hashed password
@@ -319,8 +390,7 @@ class AuthConfigManager:
     
     def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
         """Verify a password against its hash."""
-        import hashlib
-        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+        return _verify_password_hash(password, stored_hash)
     
     def _create_session_token(self, username: str) -> str:
         """Create a new session token for a user using database adapter."""
@@ -521,27 +591,37 @@ class AuthConfigManager:
 
 
 def get_cli_api_key() -> Optional[str]:
-    """Get the CLI API key, validating caller is from CLI module.
-    
-    This is the single method for retrieving CLI API keys. It verifies
-    that the caller is from the CLI module and returns the API key.
-    
-    Returns:
-        The CLI API key if called from authorized module, None otherwise
-    """
-    # Check caller module
+    """Get the CLI API key, validating caller is from CLI module."""
     frame = sys._getframe(1)
-    module_name = frame.f_globals.get('__name__', '')
-    
-    # Allow calls from CLI modules
-    if not module_name.startswith('app.ui.cli'):
+    module_name = frame.f_globals.get("__name__", "")
+    if not module_name.startswith("app.ui.cli"):
         logging.getLogger(__name__).warning("CLI API key requested from unauthorized module: %s", module_name)
         return None
-    
-    # Return a placeholder API key for now
-    # In a real implementation, this would retrieve the key from the database
-    # For now, we'll return a static key that can be used for testing
-    return "cli-api-key-placeholder-12345"
+
+    config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR") or os.environ.get("CONFIG_DIR")
+    if not config_dir_raw:
+        logging.getLogger(__name__).warning("CLI API key requested without config dir in environment")
+        return None
+
+    args = SimpleNamespace(db_type=None, database_url=None, db_user=None, db_password=None)
+    db_settings = load_database_settings(Path(config_dir_raw), args, os.environ)
+    db_manager = DatabaseManager.from_settings(db_settings)
+    try:
+        cli_user = db_manager.get_user_credentials("cli-backend")
+        if cli_user and cli_user.get("password_plain"):
+            return cli_user["password_plain"]
+        auth_manager = AuthConfigManager(db_manager)
+        return auth_manager.create_cli_api_key()
+    finally:
+        db_manager.close()
 
 
-__all__ = ["CredentialStore", "CredentialError", "UserCredentials", "CookieJarDefinition", "load_credentials", "AuthConfigManager", "get_cli_api_key"]
+__all__ = [
+    "CredentialStore",
+    "CredentialError",
+    "UserCredentials",
+    "CookieJarDefinition",
+    "load_credentials",
+    "AuthConfigManager",
+    "get_cli_api_key",
+]

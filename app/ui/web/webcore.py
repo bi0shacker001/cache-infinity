@@ -6,13 +6,8 @@ import json
 import html
 import logging
 import os
-import secrets
 from urllib.parse import parse_qs, unquote
-from typing import TYPE_CHECKING, Callable, Dict, Any
-
-if TYPE_CHECKING:  # pragma: no cover
-    from ..services import CacheInfinityService
-    from ..backend import ManagementLayer
+from typing import Callable, Dict, Any
 
 from ..backend import ManagementLayer, ensure_local_control_server
 
@@ -21,15 +16,13 @@ _LOGGER = logging.getLogger(__name__)
 class WebUIApp:
     """WSGI application that renders a comprehensive admin dashboard."""
 
-    def __init__(self, service: "CacheInfinityService"):
+    def __init__(self, service):
         _LOGGER.debug("Initializing WebUI application")
         self.service = service
         self.management = ManagementLayer(service)
         ensure_local_control_server(service)
-        self.sessions: dict[str, dict[str, object]] = {}
         self.pages: Dict[str, str] = {}
         self.handlers: Dict[str, Any] = {}
-        self._load_persistent_sessions()
 
         # Load all page modules
         self._load_all_pages()
@@ -178,12 +171,6 @@ class WebUIApp:
         if not user:
             _LOGGER.debug("Authentication required for path: %s", path)
             return self._login_required_response(path, start_response)
-
-        # Update session last used time
-        cookies = self._parse_cookies(environ)
-        token = cookies.get("ci_session")
-        if token:
-            self.service.index_db.update_session_last_used(token)
 
         # Serve main UI - now serves static index.html
         if path in ("/", "") and method == "GET":
@@ -583,11 +570,10 @@ class WebUIApp:
         if not token:
             _LOGGER.debug("No session token found in cookies")
             return None
-        session = self.sessions.get(token)
-        if not session:
-            _LOGGER.debug("Session token not found in active sessions")
+        username = self.management.authenticate_session(token)
+        if not username:
+            _LOGGER.debug("Session token not valid")
             return None
-        username = session.get("username")
         _LOGGER.debug("Authenticated user: %s", username)
         return username
 
@@ -597,32 +583,11 @@ class WebUIApp:
         token = cookies.get("ci_session")
         if not token:
             return None
-        session = self.sessions.get(token)
-        if not session:
+        username = self.management.authenticate_session(token)
+        if not username:
             return None
-        username = session.get("username")
         _LOGGER.debug("Extracted username from session: %s", username)
         return username
-
-    def _load_persistent_sessions(self) -> None:
-        """Load sessions from database to restore after restart."""
-        try:
-            _LOGGER.debug("Loading persistent sessions from database")
-            sessions = self.service.index_db.load_webui_sessions()
-            for token, session_data in sessions.items():
-                self.sessions[token] = session_data
-            _LOGGER.debug("Loaded %d persistent sessions", len(sessions))
-        except Exception:
-            _LOGGER.exception("Failed to load persistent sessions")
-
-    def _save_persistent_sessions(self) -> None:
-        """Save sessions to database for persistence."""
-        try:
-            _LOGGER.debug("Saving %d sessions to database", len(self.sessions))
-            self.service.index_db.save_webui_sessions(self.sessions)
-            _LOGGER.debug("Successfully saved sessions to database")
-        except Exception:
-            _LOGGER.exception("Failed to save persistent sessions")
 
     @staticmethod
     def _parse_cookies(environ) -> dict[str, str]:
@@ -669,13 +634,10 @@ class WebUIApp:
 
         _LOGGER.debug("Login attempt for user: %s", username)
 
-        if not self.service.validate_ui_credentials(username, password):
+        token = self.management.login_user(username, password)
+        if not token:
             _LOGGER.warning("Login failed for user: %s", username)
             return self._serve_login(start_response, error="Invalid credentials.")
-
-        token = secrets.token_hex(32)
-        self.sessions[token] = {"username": username}
-        self._save_persistent_sessions()
 
         secure = ""
         if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
@@ -693,10 +655,7 @@ class WebUIApp:
         cookies = self._parse_cookies(environ)
         token = cookies.get("ci_session")
         if token:
-            session = self.sessions.pop(token, None)
-            if session:
-                _LOGGER.debug("Logging out user: %s", session.get("username"))
-            self._save_persistent_sessions()
+            self.management.logout_session(token)
         secure = ""
         if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
             secure = "; Secure"

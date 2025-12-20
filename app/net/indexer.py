@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse, parse_qs
 from html.parser import HTMLParser
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from auth.credentials import CookieJarDefinition
 from core.config import IndexingSettings
 from cache.cachelinks import CachelinkDescriptor, CachelinkIndex
+from dataclasses import dataclass
 from db.dbmanage import DatabaseManager
 
 _logger = logging.getLogger(__name__)
@@ -29,6 +30,32 @@ def _import_pycurl():
             "Install project dependencies (including 'pycurl') to enable downloads/indexing."
         ) from exc
     return pycurl
+
+
+def _import_rclone():
+    try:
+        from rclone_python import rclone  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "rclone-python is required for rclone:// listings. "
+            "Install project dependencies (including 'rclone-python') to enable cloud listings."
+        ) from exc
+    return rclone
+
+
+def _is_rclone_url(url: str) -> bool:
+    return url.startswith("rclone:") or url.startswith("rclone://")
+
+
+def _rclone_spec(url: str) -> str:
+    if url.startswith("rclone://"):
+        parsed = urlparse(url)
+        remote = parsed.netloc
+        path = parsed.path.lstrip("/")
+        return f"{remote}:{path}"
+    if url.startswith("rclone:"):
+        return url[len("rclone:"):]
+    return url
 
 
 def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
@@ -154,6 +181,8 @@ class RemoteListingFetcher:
         """
         try:
             # Determine protocol and fetch accordingly
+            if _is_rclone_url(url):
+                return self._fetch_rclone_listing(url, parse_entries)
             if url.startswith('http'):
                 return self._fetch_http_listing(
                     url,
@@ -193,7 +222,7 @@ class RemoteListingFetcher:
 
             # Handle 304 Not Modified
             if metadata.get("status_code") == 304:
-                _logger.debug(f"Target {target_id}: Listing unchanged (304 Not Modified)")
+                _logger.debug("Listing unchanged (304 Not Modified) for %s", url)
                 return [], {"status": "not_modified", "url": url}
 
             if int(metadata.get("status_code") or 0) >= 400:
@@ -224,6 +253,34 @@ class RemoteListingFetcher:
         except Exception as exc:
             _logger.error(f"FTP listing fetch failed for {url}: {exc}")
             return [], {'error': str(exc), 'url': url}
+
+    def _fetch_rclone_listing(self, url: str, parse_entries: bool) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        try:
+            if not parse_entries:
+                return [], {"url": url, "status": "ok", "source": "rclone"}
+            rclone = _import_rclone()
+            spec = _rclone_spec(url)
+            rows = rclone.lsjson(spec)
+            entries: list[dict[str, Any]] = []
+            for row in rows or []:
+                name = row.get("Name") or row.get("Path") or ""
+                is_dir = bool(row.get("IsDir"))
+                size = row.get("Size")
+                modified = row.get("ModTime")
+                entries.append(
+                    {
+                        "name": name,
+                        "path": name,
+                        "is_dir": is_dir,
+                        "url": f"{spec}/{name}" if name else spec,
+                        "size": int(size) if isinstance(size, (int, float)) else None,
+                        "modified": modified,
+                    }
+                )
+            return entries, {"url": url, "status": "ok", "source": "rclone"}
+        except Exception as exc:
+            _logger.error("Rclone listing fetch failed for %s: %s", url, exc)
+            return [], {"error": str(exc), "url": url}
     
     def _parse_html_directory(self, html_content: str, base_url: str) -> List[Dict[str, Any]]:
         """Parse HTML directory listing."""
@@ -315,20 +372,21 @@ class Indexer:
         Returns:
             True if reindex should be performed, False otherwise
         """
-        last_index = self._last_index_times.get(target_id, 0)
-        current_time = int(time.time())
-        
-        # Check minimum interval
-        min_interval = self.settings.min_full_reindex_days * 24 * 3600
-        if current_time - last_index < min_interval:
-            return False
-            
-        # Check maximum interval
-        max_interval = self.settings.max_full_reindex_days * 24 * 3600
-        if current_time - last_index > max_interval:
+        state = self._get_target_state(target_id)
+        if not state:
             return True
-            
-        # Additional logic could be added here for hotness-based early reindexing
+
+        now = datetime.now(timezone.utc)
+        if state.needs_full_reindex or state.last_full_index_at is None:
+            return True
+
+        min_interval = timedelta(days=self.settings.min_full_reindex_days)
+        max_interval = timedelta(days=self.settings.max_full_reindex_days)
+        age = now - state.last_full_index_at
+        if age > max_interval:
+            return True
+        if age < min_interval:
+            return False
         return False
     
     def should_reindex_with_budget(self, target_id: str) -> bool:
@@ -340,10 +398,10 @@ class Indexer:
         Returns:
             True if reindex should be performed, False otherwise
         """
-        # Check basic reindex criteria
-        if not self.should_reindex(target_id):
-            return False
-        
+        state = self._get_target_state(target_id)
+        if not state:
+            return True
+
         # Check daily budget
         current_time = int(time.time())
         
@@ -362,18 +420,32 @@ class Indexer:
                     _logger.debug(f"14-day reindex budget exceeded for {target_id}")
                     return False
 
-                # Check if target has hot files and should be prioritized
-                if self.settings.early_full_requires_hot:
-                    hot_files = self.get_hot_files(limit=10)
-                    if not hot_files:
-                        _logger.debug(f"Target {target_id}: Skipping early reindex due to no hot files")
+                if state.last_full_index_at is not None:
+                    min_interval = timedelta(days=self.settings.min_full_reindex_days)
+                    age = datetime.now(timezone.utc) - state.last_full_index_at
+                    if age < min_interval and not self.settings.allow_early_full_on_change:
                         return False
+                    if age < min_interval and self.settings.allow_early_full_on_change:
+                        if self.settings.early_full_requires_hot:
+                            hot_count = self.db_manager.hot_access_count(
+                                state.id, window_days=self.settings.hot_window_days
+                            )
+                            if hot_count <= 0:
+                                _logger.debug(
+                                    "Target %s: Skipping early reindex due to no hot access",
+                                    target_id,
+                                )
+                                return False
 
             except Exception as exc:
                 _logger.error(f"Failed to check reindex budget for {target_id}: {exc}")
                 return False
         
-        return True
+        if state.needs_full_reindex or state.last_full_index_at is None:
+            return True
+        max_interval = timedelta(days=self.settings.max_full_reindex_days)
+        age = datetime.now(timezone.utc) - state.last_full_index_at
+        return age >= max_interval
         
     def index_target(self, target_id: str, url: str, subfolder: str) -> bool:
         """Index a remote target.
@@ -387,79 +459,74 @@ class Indexer:
             True if indexing was successful, False otherwise
         """
         try:
-            # Update last index time
-            self._last_index_times[target_id] = int(time.time())
-            
-            # Build full URL with subfolder
-            full_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
-            
-            cache_state = None
-            if self.db_manager:
-                cache_state = self.db_manager.get_indexing_cache(target_id)
+            descriptor = self._get_cachelink_descriptor(target_id)
+            listing_url = url
+            if descriptor:
+                listing_url = descriptor.remote_listing_url
+            elif subfolder:
+                listing_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
 
-            # Fetch remote listing with conditional requests
-            cached_etag = None
-            cached_modified = None
-            if cache_state:
-                cached_etag = cache_state.get("etag") or None
-                cached_modified = cache_state.get("last_modified") or None
+            state = self._get_target_state(target_id)
+            if state is None and descriptor and self.db_manager:
+                state = self.db_manager.ensure_target(descriptor, listing_url)
+
+            cached_etag = state.etag if state else None
+            cached_modified = state.last_modified if state else None
             entries, metadata = self._fetcher.fetch(
-                full_url,
+                listing_url,
                 parse_entries=True,
                 cached_etag=cached_etag,
                 cached_modified=cached_modified,
             )
 
-            if self.db_manager and ("etag" in metadata or "last_modified" in metadata):
-                self.db_manager.set_indexing_cache(
-                    target_id,
-                    metadata.get("etag"),
-                    metadata.get("last_modified"),
-                    int(time.time()),
-                )
-            
-            # Handle 304 Not Modified
-            if metadata.get('status') == 'not_modified':
-                _logger.debug(f"Target {target_id}: No changes since last index")
-                if self.db_manager:
-                    self.db_manager.record_indexing_log(target_id, int(time.time()), True, 0, None)
-                return True
-            
-            if not entries:
-                _logger.warning(f"No entries found for {target_id}: {full_url}")
-                if self.db_manager:
-                    self.db_manager.record_indexing_log(
-                        target_id,
-                        int(time.time()),
-                        True,
-                        0,
-                        "No entries found",
+            if metadata.get("status") == "not_modified":
+                if state and self.db_manager:
+                    self.db_manager.record_cheap_check(
+                        state.id,
+                        etag=cached_etag,
+                        last_modified=cached_modified,
+                        listing_hash=state.listing_hash,
+                        changed=False,
                     )
                 return True
-            
-            # Process entries and update database
-            indexed_count = 0
-            for entry in entries:
-                try:
-                    # Skip if entry is incomplete
-                    if not entry.get('name') or 'is_dir' not in entry:
-                        continue
-                    
-                    # Update database with entry
-                    if self.db_manager:
-                        self._update_entry_in_database(target_id, entry)
-                    
-                    indexed_count += 1
-                    
-                except Exception as exc:
-                    _logger.warning(f"Failed to process entry for {target_id}: {exc}")
-                    continue
-            
-            # Log indexing result
-            if self.db_manager:
-                self.db_manager.record_indexing_log(target_id, int(time.time()), True, indexed_count, None)
-            
-            _logger.debug(f"Indexed target {target_id}: {url}/{subfolder} - {indexed_count} entries")
+
+            status_code = metadata.get("status_code")
+            if status_code and int(status_code) >= 400:
+                if state and self.db_manager:
+                    self.db_manager.mark_failure(state.id, f"HTTP {status_code}")
+                return False
+
+            listing_hash = self._listing_hash(entries)
+            if state and self.db_manager:
+                if state.needs_full_reindex or state.last_full_index_at is None:
+                    records = self._entries_to_records(entries, listing_url)
+                    self.db_manager.update_listing(
+                        state.id,
+                        records,
+                        etag=metadata.get("etag"),
+                        last_modified=metadata.get("last_modified"),
+                        listing_hash=listing_hash,
+                    )
+                else:
+                    changed = listing_hash != (state.listing_hash or "")
+                    self.db_manager.record_cheap_check(
+                        state.id,
+                        etag=metadata.get("etag"),
+                        last_modified=metadata.get("last_modified"),
+                        listing_hash=listing_hash,
+                        changed=changed,
+                    )
+
+            if self.db_manager and hasattr(self.db_manager, "record_indexing_log"):
+                self.db_manager.record_indexing_log(
+                    target_id,
+                    int(time.time()),
+                    True,
+                    len(entries),
+                    None,
+                )
+
+            _logger.debug("Indexed target %s (%d entries)", target_id, len(entries))
             return True
             
         except Exception as exc:
@@ -513,253 +580,206 @@ class Indexer:
         if not self.cachelinks:
             return None
         return self.cachelinks.cachelinks.get(target_id)
-    
+
+    def _get_target_state(self, target_id: str):
+        if not self.db_manager:
+            return None
+        descriptor = self._get_cachelink_descriptor(target_id)
+        if not descriptor:
+            return None
+        return self.db_manager.ensure_target(descriptor, descriptor.remote_listing_url)
+
+    def _listing_hash(self, entries: List[Dict[str, Any]]) -> str:
+        normalized: list[str] = []
+        for entry in entries:
+            path = str(entry.get("path") or entry.get("name") or "")
+            is_dir = "1" if entry.get("is_dir") else "0"
+            size = str(entry.get("size") or "")
+            modified = str(entry.get("modified") or "")
+            normalized.append(f"{path}|{is_dir}|{size}|{modified}")
+        normalized.sort()
+        payload = "\n".join(normalized).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _entries_to_records(self, entries: List[Dict[str, Any]], listing_url: str) -> list["FileRecord"]:
+        records: list[FileRecord] = []
+        for entry in entries:
+            path = entry.get("path") or entry.get("name") or ""
+            remote_url = entry.get("url") or urljoin(listing_url.rstrip("/") + "/", str(path))
+            is_dir = bool(entry.get("is_dir"))
+            size = entry.get("size") if entry.get("size") is not None else None
+            modified = entry.get("modified")
+            records.append(
+                FileRecord(
+                    path=str(path),
+                    remote_url=str(remote_url),
+                    is_dir=is_dir,
+                    size=size,
+                    modified=_parse_modified(modified),
+                    protocol=urlparse(listing_url).scheme,
+                    checksum=entry.get("checksum"),
+                )
+            )
+        return records
+
     def index_all_targets(self, targets: List[Dict[str, str]]) -> Dict[str, bool]:
-        """Index multiple targets.
-        
-        Args:
-            targets: List of target dictionaries with 'id', 'url', 'subfolder' keys
-            
-        Returns:
-            Dictionary mapping target IDs to success status
-        """
+        """Index multiple targets."""
         results = {}
-        
+
         for target in targets:
-            target_id = target.get('id')
-            url = target.get('url')
-            subfolder = target.get('subfolder', '/')
-            
+            target_id = target.get("id")
+            url = target.get("url")
+            subfolder = target.get("subfolder", "/")
+
             if not all([target_id, url]):
-                _logger.warning(f"Skipping invalid target: {target}")
+                _logger.warning("Skipping invalid target: %s", target)
                 results[target_id] = False
                 continue
-            
+
             results[target_id] = self.index_target(target_id, url, subfolder)
-        
+
         return results
-    
+
     def get_index_progress(self, target_id: str) -> Dict[str, Any]:
-        """Get detailed indexing progress for a target.
-        
-        Args:
-            target_id: Identifier for the target
-            
-        Returns:
-            Dictionary with detailed progress information
-        """
+        """Get detailed indexing progress for a target."""
         status = self.get_index_status(target_id)
-        
-        # Add additional progress information
-        progress = {
+
+        return {
             **status,
-            'progress_details': {
-                'entries_processed': 0,  # Would be tracked during indexing
-                'entries_total': 0,      # Would be known from remote listing
-                'time_elapsed': int(time.time()) - status['last_indexed'] if status['last_indexed'] else 0
-            }
+            "progress_details": {
+                "entries_processed": 0,
+                "entries_total": 0,
+                "time_elapsed": int(time.time()) - status["last_indexed"] if status["last_indexed"] else 0,
+            },
         }
-        
-        return progress
-            
+
     def get_index_status(self, target_id: str) -> Dict[str, Any]:
-        """Get indexing status for a target.
-        
-        Args:
-            target_id: Identifier for the target
-            
-        Returns:
-            Dictionary with indexing status information
-        """
+        """Get indexing status for a target."""
         last_index = self._last_index_times.get(target_id, 0)
         return {
-            'target_id': target_id,
-            'last_indexed': last_index,
-            'should_reindex': self.should_reindex(target_id),
-            'next_possible_index': last_index + (self.settings.min_full_reindex_days * 24 * 3600)
+            "target_id": target_id,
+            "last_indexed": last_index,
+            "should_reindex": self.should_reindex(target_id),
+            "next_possible_index": last_index + (self.settings.min_full_reindex_days * 24 * 3600),
         }
-        
+
     def get_all_index_status(self) -> List[Dict[str, Any]]:
-        """Get indexing status for all targets.
-        
-        Returns:
-            List of dictionaries with indexing status for all targets
-        """
-        # This would typically query the database for all targets
-        # For now, return status for targets we've indexed
+        """Get indexing status for all targets."""
         return [self.get_index_status(target_id) for target_id in self._last_index_times.keys()]
-        
+
     def cleanup_old_indexes(self, max_age_days: int = 90) -> bool:
-        """Clean up old index entries.
-        
-        Args:
-            max_age_days: Maximum age of index entries in days
-            
-        Returns:
-            True if cleanup was successful, False otherwise
-        """
+        """Clean up old index entries."""
         try:
             current_time = int(time.time())
             max_age = max_age_days * 24 * 3600
-            
-            # Remove old entries from memory
             old_targets = [
                 target_id for target_id, last_index in self._last_index_times.items()
                 if current_time - last_index > max_age
             ]
-            
+
             for target_id in old_targets:
                 del self._last_index_times[target_id]
-                
-            _logger.debug(f"Cleaned up {len(old_targets)} old index entries")
+
+            _logger.debug("Cleaned up %d old index entries", len(old_targets))
             return True
-            
+
         except Exception as exc:
-            _logger.error(f"Failed to cleanup old indexes: {exc}")
+            _logger.error("Failed to cleanup old indexes: %s", exc)
             return False
-    
+
     def record_file_access(self, file_path: str, user: str) -> bool:
-        """Record file access for hotness tracking.
-        
-        Args:
-            file_path: Path to the accessed file
-            user: User who accessed the file
-            
-        Returns:
-            True if access was recorded successfully
-        """
+        """Record file access for hotness tracking."""
         try:
             if not self.db_manager:
                 return False
-            
+
             current_time = int(time.time())
-            
             self.db_manager.record_file_access(file_path, user, current_time)
             return True
-            
+
         except Exception as exc:
-            _logger.error(f"Failed to record file access for {file_path}: {exc}")
+            _logger.error("Failed to record file access for %s: %s", file_path, exc)
             return False
-    
+
     def calculate_hotness_score(self, file_path: str) -> float:
-        """Calculate hotness score for a file based on access patterns.
-        
-        Args:
-            file_path: Path to the file
-            
-        Returns:
-            Hotness score (higher = more popular)
-        """
+        """Calculate hotness score for a file based on access patterns."""
         try:
             if not self.db_manager:
                 return 0.0
-            
+
             current_time = int(time.time())
             window_start = current_time - (self.settings.hot_window_days * 24 * 3600)
-            
-            # Get access count within hot window
             result = self.db_manager.get_file_access(file_path, window_start)
-            
             if not result:
                 return 0.0
-            
-            access_count = result['access_count']
-            last_accessed = result['last_accessed']
-            
-            # Calculate time decay factor (older accesses count less)
+
+            access_count = result["access_count"]
+            last_accessed = result["last_accessed"]
             time_diff = current_time - last_accessed
             time_decay = max(0.1, 1.0 - (time_diff / (self.settings.hot_window_days * 24 * 3600)))
-            
-            # Calculate hotness score
             base_score = access_count * time_decay
             age_bonus = min(1.0, access_count / self.settings.hot_radius)
-            
-            score = base_score + (age_bonus * self.settings.score_weights.get('hot', 0.5))
-            
-            return score
-            
+
+            score_weights = self.settings.score_weights or {}
+            return base_score + (age_bonus * score_weights.get("hot", 0.5))
+
         except Exception as exc:
-            _logger.error(f"Failed to calculate hotness score for {file_path}: {exc}")
+            _logger.error("Failed to calculate hotness score for %s: %s", file_path, exc)
             return 0.0
-    
+
     def get_hot_files(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get list of hottest files based on access patterns.
-        
-        Args:
-            limit: Maximum number of files to return
-            
-        Returns:
-            List of hot files with their scores
-        """
+        """Get list of hottest files based on access patterns."""
         try:
             if not self.db_manager:
                 return []
-            
+
             current_time = int(time.time())
             window_start = current_time - (self.settings.hot_window_days * 24 * 3600)
-            
             results = self.db_manager.list_recent_file_access(window_start, limit)
-            
+
             hot_files = []
             for row in results:
-                score = self.calculate_hotness_score(row['file_path'])
+                score = self.calculate_hotness_score(row["file_path"])
                 hot_files.append({
-                    'file_path': row['file_path'],
-                    'access_count': row['access_count'],
-                    'last_accessed': row['last_accessed'],
-                    'hotness_score': score
+                    "file_path": row["file_path"],
+                    "access_count": row["access_count"],
+                    "last_accessed": row["last_accessed"],
+                    "hotness_score": score,
                 })
-            
-            return sorted(hot_files, key=lambda x: x['hotness_score'], reverse=True)
-            
+
+            return sorted(hot_files, key=lambda item: item["hotness_score"], reverse=True)
+
         except Exception as exc:
-            _logger.error(f"Failed to get hot files: {exc}")
+            _logger.error("Failed to get hot files: %s", exc)
             return []
-    
+
     def get_targets_for_indexing(self) -> List[Dict[str, str]]:
-        """Get list of targets that need indexing based on budgets and schedules.
-        
-        Returns:
-            List of targets that need indexing
-        """
-        targets = []
-        
-        # This would need to be implemented to get targets from the service layer
-        # For now, return empty list - this should be implemented in the service layer
-        return targets
-    
+        """Get list of targets that need indexing based on budgets and schedules."""
+        return []
+
     def trigger_reindex(self, canonical_id: str) -> bool:
-        """Trigger reindexing for a specific cachelink.
-        
-        Args:
-            canonical_id: Canonical ID of the cachelink
-            
-        Returns:
-            True if reindex was triggered successfully
-        """
+        """Trigger reindexing for a specific cachelink."""
         try:
             descriptor = self._get_cachelink_descriptor(canonical_id)
             if descriptor:
                 self.mark_target_for_reindex(descriptor)
 
-            # Mark target for immediate reindexing
             if self.db_manager:
                 self.db_manager.mark_indexed_entries_accessed_at(
                     canonical_id,
                     int(time.time()) - 3600,
                 )
-            
-            # Clear last index time to force reindex
+
             if canonical_id in self._last_index_times:
                 del self._last_index_times[canonical_id]
-            
-            _logger.debug(f"Triggered reindex for cachelink: {canonical_id}")
+
+            _logger.debug("Triggered reindex for cachelink: %s", canonical_id)
             return True
-            
+
         except Exception as exc:
-            _logger.error(f"Failed to trigger reindex for {canonical_id}: {exc}")
+            _logger.error("Failed to trigger reindex for %s: %s", canonical_id, exc)
             return False
-    
+
     def mark_target_for_reindex(self, descriptor: CachelinkDescriptor) -> None:
         if not self.db_manager:
             return
@@ -767,11 +787,7 @@ class Indexer:
         self.db_manager.mark_needs_full(state.id)
 
     def get_degraded_targets(self) -> List[Dict[str, Any]]:
-        """Get list of degraded targets that need attention.
-        
-        Returns:
-            List of degraded targets
-        """
+        """Get list of degraded targets that need attention."""
         try:
             if not self.db_manager:
                 return []
@@ -779,19 +795,44 @@ class Indexer:
             if hasattr(self.db_manager, "list_degraded_targets"):
                 return self.db_manager.list_degraded_targets()
 
-            # Fallback to indexing log if target table entries are unavailable
             results = self.db_manager.list_degraded_indexing(int(time.time()) - 7 * 24 * 3600)
-            
             degraded = []
             for row in results:
                 degraded.append({
-                    'cachelink_id': row['target_id'],
-                    'last_error': row['error_message'],
-                    'last_error_at': row['last_error_at']
+                    "cachelink_id": row["target_id"],
+                    "last_error": row["error_message"],
+                    "last_error_at": row["last_error_at"],
                 })
-            
+
             return degraded
-            
+
         except Exception as exc:
-            _logger.error(f"Failed to get degraded targets: {exc}")
+            _logger.error("Failed to get degraded targets: %s", exc)
             return []
+
+
+def _parse_modified(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value)
+        except (OSError, ValueError):
+            return None
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+@dataclass
+class FileRecord:
+    path: str
+    remote_url: str
+    is_dir: bool
+    size: int | None
+    modified: datetime | None
+    protocol: str
+    checksum: str | None = None

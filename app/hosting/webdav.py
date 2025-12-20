@@ -2,879 +2,788 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 from wsgidav.dav_provider import DAVProvider
+from wsgidav.dc.base_dc import BaseDomainController
 
 _logger = logging.getLogger(__name__)
 
 
+def _normalize_prop_name(name: Any) -> str:
+    if isinstance(name, tuple) and len(name) == 2:
+        return f"{{{name[0]}}}{name[1]}"
+    if hasattr(name, "namespace") and hasattr(name, "name"):
+        return f"{{{name.namespace}}}{name.name}"
+    return str(name)
+
+
+def _split_zip_subfolder(subfolder: str) -> tuple[str | None, str]:
+    normalized = (subfolder or "/").strip("/")
+    if not normalized:
+        return None, ""
+    parts = [seg for seg in normalized.split("/") if seg]
+    for idx, segment in enumerate(parts):
+        if segment.endswith(".zip"):
+            zip_path = "/".join(parts[: idx + 1])
+            inner = "/".join(parts[idx + 1 :])
+            return zip_path, inner
+    return None, normalized
+
+
+class CacheInfinityDomainController(BaseDomainController):
+    """Domain controller that validates WebDAV users against the database."""
+
+    def __init__(self, wsgidav_app, config):
+        super().__init__(wsgidav_app, config)
+        self._config = config
+        self._service = config.get("cacheinfinity_service")
+        self._user_mapping = config.get("simple_dc", {}).get("user_mapping", {})
+
+    def getDomainRealm(self, path_info, environ):
+        realm = self._resolve_realm(path_info)
+        return realm or "CacheInfinity"
+
+    def requireAuthentication(self, realm, environ):
+        users = self._user_mapping.get(realm) or {}
+        return "anonymous" not in users
+
+    def isValidUser(self, realm, username, password, environ):
+        entry = self._get_user_entry(realm, username)
+        if not entry or not self._service:
+            return False
+        mode = entry.get("auth", "local")
+        if mode == "anonymous":
+            return True
+        if mode == "external":
+            return True
+        if mode == "ldap":
+            return bool(self._service.index_db.validate_ldap_credentials(username, password, purpose="webdav"))
+        if mode == "oidc":
+            return bool(self._service.index_db.validate_oidc_credentials(username, password))
+        return bool(self._service.index_db.validate_credentials(username, password, purpose="webdav"))
+
+    def basic_authentication(self, realm, username, password, environ):
+        return self.isValidUser(realm, username, password, environ)
+
+    def digest_authentication(self, realm, username, environ):
+        return False
+
+    def _resolve_realm(self, path_info):
+        for realm in sorted(self._user_mapping.keys(), key=len, reverse=True):
+            if realm == "/":
+                return realm
+            if path_info == realm or path_info.startswith(realm.rstrip("/") + "/"):
+                return realm
+        return None
+
+    def _get_user_entry(self, realm, username):
+        users = self._user_mapping.get(realm) or {}
+        return users.get(username)
+
+
 class WebDAVProvider(DAVProvider):
-    """Custom WebDAV provider for CacheInfinity.
-    
-    This provider implements the virtual tree structure with cachelink overlay,
-    on-demand caching, and write-through datadir functionality.
-    """
-    
+    """Custom WebDAV provider for CacheInfinity."""
+
     def __init__(self, service):
-        """Initialize WebDAV provider.
-        
-        Args:
-            service: Reference to the main CacheInfinity service
-        """
         super().__init__()
         self.service = service
         _logger.info("WebDAV provider initialized")
-        
+
     def get_resource_inst(self, path: str, environ: Dict[str, Any]) -> Optional[Any]:
-        """Get resource instance for the given path.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Resource instance or None if not found
-        """
-        try:
-            # Check if path exists in datadir storage
-            datadir_resource = self._get_datadir_resource(path)
-            if datadir_resource:
-                return datadir_resource
-                
-            # Check if path corresponds to a cachelink
-            cachelink_resource = self._get_cachelink_resource(path)
-            if cachelink_resource:
-                return cachelink_resource
-                
-            # Check if path is a directory that exists in either datadir or cachelinks
-            if self._is_directory(path):
-                return self._create_directory_resource(path)
-                
+        share_ctx = self._resolve_share(path)
+        if not share_ctx:
             return None
-            
-        except Exception as exc:
-            _logger.error(f"Failed to get resource for {path}: {exc}")
+        share, share_rel, frontend_root = share_ctx
+        policy = self._resolve_user_policy(share, environ)
+        if not policy or not policy.read:
             return None
-    
-    def _get_datadir_resource(self, path: str) -> Optional[Any]:
-        """Get resource from datadir storage.
-        
-        Args:
-            path: Path to the resource
-            
-        Returns:
-            Resource instance or None
-        """
-        try:
-            # Check if file exists in datadir
-            if self.service.datadir_registry.primary.exists(path):
-                return self._create_file_resource(path, source='datadir')
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        if method in {"PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH"}:
+            if not share.writable or not policy.write:
+                return None
+
+        datadir_rel = self._map_to_datadir(share, share_rel)
+        if datadir_rel is None:
             return None
-        except Exception:
+
+        datadir_path = self.service.datadir_registry.primary.resolve(datadir_rel)
+        if datadir_path.exists():
+            cache_state = "local-only"
+            if self.service.index_db.lookup_backend_checksum(datadir_rel):
+                cache_state = "cached"
+            if datadir_path.is_dir():
+                return CachelinkDirectoryResource(
+                    path,
+                    self.service,
+                    share,
+                    share_rel,
+                    datadir_rel,
+                    cache_state=cache_state,
+                )
+            return DatadirFileResource(path, self.service, datadir_rel, cache_state=cache_state)
+
+        if not self._cachelink_overlay_enabled(share, policy):
             return None
-    
-    def _get_cachelink_resource(self, path: str) -> Optional[Any]:
-        """Get resource from cachelink overlay.
-        
-        Args:
-            path: Path to the resource
-            
-        Returns:
-            Resource instance or None
-        """
-        try:
-            # Check if path matches any cachelink
-            cachelink = self.service.get_cachelink_for_path(path)
-            if cachelink:
-                return self._create_file_resource(path, source='cachelink', cachelink=cachelink)
+
+        descriptor, subpath = self._find_cachelink_for_path(share, datadir_rel)
+        if not descriptor:
+            if self._has_cachelink_children(share, datadir_rel):
+                return CachelinkDirectoryResource(path, self.service, share, share_rel, datadir_rel)
             return None
-        except Exception:
-            return None
-    
-    def _is_directory(self, path: str) -> bool:
-        """Check if path represents a directory.
-        
-        Args:
-            path: Path to check
-            
-        Returns:
-            True if path is a directory, False otherwise
-        """
-        # Check if path exists as directory in datadir
-        if self.service.datadir_registry.primary.exists(path) and self.service.datadir_registry.primary.resolve(path).is_dir():
-            return True
-            
-        # Check if path is a parent of any cachelink
-        if self.service.has_cachelinks_in_path(path):
-            return True
-            
-        return False
-    
-    def _create_file_resource(self, path: str, source: str, cachelink: Optional[Any] = None) -> Any:
-        """Create a file resource object.
-        
-        Args:
-            path: Path to the file
-            source: Source of the file ('datadir' or 'cachelink')
-            cachelink: Cachelink object if source is 'cachelink'
-            
-        Returns:
-            File resource object
-        """
-        # This would create and return a file resource object
-        # that implements the DAVResource interface
-        from wsgidav.dav_provider import FileResource
-        
-        if source == 'datadir':
-            return DatadirFileResource(path, self.service)
-        else:
-            return CachelinkFileResource(path, self.service, cachelink)
-    
-    def _create_directory_resource(self, path: str) -> Any:
-        """Create a directory resource object.
-        
-        Args:
-            path: Path to the directory
-            
-        Returns:
-            Directory resource object
-        """
-        # This would create and return a directory resource object
-        # that implements the DAVResource interface
-        from wsgidav.dav_provider import DirectoryResource
-        
-        return CachelinkDirectoryResource(path, self.service)
-    
+
+        if subpath is None or subpath == PurePosixPath("."):
+            return CachelinkDirectoryResource(path, self.service, share, share_rel, datadir_rel, descriptor=descriptor)
+
+        entry, is_dir = self._lookup_cachelink_entry(descriptor, subpath)
+        if is_dir:
+            return CachelinkDirectoryResource(path, self.service, share, share_rel, datadir_rel, descriptor=descriptor)
+        if entry:
+            base_rel = datadir_rel
+            sub_parts = subpath.parts if subpath not in (PurePosixPath(""), PurePosixPath(".")) else ()
+            if sub_parts:
+                base_rel = PurePosixPath(*datadir_rel.parts[: -len(sub_parts)])
+            return CachelinkFileResource(
+                path,
+                self.service,
+                descriptor,
+                datadir_rel,
+                base_rel,
+                entry,
+                subpath,
+                allow_cache=policy.cache,
+            )
+        return None
+
     def get_content_length(self, path: str, environ: Dict[str, Any]) -> Optional[int]:
-        """Get content length for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Content length in bytes or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_content_length()
-            return None
-        except Exception:
-            return None
-    
+        resource = self.get_resource_inst(path, environ)
+        return resource.get_content_length() if resource else None
+
     def get_last_modified(self, path: str, environ: Dict[str, Any]) -> Optional[int]:
-        """Get last modified time for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Last modified time as timestamp or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_last_modified()
-            return None
-        except Exception:
-            return None
-    
+        resource = self.get_resource_inst(path, environ)
+        return resource.get_last_modified() if resource else None
+
     def get_etag(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get ETag for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ETag string or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_etag()
-            return None
-        except Exception:
-            return None
-    
+        resource = self.get_resource_inst(path, environ)
+        return resource.get_etag() if resource else None
+
     def get_dav_getlastmodified(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:creationdate property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ISO 8601 formatted datetime string or None
-        """
         try:
             resource = self.get_resource_inst(path, environ)
-            if resource and hasattr(resource, 'get_last_modified'):
+            if resource and hasattr(resource, "get_last_modified"):
                 timestamp = resource.get_last_modified()
                 if timestamp:
                     import datetime
                     dt = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc)
                     return dt.isoformat()
-            return None
         except Exception:
             return None
-    
+        return None
+
     def get_dav_creationdate(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:creationdate property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ISO 8601 formatted datetime string or None
-        """
         return self.get_dav_getlastmodified(path, environ)
-    
+
     def get_dav_resourcetype(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:resourcetype property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            'collection' for directories, None for files
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                # Check if it's a directory resource
-                from wsgidav.dav_provider import DirectoryResource
-                if isinstance(resource, DirectoryResource):
-                    return "collection"
-                return None
-            return None
-        except Exception:
-            return None
-    
+        resource = self.get_resource_inst(path, environ)
+        if resource:
+            from wsgidav.dav_provider import DirectoryResource
+            if isinstance(resource, DirectoryResource):
+                return "collection"
+        return None
+
     def get_dav_displayname(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:displayname property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Display name or None
-        """
-        try:
-            # Extract filename from path
-            if path.endswith('/'):
-                path = path[:-1]
-            return path.split('/')[-1] if path else ""
-        except Exception:
-            return None
-    
+        if path.endswith("/"):
+            path = path[:-1]
+        return path.split("/")[-1] if path else ""
+
     def get_dav_getcontenttype(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:getcontenttype property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            MIME type or None
-        """
         try:
             resource = self.get_resource_inst(path, environ)
-            if resource:
-                # For files, try to determine content type
-                if hasattr(resource, 'get_content_length') and resource.get_content_length() is not None:
-                    # This is a file
-                    import mimetypes
-                    mime_type, _ = mimetypes.guess_type(path)
-                    return mime_type or "application/octet-stream"
-            return None
+            if resource and hasattr(resource, "get_content_length"):
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(path)
+                return mime_type or "application/octet-stream"
         except Exception:
             return None
-    
+        return None
+
     def is_collection(self, path: str, environ: Dict[str, Any]) -> bool:
-        """Check if path is a collection (directory).
-        
-        Args:
-            path: Path to check
-            environ: WSGI environment dictionary
-            
-        Returns:
-            True if path is a collection, False otherwise
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                from wsgidav.dav_provider import DirectoryResource
-                return isinstance(resource, DirectoryResource)
-            return False
-        except Exception:
-            return False
-    
-    def get_member_list(self, path: str, environ: Dict[str, Any]) -> List[str]:
-        """Get list of members in a collection.
-        
-        Args:
-            path: Path to the collection
-            environ: WSGI environment dictionary
-            
-        Returns:
-            List of member paths
-        """
-        try:
-            members = []
-            
-            # Get members from datadir storage
-            datadir_members = self._get_datadir_members(path)
-            members.extend(datadir_members)
-            
-            # Get members from cachelinks
-            cachelink_members = self._get_cachelink_members(path)
-            members.extend(cachelink_members)
-            
-            # Remove duplicates and return
-            return list(set(members))
-            
-        except Exception as exc:
-            _logger.error(f"Failed to get member list for {path}: {exc}")
-            return []
-    
-    def _get_datadir_members(self, path: str) -> List[str]:
-        """Get members from datadir storage."""
-        try:
-            # Get directory contents from datadir
-            datadir_path = self.service.datadir_registry.primary.resolve(path)
-            if datadir_path.exists() and datadir_path.is_dir():
-                members = []
-                for item in datadir_path.iterdir():
-                    member_path = f"{path.rstrip('/')}/{item.name}"
-                    members.append(member_path)
-                return members
-            return []
-        except Exception:
-            return []
-    
-    def _get_cachelink_members(self, path: str) -> List[str]:
-        """Get members from cachelinks."""
-        try:
-            members = []
-            # Get cachelinks that are children of this path
-            cachelinks = self.service.get_cachelinks_in_path(path)
-            for cachelink in cachelinks:
-                # Add the cachelink as a member
-                members.append(cachelink.path)
-                
-                # Add files from the cachelink
-                files = cachelink.get_files_in_path(path)
-                members.extend(files)
-            
-            return members
-        except Exception:
-            return []
-            
-    def _get_datadir_resource(self, path: str) -> Optional[Any]:
-        """Get resource from datadir storage.
-        
-        Args:
-            path: Path to the resource
-            
-        Returns:
-            Resource instance or None
-        """
-        # This would implement the logic to check if a file exists in datadir storage
-        # and return an appropriate resource object
-        try:
-            # Check if file exists in datadir
-            if self.service.datadir_registry.primary.exists(path):
-                return self._create_file_resource(path, source='datadir')
-            return None
-        except Exception:
-            return None
-            
-    def _get_cachelink_resource(self, path: str) -> Optional[Any]:
-        """Get resource from cachelink overlay.
-        
-        Args:
-            path: Path to the resource
-            
-        Returns:
-            Resource instance or None
-        """
-        # This would implement the logic to check if a path corresponds
-        # to a virtual file from a cachelink
-        try:
-            # Check if path matches any cachelink
-            cachelink = self.service.get_cachelink_for_path(path)
-            if cachelink:
-                return self._create_file_resource(path, source='cachelink', cachelink=cachelink)
-            return None
-        except Exception:
-            return None
-            
-    def _is_directory(self, path: str) -> bool:
-        """Check if path represents a directory.
-        
-        Args:
-            path: Path to check
-            
-        Returns:
-            True if path is a directory, False otherwise
-        """
-        # Check if path exists as directory in datadir
-        if self.service.datadir_registry.primary.exists(path) and self.service.datadir_registry.primary.resolve(path).is_dir():
-            return True
-            
-        # Check if path is a parent of any cachelink
-        if self.service.has_cachelinks_in_path(path):
-            return True
-            
+        resource = self.get_resource_inst(path, environ)
+        if resource:
+            from wsgidav.dav_provider import DirectoryResource
+            return isinstance(resource, DirectoryResource)
         return False
-        
-    def _create_file_resource(self, path: str, source: str, cachelink: Optional[Any] = None) -> Any:
-        """Create a file resource object.
-        
-        Args:
-            path: Path to the file
-            source: Source of the file ('datadir' or 'cachelink')
-            cachelink: Cachelink object if source is 'cachelink'
-            
-        Returns:
-            File resource object
-        """
-        # This would create and return a file resource object
-        # that implements the DAVResource interface
-        from wsgidav.dav_provider import FileResource
-        
-        if source == 'datadir':
-            return DatadirFileResource(path, self.service)
-        else:
-            return CachelinkFileResource(path, self.service, cachelink)
-            
-    def _create_directory_resource(self, path: str) -> Any:
-        """Create a directory resource object.
-        
-        Args:
-            path: Path to the directory
-            
-        Returns:
-            Directory resource object
-        """
-        # This would create and return a directory resource object
-        # that implements the DAVResource interface
-        from wsgidav.dav_provider import DirectoryResource
-        
-        return CachelinkDirectoryResource(path, self.service)
-        
-    def get_content_length(self, path: str, environ: Dict[str, Any]) -> Optional[int]:
-        """Get content length for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Content length in bytes or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_content_length()
-            return None
-        except Exception:
-            return None
-            
-    def get_last_modified(self, path: str, environ: Dict[str, Any]) -> Optional[int]:
-        """Get last modified time for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Last modified time as timestamp or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_last_modified()
-            return None
-        except Exception:
-            return None
-            
-    def get_etag(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get ETag for a resource.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ETag string or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                return resource.get_etag()
-            return None
-        except Exception:
-            return None
-    
-    def get_dav_getlastmodified(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:creationdate property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ISO 8601 formatted datetime string or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource and hasattr(resource, 'get_last_modified'):
-                timestamp = resource.get_last_modified()
-                if timestamp:
-                    import datetime
-                    dt = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc)
-                    return dt.isoformat()
-            return None
-        except Exception:
-            return None
-    
-    def get_dav_creationdate(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:creationdate property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            ISO 8601 formatted datetime string or None
-        """
-        return self.get_dav_getlastmodified(path, environ)
-    
-    def get_dav_resourcetype(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:resourcetype property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            'collection' for directories, None for files
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                # Check if it's a directory resource
-                from wsgidav.dav_provider import DirectoryResource
-                if isinstance(resource, DirectoryResource):
-                    return "collection"
-                return None
-            return None
-        except Exception:
-            return None
-    
-    def get_dav_displayname(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:displayname property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            Display name or None
-        """
-        try:
-            # Extract filename from path
-            if path.endswith('/'):
-                path = path[:-1]
-            return path.split('/')[-1] if path else ""
-        except Exception:
-            return None
-    
-    def get_dav_getcontenttype(self, path: str, environ: Dict[str, Any]) -> Optional[str]:
-        """Get DAV:getcontenttype property.
-        
-        Args:
-            path: Path to the resource
-            environ: WSGI environment dictionary
-            
-        Returns:
-            MIME type or None
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                # For files, try to determine content type
-                if hasattr(resource, 'get_content_length') and resource.get_content_length() is not None:
-                    # This is a file
-                    import mimetypes
-                    mime_type, _ = mimetypes.guess_type(path)
-                    return mime_type or "application/octet-stream"
-            return None
-        except Exception:
-            return None
-    
-    def is_collection(self, path: str, environ: Dict[str, Any]) -> bool:
-        """Check if path is a collection (directory).
-        
-        Args:
-            path: Path to check
-            environ: WSGI environment dictionary
-            
-        Returns:
-            True if path is a collection, False otherwise
-        """
-        try:
-            resource = self.get_resource_inst(path, environ)
-            if resource:
-                from wsgidav.dav_provider import DirectoryResource
-                return isinstance(resource, DirectoryResource)
-            return False
-        except Exception:
-            return False
-    
+
     def get_member_list(self, path: str, environ: Dict[str, Any]) -> List[str]:
-        """Get list of members in a collection.
-        
-        Args:
-            path: Path to the collection
-            environ: WSGI environment dictionary
-            
-        Returns:
-            List of member paths
-        """
+        share_ctx = self._resolve_share(path)
+        if not share_ctx:
+            return []
+        share, share_rel, frontend_root = share_ctx
+        policy = self._resolve_user_policy(share, environ)
+        if not policy or not policy.read:
+            return []
+
+        datadir_rel = self._map_to_datadir(share, share_rel)
+        if datadir_rel is None:
+            return []
+
+        members: set[str] = set()
+        members.update(
+            self._datadir_members(frontend_root, share_rel, datadir_rel)
+        )
+        if self._cachelink_overlay_enabled(share, policy):
+            members.update(
+                self._cachelink_members(frontend_root, share_rel, datadir_rel, share)
+            )
+        return sorted(members)
+
+    def _resolve_share(self, path: str) -> Optional[tuple[Any, PurePosixPath, str]]:
+        candidates = []
+        for share in self.service.settings.shares.values():
+            prefix = share.frontend_folder.as_posix()
+            if prefix != "/" and prefix.endswith("/"):
+                prefix = prefix.rstrip("/")
+            if prefix == "/":
+                if path.startswith("/"):
+                    candidates.append((len(prefix), share, prefix))
+                continue
+            if path == prefix or path.startswith(prefix + "/"):
+                candidates.append((len(prefix), share, prefix))
+        if not candidates:
+            return None
+        _, share, prefix = sorted(candidates, key=lambda item: item[0], reverse=True)[0]
+        remainder = path[len(prefix):].lstrip("/")
+        share_rel = PurePosixPath(remainder)
+        if ".." in share_rel.parts:
+            return None
+        return share, share_rel, prefix or "/"
+
+    def _resolve_user_policy(self, share, environ: Dict[str, Any]):
+        username = (
+            environ.get("REMOTE_USER")
+            or environ.get("wsgidav.auth.user_name")
+            or environ.get("HTTP_REMOTE_USER")
+            or ""
+        )
+        if not username:
+            username = "anonymous"
+        return share.users.get(username)
+
+    def _map_to_datadir(self, share, share_rel: PurePosixPath) -> Optional[PurePosixPath]:
+        base = share.datadir_folder.as_posix().strip("/")
+        base_path = PurePosixPath(base) if base else PurePosixPath("")
+        if share_rel == PurePosixPath("."):
+            share_rel = PurePosixPath("")
+        if ".." in share_rel.parts:
+            return None
+        if base_path == PurePosixPath("."):
+            base_path = PurePosixPath("")
+        if str(share_rel) in ("", "."):
+            return base_path
+        return base_path / share_rel
+
+    def _cachelink_overlay_enabled(self, share, policy) -> bool:
+        return bool(share.cachelink_overlay and policy.cache)
+
+    def _datadir_members(
+        self,
+        frontend_root: str,
+        share_rel: PurePosixPath,
+        datadir_rel: PurePosixPath,
+    ) -> list[str]:
         try:
+            datadir_path = self.service.datadir_registry.primary.resolve(datadir_rel)
+            if not datadir_path.exists() or not datadir_path.is_dir():
+                return []
             members = []
-            
-            # Get members from datadir storage
-            datadir_members = self._get_datadir_members(path)
-            members.extend(datadir_members)
-            
-            # Get members from cachelinks
-            cachelink_members = self._get_cachelink_members(path)
-            members.extend(cachelink_members)
-            
-            # Remove duplicates and return
-            return list(set(members))
-            
-        except Exception as exc:
-            _logger.error(f"Failed to get member list for {path}: {exc}")
-            return []
-    
-    def _get_datadir_members(self, path: str) -> List[str]:
-        """Get members from datadir storage."""
-        try:
-            # Get directory contents from datadir
-            datadir_path = self.service.datadir_registry.primary.resolve(path)
-            if datadir_path.exists() and datadir_path.is_dir():
-                members = []
-                for item in datadir_path.iterdir():
-                    member_path = f"{path.rstrip('/')}/{item.name}"
-                    members.append(member_path)
-                return members
-            return []
-        except Exception:
-            return []
-    
-    def _get_cachelink_members(self, path: str) -> List[str]:
-        """Get members from cachelinks."""
-        try:
-            members = []
-            # Get cachelinks that are children of this path
-            cachelinks = self.service.get_cachelinks_in_path(path)
-            for cachelink in cachelinks:
-                # Add the cachelink as a member
-                members.append(cachelink.path)
-                
-                # Add files from the cachelink
-                files = cachelink.get_files_in_path(path)
-                members.extend(files)
-            
+            for item in datadir_path.iterdir():
+                members.append(self._frontend_path(frontend_root, share_rel, item.name))
             return members
         except Exception:
             return []
+
+    def _cachelink_members(
+        self,
+        frontend_root: str,
+        share_rel: PurePosixPath,
+        datadir_rel: PurePosixPath,
+        share,
+    ) -> list[str]:
+        members: set[str] = set()
+        datadir_parts = self._path_parts(datadir_rel)
+        for descriptor in self._cachelinks_for_share(share):
+            mount_path = self._descriptor_mount_path(descriptor)
+            mount_parts = self._path_parts(mount_path)
+            if self._is_prefix(datadir_rel, mount_path):
+                remainder = mount_parts[len(datadir_parts):]
+                if remainder:
+                    members.add(self._frontend_path(frontend_root, share_rel, remainder[0]))
+            if self._is_prefix(mount_path, datadir_rel):
+                subpath = PurePosixPath(*datadir_parts[len(mount_parts):])
+                for child in self._cachelink_children(descriptor, subpath).keys():
+                    members.add(self._frontend_path(frontend_root, share_rel, child))
+        return list(members)
+
+    def _cachelinks_for_share(self, share) -> list[Any]:
+        base = share.datadir_folder.as_posix().strip("/")
+        base_path = PurePosixPath(base) if base else PurePosixPath("")
+        matches = []
+        for descriptor in self.service.cachelinks.cachelinks.values():
+            mount_path = self._descriptor_mount_path(descriptor)
+            if self._is_prefix(base_path, mount_path):
+                matches.append(descriptor)
+        return matches
+
+    def _descriptor_mount_path(self, descriptor) -> PurePosixPath:
+        return PurePosixPath("/".join(descriptor.path_segments))
+
+    def _is_prefix(self, prefix: PurePosixPath, path: PurePosixPath) -> bool:
+        prefix_parts = () if prefix in (PurePosixPath(""), PurePosixPath(".")) else prefix.parts
+        path_parts = () if path in (PurePosixPath(""), PurePosixPath(".")) else path.parts
+        if len(prefix_parts) > len(path_parts):
+            return False
+        return path_parts[:len(prefix_parts)] == prefix_parts
+
+    def _path_parts(self, path: PurePosixPath) -> tuple[str, ...]:
+        if path in (PurePosixPath(""), PurePosixPath(".")):
+            return ()
+        return path.parts
+
+    def _has_cachelink_children(self, share, datadir_rel: PurePosixPath) -> bool:
+        datadir_parts = self._path_parts(datadir_rel)
+        for descriptor in self._cachelinks_for_share(share):
+            mount_path = self._descriptor_mount_path(descriptor)
+            mount_parts = self._path_parts(mount_path)
+            if self._is_prefix(datadir_rel, mount_path):
+                remainder = mount_parts[len(datadir_parts):]
+                if remainder:
+                    return True
+        return False
+
+    def _find_cachelink_for_path(self, share, datadir_rel: PurePosixPath) -> tuple[Any | None, PurePosixPath | None]:
+        best = None
+        best_len = -1
+        for descriptor in self._cachelinks_for_share(share):
+            mount_path = self._descriptor_mount_path(descriptor)
+            if self._is_prefix(mount_path, datadir_rel):
+                if len(self._path_parts(mount_path)) > best_len:
+                    best = descriptor
+                    best_len = len(self._path_parts(mount_path))
+        if not best:
+            return None, None
+        mount_path = self._descriptor_mount_path(best)
+        remainder = self._path_parts(datadir_rel)[len(self._path_parts(mount_path)):]
+        return best, PurePosixPath(*remainder) if remainder else PurePosixPath("")
+
+    def _lookup_cachelink_entry(self, descriptor, subpath: PurePosixPath) -> tuple[Any | None, bool]:
+        entries = self.service.index_db.list_entries_for_descriptor(descriptor)
+        normalized = self._normalize_entry_path(subpath)
+        has_child = False
+        for entry in entries:
+            entry_path = self._normalize_entry_path(entry.path)
+            if entry_path == normalized:
+                return entry, bool(entry.is_dir)
+            if self._is_prefix(normalized, entry_path):
+                has_child = True
+        return (None, has_child)
+
+    def _cachelink_children(self, descriptor, subpath: PurePosixPath) -> dict[str, bool]:
+        entries = self.service.index_db.list_entries_for_descriptor(descriptor)
+        normalized = self._normalize_entry_path(subpath)
+        children: dict[str, bool] = {}
+        normalized_parts = self._path_parts(normalized)
+        for entry in entries:
+            entry_path = self._normalize_entry_path(entry.path)
+            if not self._is_prefix(normalized, entry_path):
+                continue
+            remainder = self._path_parts(entry_path)[len(normalized_parts):]
+            if not remainder:
+                continue
+            name = remainder[0]
+            is_dir = bool(entry.is_dir) or len(remainder) > 1
+            children[name] = children.get(name, False) or is_dir
+        return children
+
+    def _normalize_entry_path(self, value: PurePosixPath | str) -> PurePosixPath:
+        text = str(value or "").strip("/")
+        if not text:
+            return PurePosixPath("")
+        return PurePosixPath(text)
+
+    def _frontend_path(self, frontend_root: str, share_rel: PurePosixPath, child: str) -> str:
+        base = PurePosixPath(frontend_root or "/")
+        rel = share_rel if share_rel != PurePosixPath(".") else PurePosixPath("")
+        full = base
+        if rel and rel != PurePosixPath(""):
+            full = full / rel
+        if child:
+            full = full / child
+        return full.as_posix()
 
 
 class DatadirFileResource:
     """File resource backed by datadir storage."""
-    
-    def __init__(self, path: str, service):
+
+    def __init__(self, path: str, service, datadir_rel: PurePosixPath, *, cache_state: str = "cached") -> None:
         self.path = path
         self.service = service
-        
+        self.datadir_rel = datadir_rel
+        self.cache_state = cache_state
+
     def get_content_length(self) -> int:
-        """Get file size."""
         try:
-            file_path = self.service.datadir_registry.primary.resolve(self.path)
+            file_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
             return file_path.stat().st_size
         except Exception:
             return 0
-            
+
     def get_last_modified(self) -> int:
-        """Get last modified time."""
         try:
-            file_path = self.service.datadir_registry.primary.resolve(self.path)
+            file_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
             return int(file_path.stat().st_mtime)
         except Exception:
             return 0
-            
+
     def get_etag(self) -> str:
-        """Get ETag."""
-        # Could implement checksum-based ETag
         return f'"{hash(self.path)}"'
-    
+
     def get_content(self):
-        """Get file content for serving."""
         try:
-            file_path = self.service.datadir_registry.primary.resolve(self.path)
-            return open(file_path, 'rb')
+            file_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            return open(file_path, "rb")
         except Exception as exc:
-            _logger.error(f"Failed to get content for {self.path}: {exc}")
+            _logger.error("Failed to get content for %s: %s", self.path, exc)
             return None
+
+    def get_property_value(self, name: Any):
+        key = _normalize_prop_name(name)
+        if key == "{urn:cacheinfinity}cache-state":
+            return self.cache_state
+        if key == "{urn:cacheinfinity}size-on-disk":
+            try:
+                file_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+                return str(file_path.stat().st_size)
+            except Exception:
+                return "0"
+        return None
 
 
 class CachelinkFileResource:
     """File resource from cachelink overlay with on-demand caching."""
-    
-    def __init__(self, path: str, service, cachelink):
+
+    def __init__(
+        self,
+        path: str,
+        service,
+        descriptor,
+        datadir_rel: PurePosixPath,
+        base_rel: PurePosixPath,
+        entry,
+        subpath: PurePosixPath,
+        *,
+        allow_cache: bool,
+    ) -> None:
         self.path = path
         self.service = service
-        self.cachelink = cachelink
-        
+        self.descriptor = descriptor
+        self.datadir_rel = datadir_rel
+        self.base_rel = base_rel
+        self.entry = entry
+        self.subpath = subpath
+        self.allow_cache = allow_cache
+
     def get_content_length(self) -> int:
-        """Get file size from cachelink metadata."""
-        try:
-            return self.cachelink.get_file_size(self.path)
-        except Exception:
-            return 0
-            
+        size = getattr(self.entry, "size", None)
+        return int(size) if size else 0
+
     def get_last_modified(self) -> int:
-        """Get last modified time from cachelink metadata."""
+        modified = getattr(self.entry, "modified", None)
+        if not modified:
+            return 0
         try:
-            return self.cachelink.get_file_modified(self.path)
+            return int(modified.timestamp())
         except Exception:
             return 0
-            
+
     def get_etag(self) -> str:
-        """Get ETag from cachelink metadata."""
-        try:
-            checksum = self.cachelink.get_file_checksum(self.path)
-            return f'"{checksum}"' if checksum else f'"{hash(self.path)}"'
-        except Exception:
-            return f'"{hash(self.path)}"'
-    
+        checksum = getattr(self.entry, "checksum", None)
+        return f'"{checksum}"' if checksum else f'"{hash(self.path)}"'
+
     def get_content(self):
-        """Get file content with on-demand fetching and caching."""
         try:
-            # First check if file exists in datadir storage
-            datadir_path = self.service.datadir_registry.primary.resolve(self.path)
+            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
             if datadir_path.exists():
-                return open(datadir_path, 'rb')
-            
-            # File not in datadir, need to fetch from remote
-            _logger.info(f"Fetching file on-demand: {self.path}")
-            
-            # Get the cachelink descriptor for this file
-            descriptor = self._get_descriptor_for_path()
-            if not descriptor:
-                _logger.error(f"No cachelink descriptor found for {self.path}")
+                self._record_access()
+                return open(datadir_path, "rb")
+            if not self.allow_cache:
                 return None
-            
-            # Calculate remote URL for this file
-            remote_url = self._build_remote_url(descriptor)
+            if self.descriptor.mode.value == "zip":
+                handle = self._handle_zip_download(datadir_path)
+                if handle:
+                    return handle
+                return None
+
+            remote_url = self._build_remote_url()
             if not remote_url:
-                _logger.error(f"Could not build remote URL for {self.path}")
+                _logger.error("Could not build remote URL for %s", self.path)
                 return None
-            
-            # Use staging area for download
-            staging_path = self.service.staging.get_available_path(self.path)
-            
-            # Download file using fetcher
+            staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
             result = self.service.fetcher.download_file(remote_url, staging_path)
-            
             if not result.success:
-                _logger.error(f"Failed to download {self.path}: {result.error_message}")
+                _logger.error("Failed to download %s: %s", self.path, result.error_message)
+                self._mark_reindex_on_failure(result.error_message or "")
+                try:
+                    if staging_path.exists():
+                        staging_path.unlink()
+                except OSError:
+                    pass
                 return None
-            
-            # Move from staging to datadir
-            final_path = self.service.datadir_registry.primary.resolve(self.path)
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Atomic move from staging to datadir
+            datadir_path.parent.mkdir(parents=True, exist_ok=True)
             import shutil
-            shutil.move(str(staging_path), str(final_path))
-            
-            # Record file access for hotness tracking
-            self.service.index_db.record_access(self.path, "webdav_user")
-            
-            _logger.info(f"Successfully cached file: {self.path}")
-            
-            # Return file content
-            return open(final_path, 'rb')
-            
+            shutil.move(str(staging_path), str(datadir_path))
+            self._record_backend_checksum(datadir_path)
+            self._record_access()
+            return open(datadir_path, "rb")
         except Exception as exc:
-            _logger.error(f"Failed to get content for {self.path}: {exc}")
+            _logger.error("Failed to get content for %s: %s", self.path, exc)
             return None
-    
-    def _get_descriptor_for_path(self):
-        """Get cachelink descriptor for the given path."""
+
+    def get_property_value(self, name: Any):
+        key = _normalize_prop_name(name)
+        if key == "{urn:cacheinfinity}cache-state":
+            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            if not datadir_path.exists():
+                return "remote"
+            return "cached" if self.service.index_db.lookup_backend_checksum(self.datadir_rel) else "local-only"
+        if key == "{urn:cacheinfinity}size-on-disk":
+            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            try:
+                return str(datadir_path.stat().st_size) if datadir_path.exists() else "0"
+            except Exception:
+                return "0"
+        return None
+
+    def _build_remote_url(self) -> str | None:
+        relative = self.subpath.as_posix().lstrip("/")
+        if not relative:
+            return None
+        base = self.descriptor.download_root.rstrip("/")
+        subfolder = self.descriptor.subfolder.strip("/")
+        if self.descriptor.mode.value == "zip":
+            zip_path, inner = _split_zip_subfolder(subfolder)
+            if not zip_path:
+                return None
+            inner = inner.strip("/")
+            if inner:
+                return f"{base}/{zip_path}/{inner}/{relative}"
+            return f"{base}/{zip_path}/{relative}"
+        if subfolder:
+            return f"{base}/{subfolder}/{relative}"
+        return f"{base}/{relative}"
+
+    def _record_access(self) -> None:
         try:
-            # Find the cachelink that contains this path
-            for descriptor in self.service.cachelinks.cachelinks.values():
-                # Check if this path is under this cachelink's datadir folder
-                datadir_folder = descriptor.backend_relative_folder
-                if self.path.startswith(str(datadir_folder)):
-                    return descriptor
-            return None
+            state = self.service.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
         except Exception:
-            return None
-    
-    def _build_remote_url(self, descriptor):
-        """Build remote URL for the given file path."""
+            return
+        relative_path = self.subpath.as_posix().lstrip("/")
+        if not relative_path:
+            return
+        self.service.index_db.record_access(state.id, relative_path)
+        parent = PurePosixPath(relative_path).parent
+        for _ in range(2):
+            if str(parent) == ".":
+                break
+            self.service.index_db.record_access(state.id, parent.as_posix())
+            parent = parent.parent
+
+    def _mark_reindex_on_failure(self, error_message: str) -> None:
+        lowered = error_message.lower()
+        if "404" not in lowered and "5xx" not in lowered and "http 5" not in lowered:
+            return
         try:
-            # Calculate relative path within the cachelink
-            datadir_folder = str(descriptor.backend_relative_folder)
-            if self.path.startswith(datadir_folder):
-                relative_path = self.path[len(datadir_folder):].lstrip('/')
-            else:
-                relative_path = self.path.lstrip('/')
-            
-            # Build remote URL
-            remote_base = descriptor.download_root
-            if descriptor.subfolder and descriptor.subfolder != '/':
-                remote_url = f"{remote_base.rstrip('/')}/{descriptor.subfolder.lstrip('/')}/{relative_path}"
-            else:
-                remote_url = f"{remote_base.rstrip('/')}/{relative_path}"
-            
-            return remote_url
+            state = self.service.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
+            self.service.index_db.mark_needs_full(state.id)
         except Exception:
+            return
+
+    def _record_backend_checksum(self, datadir_path) -> None:
+        try:
+            sha256 = hashlib.sha256()
+            with open(datadir_path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    sha256.update(chunk)
+            self.service.index_db.record_backend_checksum(
+                self.datadir_rel,
+                "sha256",
+                sha256.hexdigest(),
+                source="download",
+            )
+        except Exception:
+            return
+
+    def _handle_zip_download(self, datadir_path: "Path"):
+        import zipfile
+        limits = self.service.settings.limits
+        max_bytes = max(0, limits.max_zip_total_gb) * 1024**3
+        zip_path, inner = _split_zip_subfolder(self.descriptor.subfolder)
+        if not zip_path:
             return None
+        inner = inner.strip("/")
+        base = self.descriptor.download_root.rstrip("/")
+        remote_zip_url = f"{base}/{zip_path}"
+
+        lock = getattr(self.service, "_zip_cache_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self.service._zip_cache_lock = lock
+        use_whole_zip = True
+        acquired = False
+        if limits.one_zip_cache_at_a_time:
+            acquired = lock.acquire(blocking=False)
+            if not acquired:
+                use_whole_zip = False
+
+        if not use_whole_zip:
+            return self._download_single_file(datadir_path)
+
+        staging_zip = self.service.staging.reserve_tempfile("zip")
+        result = self.service.fetcher.download_file(remote_zip_url, staging_zip)
+        if not result.success:
+            lock.release()
+            _logger.error("Failed to download zip %s: %s", remote_zip_url, result.error_message)
+            self._mark_reindex_on_failure(result.error_message or "")
+            try:
+                if staging_zip.exists():
+                    staging_zip.unlink()
+            except OSError:
+                pass
+            return None
+
+        try:
+            zip_size = staging_zip.stat().st_size
+            if max_bytes and zip_size > max_bytes:
+                _logger.info("Zip size exceeds limit; falling back to per-file download")
+                release_lock = lock if acquired else None
+                return self._download_single_file(datadir_path, cleanup_path=staging_zip, release_lock=release_lock)
+
+            with zipfile.ZipFile(staging_zip, "r") as archive:
+                members = [info for info in archive.infolist() if not info.is_dir()]
+                prefix = inner.strip("/") + "/" if inner else ""
+                filtered = [
+                    info for info in members if info.filename.startswith(prefix)
+                ]
+                total_uncompressed = sum(info.file_size for info in filtered)
+                if max_bytes and total_uncompressed > max_bytes:
+                    _logger.info("Zip uncompressed size exceeds limit; falling back to per-file download")
+                    release_lock = lock if acquired else None
+                    return self._download_single_file(datadir_path, cleanup_path=staging_zip, release_lock=release_lock)
+
+                for info in filtered:
+                    relative_name = info.filename[len(prefix):] if prefix else info.filename
+                    if not relative_name:
+                        continue
+                    rel_path = PurePosixPath(relative_name)
+                    if rel_path.is_absolute() or ".." in rel_path.parts:
+                        continue
+                    dest_rel = self.base_rel / rel_path
+                    dest_path = self.service.datadir_registry.primary.resolve(dest_rel)
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as src, open(dest_path, "wb") as dst:
+                        for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                            dst.write(chunk)
+                    self._record_backend_checksum(dest_path)
+            self._record_access()
+            if acquired:
+                lock.release()
+                acquired = False
+            return open(datadir_path, "rb") if datadir_path.exists() else None
+        finally:
+            try:
+                if staging_zip.exists():
+                    staging_zip.unlink()
+            except OSError:
+                pass
+            if acquired:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def _download_single_file(self, datadir_path: "Path", *, cleanup_path: "Path | None" = None, release_lock=None):
+        if cleanup_path is not None:
+            try:
+                if cleanup_path.exists():
+                    cleanup_path.unlink()
+            except OSError:
+                pass
+        if release_lock is not None:
+            try:
+                release_lock.release()
+            except Exception:
+                pass
+        remote_url = self._build_remote_url()
+        if not remote_url:
+            return None
+        staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
+        result = self.service.fetcher.download_file(remote_url, staging_path)
+        if not result.success:
+            _logger.error("Failed to download %s: %s", self.path, result.error_message)
+            self._mark_reindex_on_failure(result.error_message or "")
+            try:
+                if staging_path.exists():
+                    staging_path.unlink()
+            except OSError:
+                pass
+            return None
+        datadir_path.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.move(str(staging_path), str(datadir_path))
+        self._record_backend_checksum(datadir_path)
+        self._record_access()
+        return open(datadir_path, "rb")
 
 
 class CachelinkDirectoryResource:
     """Directory resource with cachelink overlay."""
-    
-    def __init__(self, path: str, service):
+
+    def __init__(
+        self,
+        path: str,
+        service,
+        share,
+        share_rel: PurePosixPath,
+        datadir_rel: PurePosixPath,
+        *,
+        descriptor=None,
+        cache_state: str = "remote",
+    ) -> None:
         self.path = path
         self.service = service
-        
+        self.share = share
+        self.share_rel = share_rel
+        self.datadir_rel = datadir_rel
+        self.descriptor = descriptor
+        self.cache_state = cache_state
+
     def get_content_length(self) -> int:
-        """Get directory size."""
-        return 0  # Directories don't have content length
-        
+        return 0
+
     def get_last_modified(self) -> int:
-        """Get last modified time."""
-        return int(time.time())  # Could be more sophisticated
-        
+        return int(time.time())
+
     def get_etag(self) -> str:
-        """Get ETag."""
         return f'"{hash(self.path)}"'
+
+    def get_property_value(self, name: Any):
+        key = _normalize_prop_name(name)
+        if key == "{urn:cacheinfinity}cache-state":
+            return self.cache_state
+        if key == "{urn:cacheinfinity}size-on-disk":
+            return "0"
+        return None

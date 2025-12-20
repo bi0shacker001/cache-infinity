@@ -28,6 +28,32 @@ def _import_pycurl():
     return pycurl
 
 
+def _import_rclone():
+    try:
+        from rclone_python import rclone  # type: ignore
+    except ModuleNotFoundError as exc:  # pragma: no cover
+        raise ModuleNotFoundError(
+            "rclone-python is required for rclone:// transfers. "
+            "Install project dependencies (including 'rclone-python') to enable cloud downloads."
+        ) from exc
+    return rclone
+
+
+def _is_rclone_url(url: str) -> bool:
+    return url.startswith("rclone:") or url.startswith("rclone://")
+
+
+def _rclone_spec(url: str) -> str:
+    if url.startswith("rclone://"):
+        parsed = urlparse(url)
+        remote = parsed.netloc
+        path = parsed.path.lstrip("/")
+        return f"{remote}:{path}"
+    if url.startswith("rclone:"):
+        return url[len("rclone:"):]
+    return url
+
+
 @dataclass
 class DownloadResult:
     """Result of a download operation."""
@@ -103,6 +129,12 @@ class Fetcher:
         Returns:
             DownloadResult with operation status and checksum
         """
+        if _is_rclone_url(url):
+            return self._download_rclone(
+                url=url,
+                destination=destination,
+                expected_checksum=expected_checksum,
+            )
         pycurl = _import_pycurl()
         start_time = time.time()
         domain = self._extract_domain(url)
@@ -223,11 +255,7 @@ class Fetcher:
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         cookie_definition = self.cookie_jars.get(domain)
-        cookie_path = (
-            cookie_definition.cookie_jar
-            if cookie_definition and cookie_definition.cookie_jar and cookie_definition.cookie_jar.exists()
-            else None
-        )
+        cookie_content = self._load_cookie_content(cookie_definition)
         userpwd = self._read_basic_auth(cookie_definition.credfile) if cookie_definition else None
 
         start_ts = time.time()
@@ -282,9 +310,8 @@ class Fetcher:
                 if existing_size > 0:
                     curl.setopt(pycurl.RESUME_FROM, int(existing_size))
 
-                if cookie_path is not None:
-                    curl.setopt(pycurl.COOKIEFILE, str(cookie_path))
-                    curl.setopt(pycurl.COOKIEJAR, str(cookie_path))
+                if cookie_content:
+                    self._apply_cookies(curl, pycurl, cookie_content)
 
                 if userpwd:
                     curl.setopt(pycurl.USERPWD, userpwd)
@@ -303,6 +330,61 @@ class Fetcher:
         if status_code in (200, 206):
             return True, status_code, None
         return False, status_code, f"HTTP {status_code}"
+
+    def _download_rclone(
+        self,
+        *,
+        url: str,
+        destination: Path,
+        expected_checksum: Optional[str] = None,
+    ) -> DownloadResult:
+        start_time = time.time()
+        remote = _rclone_spec(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        last_error: str | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                rclone = _import_rclone()
+                if hasattr(rclone, "copyto"):
+                    rclone.copyto(remote, str(destination))
+                elif hasattr(rclone, "copy"):
+                    rclone.copy(remote, str(destination.parent))
+                else:
+                    raise RuntimeError("rclone-python missing copy/copyto support")
+
+                if not destination.exists():
+                    raise RuntimeError("Rclone transfer finished but destination is missing")
+                size = destination.stat().st_size
+                duration = time.time() - start_time
+                checksum = None
+                verified = False
+                if self.verify_checksums and size > 0:
+                    try:
+                        checksum = self.checksum_calc.calculate_sha256(destination)
+                        if expected_checksum:
+                            verified = checksum.lower() == expected_checksum.lower()
+                    except Exception as exc:
+                        _logger.warning("Failed to calculate checksum for %s: %s", destination, exc)
+                return DownloadResult(
+                    success=True,
+                    file_path=destination,
+                    size=size,
+                    duration=duration,
+                    checksum=checksum,
+                    verified=verified,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                _logger.warning("Rclone download failed (attempt %d/%d): %s", attempt + 1, self.max_retries + 1, exc)
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+        return DownloadResult(
+            success=False,
+            file_path=None,
+            size=0,
+            duration=time.time() - start_time,
+            error_message=last_error or "Rclone transfer failed",
+        )
         
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL.
@@ -342,6 +424,26 @@ class Fetcher:
         if username and password:
             return f"{username}:{password}"
         return None
+
+    def _load_cookie_content(self, cookie_definition: CookieJarDefinition | None) -> str:
+        if not cookie_definition:
+            return ""
+        if cookie_definition.cookie_content:
+            return cookie_definition.cookie_content
+        if cookie_definition.cookie_jar and cookie_definition.cookie_jar.exists():
+            try:
+                return cookie_definition.cookie_jar.read_text(encoding="utf-8")
+            except OSError as exc:
+                _logger.warning("Failed to read cookies from %s: %s", cookie_definition.cookie_jar, exc)
+        return ""
+
+    def _apply_cookies(self, curl, pycurl, cookie_content: str) -> None:
+        curl.setopt(pycurl.COOKIELIST, "ALL")
+        for line in cookie_content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            curl.setopt(pycurl.COOKIELIST, stripped)
     
     def check_file_availability(self, url: str, timeout: int = 30) -> bool:
         """Check if a file is available for download.
@@ -405,30 +507,26 @@ class Fetcher:
             'elapsed': 0
         }
     
-    def refresh_cookies(self, domain: str) -> bool:
+    def refresh_cookies(self, domain: str) -> tuple[bool, str | None]:
         """Refresh cookies for a specific domain using credentials.
         
         Args:
             domain: Domain to refresh cookies for
             
         Returns:
-            True if cookies were refreshed successfully, False otherwise
+            Tuple of (success, cookie_content)
         """
         pycurl = _import_pycurl()
         cookie_jar = self.cookie_jars.get(domain)
         if not cookie_jar or not cookie_jar.credfile or not cookie_jar.credfile.exists():
             _logger.warning(f"No credentials available for domain: {domain}")
-            return False
-
-        if not cookie_jar.cookie_jar:
-            _logger.warning("No cookie jar path configured for domain: %s", domain)
-            return False
+            return False, None
         
         try:
             userpwd = self._read_basic_auth(cookie_jar.credfile)
             if not userpwd:
                 _logger.error("Invalid credentials format for domain: %s", domain)
-                return False
+                return False, None
             
             # Try to refresh cookies by making a request to a known endpoint
             # This would typically be a login endpoint specific to the domain
@@ -440,7 +538,7 @@ class Fetcher:
             refresh_url = refresh_urls.get(domain)
             if not refresh_url:
                 _logger.warning(f"No known refresh endpoint for domain: {domain}")
-                return False
+                return False, None
 
             sink = io.BytesIO()
             curl = pycurl.Curl()
@@ -455,24 +553,37 @@ class Fetcher:
                 curl.setopt(pycurl.WRITEDATA, sink)
                 curl.setopt(pycurl.SSL_VERIFYPEER, 1)
                 curl.setopt(pycurl.SSL_VERIFYHOST, 2)
-                curl.setopt(pycurl.COOKIEFILE, str(cookie_jar.cookie_jar))
-                curl.setopt(pycurl.COOKIEJAR, str(cookie_jar.cookie_jar))
+                cookie_content = self._load_cookie_content(cookie_jar)
+                if cookie_content:
+                    self._apply_cookies(curl, pycurl, cookie_content)
                 curl.setopt(pycurl.USERPWD, userpwd)
                 curl.perform()
                 status_code = int(curl.getinfo(pycurl.RESPONSE_CODE) or 0)
+                cookie_list = curl.getinfo(pycurl.INFO_COOKIELIST)
             finally:
                 curl.close()
 
             if 200 <= status_code < 400:
+                cookie_text = self._format_cookie_list(cookie_list)
                 _logger.debug("Successfully refreshed cookies for domain: %s", domain)
-                return True
+                return True, cookie_text
 
             _logger.warning("Failed to refresh cookies for domain %s: HTTP %d", domain, status_code)
-            return False
+            return False, None
                 
         except Exception as e:
             _logger.error(f"Error refreshing cookies for domain {domain}: {e}")
-            return False
+            return False, None
+
+    def _format_cookie_list(self, cookie_list: list[str] | None) -> str:
+        if not cookie_list:
+            return ""
+        header = [
+            "# Netscape HTTP Cookie File",
+            "# This file is generated by CacheInfinity.",
+        ]
+        lines = header + [line for line in cookie_list if line and not line.startswith("#")]
+        return "\n".join(lines) + "\n"
     
     def batch_download(self, downloads: List[Dict[str, Any]],
                       max_concurrent: int = 3) -> Dict[str, DownloadResult]:

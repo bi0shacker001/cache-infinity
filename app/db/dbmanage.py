@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import logging
 import shutil
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
+
+import yaml
+
+from core.errors import ConfigError
 
 from .adapter import DBAdapter
 from .schema import IndexDatabase
 
 if TYPE_CHECKING:
-    from core.config import DatabaseSettings
+    from db.settings import DatabaseSettings
 
 _logger = logging.getLogger(__name__)
 
@@ -100,6 +105,119 @@ class DatabaseManager:
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
+
+
+@dataclass
+class DatabaseSettings:
+    """Database configuration settings."""
+
+    engine: str = "sqlite"
+    config_dir: Optional[Path] = None
+    sqlite_path: Optional[Path] = None
+    postgres_dsn: str = ""
+    redis_enabled: bool = False
+    redis_url: str = "redis://localhost:6379/0"
+    db_type: Optional[str] = None
+    database_url: Optional[str] = None
+    db_user: Optional[str] = None
+    db_password: Optional[str] = None
+
+    def validate(self) -> None:
+        if self.engine not in ("sqlite", "postgres"):
+            raise ConfigError(f"Invalid database engine: {self.engine}")
+        if self.engine == "postgres" and not self.postgres_dsn:
+            raise ConfigError("PostgreSQL requires postgres_dsn")
+        if self.engine == "sqlite" and self.sqlite_path is None:
+            self.sqlite_path = self.config_dir / "cacheinfinity.db" if self.config_dir else Path("cacheinfinity.db")
+
+
+def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
+    """Load database settings with priority: args > env > database.yml."""
+    config_payload = validate_database_yml(config_dir / "database.yml")
+    config_db = config_payload.get("database", {}) if config_payload else {}
+
+    db_type = None
+    if hasattr(args, "db_type") and args.db_type:
+        db_type = args.db_type
+    elif "DB_TYPE" in env:
+        db_type = env["DB_TYPE"]
+    elif config_db.get("engine"):
+        db_type = config_db.get("engine")
+
+    database_url = None
+    if hasattr(args, "database_url") and args.database_url:
+        database_url = args.database_url
+    elif "DATABASE_URL" in env:
+        database_url = env["DATABASE_URL"]
+    elif "CACHEINFINITY_DATABASE_URL" in env:
+        database_url = env["CACHEINFINITY_DATABASE_URL"]
+    elif config_db.get("url"):
+        database_url = config_db.get("url")
+
+    db_user = None
+    if hasattr(args, "db_user") and args.db_user:
+        db_user = args.db_user
+    elif "DB_USER" in env:
+        db_user = env["DB_USER"]
+    elif config_db.get("user"):
+        db_user = config_db.get("user")
+
+    db_password = None
+    if hasattr(args, "db_password") and args.db_password:
+        db_password = args.db_password
+    elif "DB_PASS" in env:
+        db_password = env["DB_PASS"]
+    elif config_db.get("password"):
+        db_password = config_db.get("password")
+
+    normalized_db_type = db_type.lower().strip() if db_type else ""
+    if not normalized_db_type and database_url:
+        normalized_db_type = "postgres"
+
+    if normalized_db_type in ("postgresql", "postgres"):
+        return DatabaseSettings(
+            engine="postgres",
+            config_dir=config_dir,
+            postgres_dsn=database_url or "",
+            db_type="postgres",
+            database_url=database_url,
+            db_user=db_user,
+            db_password=db_password,
+        )
+
+    if normalized_db_type not in ("sqlite", ""):
+        normalized_db_type = "sqlite"
+
+    return DatabaseSettings(
+        engine="sqlite",
+        config_dir=config_dir,
+        sqlite_path=config_dir / "cacheinfinity.db",
+        postgres_dsn="",
+        db_type="sqlite",
+    )
+
+
+def validate_database_yml(database_path: Path) -> dict:
+    """Validate that database.yml only contains database configuration."""
+    if not database_path.exists():
+        return {}
+
+    try:
+        with database_path.open("r", encoding="utf-8") as handle:
+            config_data = yaml.safe_load(handle) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML in database.yml: {exc}") from exc
+
+    allowed_keys = {"database"}
+    config_keys = set(config_data.keys()) if config_data else set()
+    invalid_keys = config_keys - allowed_keys
+    if invalid_keys:
+        raise ConfigError(
+            "database.yml may only contain 'database' configuration. "
+            f"Found invalid keys: {invalid_keys}"
+        )
+
+    return config_data
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_time ON indexing_log(timestamp)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_cachelink ON indexed_entries(cachelink_id)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_path ON indexed_entries(relative_path)")

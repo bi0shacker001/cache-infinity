@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -11,7 +14,63 @@ from typing import Iterable, Sequence, Protocol
 
 from cache.cachelinks import CachelinkDescriptor
 from core.errors import ConfigError
-from auth.credentials import CredentialStore
+
+_HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
+_HASH_SCHEME_SHA256 = "sha256"
+_HASH_DEFAULT_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, *, iterations: int = _HASH_DEFAULT_ITERATIONS) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    )
+    return f"{_HASH_SCHEME_PBKDF2}${iterations}${salt}${digest.hex()}"
+
+
+def _normalize_password_hash(password_hash: str | None) -> str | None:
+    if not password_hash:
+        return None
+    if "$" in password_hash:
+        return password_hash
+    return f"{_HASH_SCHEME_SHA256}${password_hash}"
+
+
+def _verify_password_hash(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    if "$" not in stored_hash:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest() == stored_hash
+    parts = stored_hash.split("$")
+    scheme = parts[0]
+    if scheme == _HASH_SCHEME_PBKDF2 and len(parts) == 4:
+        try:
+            iterations = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+            expected = parts[3]
+        except ValueError:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+        ).hex()
+        return secrets.compare_digest(digest, expected)
+    if scheme == _HASH_SCHEME_SHA256:
+        if len(parts) == 2:
+            expected = parts[1]
+            digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+        if len(parts) == 3:
+            salt = parts[1]
+            expected = parts[2]
+            digest = hashlib.sha256(f"{salt}{password}".encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+    return False
 
 
 @dataclass
@@ -168,14 +227,38 @@ class IndexDatabase:
             self._db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS config_cookies (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    domain TEXT UNIQUE NOT NULL,
-                    cookie_content TEXT NOT NULL,  -- Full cookie jar content stored in database
-                    credfile_path TEXT,            -- Path to credential file (if used)
-                    updated_at TEXT NOT NULL
+                    domain TEXT PRIMARY KEY,
+                    cookie_b64 TEXT NOT NULL,  -- Base64-encoded Netscape cookie jar content
+                    captured_at TEXT NOT NULL
                 )
                 """
             )
+            try:
+                columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_cookies)")}
+                if "cookie_content" in columns:
+                    if "cookie_b64" not in columns:
+                        self._db.execute("ALTER TABLE config_cookies ADD COLUMN cookie_b64 TEXT")
+                        self._db.commit()
+                    if "captured_at" not in columns:
+                        self._db.execute("ALTER TABLE config_cookies ADD COLUMN captured_at TEXT")
+                        self._db.commit()
+                    rows = self._db.fetchall(
+                        "SELECT id, domain, cookie_content, cookie_b64, captured_at FROM config_cookies"
+                    )
+                    for row in rows:
+                        cookie_content = row.get("cookie_content")
+                        cookie_b64 = row.get("cookie_b64")
+                        captured_at = row.get("captured_at") or datetime.now(timezone.utc).isoformat()
+                        if cookie_b64 or cookie_content is None:
+                            continue
+                        encoded = base64.b64encode(cookie_content.encode("utf-8")).decode("ascii")
+                        self._db.execute(
+                            "UPDATE config_cookies SET cookie_b64 = ?, captured_at = ? WHERE id = ?",
+                            (encoded, captured_at, row["id"]),
+                        )
+                    self._db.commit()
+            except Exception:
+                self._db.rollback()
             
             self._db.execute(
                 """
@@ -262,7 +345,7 @@ class IndexDatabase:
                 """
                 CREATE TABLE IF NOT EXISTS config_settings_snapshot (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
-                    settings_text TEXT,        -- Full settings.yaml content
+                    settings_text TEXT,        -- Full bootstrap.yml content
                     bootstrap_text TEXT,       -- Full bootstrap.yaml content (includes cachelinks and credentials)
                     updated_at TEXT NOT NULL
                 )
@@ -1024,19 +1107,6 @@ class IndexDatabase:
                 )
                 self._db.commit()
 
-    def sync_users_from_config(self, store: CredentialStore | None) -> None:
-        if not store:
-            return
-        for record in store.users.values():
-            self.upsert_auth_user(
-                record.username,
-                password_plain=record.password_plain,
-                password_hash=record.password_hash,
-                enabled=record.enabled,
-                is_admin=False,
-                purpose="webdav",
-            )
-
     def upsert_auth_user(
         self,
         username: str,
@@ -1159,13 +1229,24 @@ class IndexDatabase:
         if require_admin and not user["is_admin"]:
             self._logger.warning("User not admin: %s", username)
             return False
-        if user.get("password_plain") and password == user["password_plain"]:
+        stored_plain = user.get("password_plain")
+        stored_hash = _normalize_password_hash(user.get("password_hash"))
+        if stored_plain and password == stored_plain:
+            if not stored_hash:
+                stored_hash = _hash_password(password)
+                if purpose not in ("webdav", "cli") and username != "cli-backend":
+                    stored_plain = None
+                with self._lock:
+                    self._db.execute(
+                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ? AND purpose = ?",
+                        (stored_plain, stored_hash, username, purpose),
+                    )
+                    self._db.commit()
             self._logger.info("Successful authentication for user: %s", username)
             return True
-        if user.get("password_hash"):
-            # Placeholder for future hash verification
-            self._logger.warning("Hash-based authentication not yet implemented for user: %s", username)
-            return False
+        if stored_hash and _verify_password_hash(password, stored_hash):
+            self._logger.info("Successful hash authentication for user: %s", username)
+            return True
         self._logger.warning("No password found for user: %s", username)
         return False
 
@@ -1482,61 +1563,96 @@ class IndexDatabase:
     def get_cookie(self, domain: str) -> dict | None:
         """Get cookie configuration by domain."""
         with self._lock:
-            row = self._db.fetchone(
-                """
-                SELECT domain, cookie_content, credfile_path, updated_at
-                FROM config_cookies
-                WHERE domain = ?
-                """,
-                (domain,),
-            )
+            try:
+                row = self._db.fetchone(
+                    """
+                    SELECT domain, cookie_b64, captured_at
+                    FROM config_cookies
+                    WHERE domain = ?
+                    """,
+                    (domain.lower(),),
+                )
+            except Exception:
+                row = self._db.fetchone(
+                    """
+                    SELECT domain, cookie_content, updated_at
+                    FROM config_cookies
+                    WHERE domain = ?
+                    """,
+                    (domain.lower(),),
+                )
         if not row:
             return None
+        cookie_b64 = row.get("cookie_b64")
+        if not cookie_b64 and row.get("cookie_content") is not None:
+            cookie_b64 = base64.b64encode(row["cookie_content"].encode("utf-8")).decode("ascii")
+        cookie_content = (
+            base64.b64decode(cookie_b64.encode("ascii")).decode("utf-8")
+            if cookie_b64
+            else (row.get("cookie_content") or "")
+        )
         return {
             "domain": row["domain"],
-            "cookie_content": row["cookie_content"],
-            "credfile_path": row["credfile_path"],
-            "updated_at": row["updated_at"],
+            "cookie_content": cookie_content,
+            "captured_at": row.get("captured_at") or row.get("updated_at"),
         }
 
     def get_all_cookies(self) -> list[dict]:
         """Get all cookie configurations."""
         with self._lock:
-            rows = self._db.fetchall(
-                """
-                SELECT domain, cookie_content, credfile_path, updated_at
-                FROM config_cookies
-                ORDER BY domain
-                """
+            try:
+                rows = self._db.fetchall(
+                    """
+                    SELECT domain, cookie_b64, captured_at
+                    FROM config_cookies
+                    ORDER BY domain
+                    """
+                )
+            except Exception:
+                rows = self._db.fetchall(
+                    """
+                    SELECT domain, cookie_content, updated_at
+                    FROM config_cookies
+                    ORDER BY domain
+                    """
+                )
+        cookies: list[dict] = []
+        for row in rows:
+            cookie_b64 = row.get("cookie_b64")
+            if not cookie_b64 and row.get("cookie_content") is not None:
+                cookie_b64 = base64.b64encode(row["cookie_content"].encode("utf-8")).decode("ascii")
+            cookie_content = (
+                base64.b64decode(cookie_b64.encode("ascii")).decode("utf-8")
+                if cookie_b64
+                else (row.get("cookie_content") or "")
             )
-        return [
-            {
-                "domain": row["domain"],
-                "cookie_content": row["cookie_content"],
-                "credfile_path": row["credfile_path"],
-                "updated_at": row["updated_at"],
-            }
-            for row in rows
-        ]
+            cookies.append(
+                {
+                    "domain": row["domain"],
+                    "cookie_content": cookie_content,
+                    "captured_at": row.get("captured_at") or row.get("updated_at"),
+                }
+            )
+        return cookies
 
     def save_cookie(self, cookie: dict) -> None:
         """Save cookie configuration."""
-        now = datetime.now(timezone.utc).isoformat()
+        captured_at = cookie.get("captured_at") or datetime.now(timezone.utc).isoformat()
+        cookie_content = cookie.get("cookie_content") or ""
+        cookie_b64 = base64.b64encode(cookie_content.encode("utf-8")).decode("ascii")
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO config_cookies (domain, cookie_content, credfile_path, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO config_cookies (domain, cookie_b64, captured_at)
+                VALUES (?, ?, ?)
                 ON CONFLICT(domain) DO UPDATE SET
-                    cookie_content = excluded.cookie_content,
-                    credfile_path = excluded.credfile_path,
-                    updated_at = excluded.updated_at
+                    cookie_b64 = excluded.cookie_b64,
+                    captured_at = excluded.captured_at
                 """,
                 (
                     cookie["domain"],
-                    cookie["cookie_content"],
-                    cookie["credfile_path"],
-                    now,
+                    cookie_b64,
+                    captured_at,
                 ),
             )
             self._db.commit()
@@ -1758,6 +1874,12 @@ class IndexDatabase:
     def save_user(self, user: dict) -> None:
         """Save user configuration."""
         now = datetime.now(timezone.utc).isoformat()
+        password_plain = user.get("password_plain")
+        password_hash = _normalize_password_hash(user.get("password_hash"))
+        if password_plain:
+            password_hash = _hash_password(password_plain)
+            if user.get("purpose") != "cli" and user.get("username") != "cli-backend":
+                password_plain = None
         with self._lock:
             self._db.execute(
                 """
@@ -1773,8 +1895,8 @@ class IndexDatabase:
                 """,
                 (
                     user["username"],
-                    user["password_plain"],
-                    user["password_hash"],
+                    password_plain,
+                    password_hash,
                     1 if user["enabled"] else 0,
                     1 if user["is_admin"] else 0,
                     user["purpose"],
@@ -1903,18 +2025,23 @@ class IndexDatabase:
             )
             
             now = datetime.now(timezone.utc).isoformat()
+            normalized_hash = _normalize_password_hash(password_hash)
+            if password_plain:
+                normalized_hash = _hash_password(password_plain)
+                if purpose != "cli" and username != "cli-backend":
+                    password_plain = None
             
             if existing:
                 # Update existing user
                 self._db.execute(
                     "UPDATE auth_users SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, purpose = ?, updated_at = ? WHERE username = ?",
-                    (password_plain, password_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, username)
+                    (password_plain, normalized_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, username)
                 )
             else:
                 # Create new user
                 self._db.execute(
                     "INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (username, password_plain, password_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, now)
+                    (username, password_plain, normalized_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, now)
                 )
             
             self._db.commit()
@@ -1987,15 +2114,25 @@ class IndexDatabase:
                 return False
             
             stored_plain = result.get('password_plain')
-            stored_hash = result.get('password_hash')
+            stored_hash = _normalize_password_hash(result.get('password_hash'))
+            purpose = result.get("purpose")
             
             # Check plain text password first (for backward compatibility)
             if stored_plain and stored_plain == password:
+                if not stored_hash:
+                    stored_hash = _hash_password(password)
+                    if purpose != "cli" and username != "cli-backend":
+                        stored_plain = None
+                    self._db.execute(
+                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ?",
+                        (stored_plain, stored_hash, username),
+                    )
+                    self._db.commit()
                 self._logger.info("Successful plain text authentication for user: %s", username)
                 return True
             
             # Check hashed password
-            if stored_hash and self._verify_password_hash(password, stored_hash):
+            if stored_hash and _verify_password_hash(password, stored_hash):
                 self._logger.info("Successful hash authentication for user: %s", username)
                 return True
             
@@ -2007,8 +2144,7 @@ class IndexDatabase:
 
     def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
         """Verify a password against its hash."""
-        import hashlib
-        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+        return _verify_password_hash(password, stored_hash)
 
 
 def _parse_ts(value: str | None) -> datetime | None:

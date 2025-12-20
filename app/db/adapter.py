@@ -9,6 +9,8 @@ for executing queries and fetching rows as dicts, plus Redis caching operations.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,63 @@ from core.errors import ConfigError
 from .backends.postgresql import PostgreSQLBackend
 from .backends.redis import RedisBackend
 from .backends.sqlite import SQLiteBackend
+
+_HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
+_HASH_SCHEME_SHA256 = "sha256"
+_HASH_DEFAULT_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, *, iterations: int = _HASH_DEFAULT_ITERATIONS) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    )
+    return f"{_HASH_SCHEME_PBKDF2}${iterations}${salt}${digest.hex()}"
+
+
+def _normalize_password_hash(password_hash: str | None) -> str | None:
+    if not password_hash:
+        return None
+    if "$" in password_hash:
+        return password_hash
+    return f"{_HASH_SCHEME_SHA256}${password_hash}"
+
+
+def _verify_password_hash(password: str, stored_hash: str) -> bool:
+    if not stored_hash:
+        return False
+    if "$" not in stored_hash:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest() == stored_hash
+    parts = stored_hash.split("$")
+    scheme = parts[0]
+    if scheme == _HASH_SCHEME_PBKDF2 and len(parts) == 4:
+        try:
+            iterations = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+            expected = parts[3]
+        except ValueError:
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            iterations,
+        ).hex()
+        return secrets.compare_digest(digest, expected)
+    if scheme == _HASH_SCHEME_SHA256:
+        if len(parts) == 2:
+            expected = parts[1]
+            digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+        if len(parts) == 3:
+            salt = parts[1]
+            expected = parts[2]
+            digest = hashlib.sha256(f"{salt}{password}".encode("utf-8")).hexdigest()
+            return secrets.compare_digest(digest, expected)
+    return False
 
 
 class DBAdapter:
@@ -261,18 +320,24 @@ class DBAdapter:
                 "SELECT id FROM auth_users WHERE username = ?",
                 (username,)
             )
+
+            normalized_hash = _normalize_password_hash(password_hash)
+            if password_plain:
+                normalized_hash = _hash_password(password_plain)
+                if purpose != "cli" and username != "cli-backend":
+                    password_plain = None
             
             if existing:
                 # Update existing user
                 self.execute(
                     "UPDATE auth_users SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, purpose = ?, updated_at = ? WHERE username = ?",
-                    (password_plain, password_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), username)
+                    (password_plain, normalized_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), username)
                 )
             else:
                 # Create new user
                 self.execute(
                     "INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (username, password_plain, password_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+                    (username, password_plain, normalized_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
                 )
             
             self.commit()
@@ -304,10 +369,20 @@ class DBAdapter:
                 return False
             
             stored_plain = result.get('password_plain')
-            stored_hash = result.get('password_hash')
+            stored_hash = _normalize_password_hash(result.get('password_hash'))
+            purpose = result.get("purpose")
             
             # Check plain text password first (for backward compatibility)
             if stored_plain and stored_plain == password:
+                if not stored_hash:
+                    stored_hash = _hash_password(password)
+                    if purpose != "cli" and username != "cli-backend":
+                        stored_plain = None
+                    self.execute(
+                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ?",
+                        (stored_plain, stored_hash, username),
+                    )
+                    self.commit()
                 return True
             
             # Check hashed password
@@ -322,8 +397,7 @@ class DBAdapter:
     
     def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
         """Verify a password against its hash."""
-        import hashlib
-        return hashlib.sha256(password.encode()).hexdigest() == stored_hash
+        return _verify_password_hash(password, stored_hash)
     
     def create_session(self, username: str, token: str, expires_at: datetime) -> bool:
         """Create a new session in database."""

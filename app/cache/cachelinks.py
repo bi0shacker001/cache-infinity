@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
+import re
+from urllib.parse import urlparse
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
@@ -21,7 +24,22 @@ class CachelinkDescriptor:
     identifier: str
     download_root: str
     subfolder: str
-    mode: str
+    mode: "CachelinkMode"
+
+    @property
+    def backend_relative_folder(self) -> PurePosixPath:
+        if len(self.path_segments) <= 1:
+            return PurePosixPath("")
+        return PurePosixPath("/".join(self.path_segments[:-1]))
+
+    @property
+    def remote_listing_url(self) -> str:
+        subfolder = self.subfolder.lstrip("/")
+        if not subfolder:
+            return self.download_root
+        if self.download_root.endswith("/"):
+            return self.download_root + subfolder
+        return f"{self.download_root}/{subfolder}"
 
 
 @dataclass
@@ -40,6 +58,11 @@ class CachelinkIndex:
     cachelinks: Dict[str, CachelinkDescriptor]
 
 
+class CachelinkMode(str, Enum):
+    PLAIN = "plain"
+    ZIP = "zip"
+
+
 def load_cachelinks(
     mount_tree_paths: List[Path],
     inline_docs: Optional[Dict] = None,
@@ -55,18 +78,96 @@ def load_cachelinks(
     Returns:
         CachelinkIndex with loaded cachelinks
     """
-    cachelinks = {}
-    
-    # Load from files
+    cachelinks: Dict[str, CachelinkDescriptor] = {}
+
+    def add_descriptor(
+        *,
+        canonical_id: str,
+        path_segments: list[str],
+        source_file: Path,
+        url: str,
+        subfolder: str,
+        mode_value: str | None = None,
+    ) -> None:
+        clean_url = (url or "").strip()
+        if not clean_url:
+            return
+        identifier, download_root = normalize_source_url(clean_url)
+        mode = _parse_mode(mode_value) or _detect_mode(subfolder or "/")
+        descriptor = CachelinkDescriptor(
+            canonical_id=canonical_id,
+            path_segments=tuple(path_segments),
+            source_file=source_file,
+            source_url=clean_url,
+            identifier=identifier,
+            download_root=download_root,
+            subfolder=subfolder or "/",
+            mode=mode,
+        )
+        cachelinks[canonical_id] = descriptor
+
+    def is_leaf_mapping(node: object) -> bool:
+        return isinstance(node, dict) and "url" in node
+
+    def walk_tree(node: dict, path_segments: list[str], source_file: Path) -> None:
+        for key, value in node.items():
+            if isinstance(value, dict) and is_leaf_mapping(value):
+                canonical_id = "/".join(path_segments + [key])
+                add_descriptor(
+                    canonical_id=canonical_id,
+                    path_segments=path_segments + [key],
+                    source_file=source_file,
+                    url=value.get("url", ""),
+                    subfolder=value.get("subfolder", "/"),
+                    mode_value=value.get("mode"),
+                )
+            elif isinstance(value, dict):
+                walk_tree(value, path_segments + [key], source_file)
+
+    def process_doc(doc: object, source_file: Path) -> None:
+        if isinstance(doc, dict) and isinstance(doc.get("cachelinks"), dict):
+            walk_tree(doc["cachelinks"], [], source_file)
+            return
+        if isinstance(doc, dict):
+            walk_tree(doc, [], source_file)
+            return
+        if isinstance(doc, list):
+            for item in doc:
+                if not isinstance(item, dict):
+                    continue
+                canonical_id = item.get("canonical_id") or ""
+                backend_path = (item.get("backend_path") or "").strip("/")
+                segments = [seg for seg in backend_path.split("/") if seg]
+                leaf = canonical_id.split("/")[-1] if canonical_id else ""
+                if not leaf:
+                    continue
+                segments.append(leaf)
+                add_descriptor(
+                    canonical_id=canonical_id or "/".join(segments),
+                    path_segments=segments,
+                    source_file=Path(item.get("source_file") or source_file),
+                    url=item.get("url", ""),
+                    subfolder=item.get("subfolder", "/"),
+                    mode_value=item.get("mode"),
+                )
+
     for path in mount_tree_paths:
-        if path.exists():
-            # This would implement actual YAML parsing
-            _logger.info(f"Loading cachelinks from {path}")
-    
-    # Load inline documents
+        if not path.exists():
+            continue
+        try:
+            import yaml
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            _logger.warning("Failed to load cachelinks from %s: %s", path, exc)
+            continue
+        _logger.info("Loading cachelinks from %s", path)
+        process_doc(doc, path)
+
     if inline_docs:
+        source_path = inline_source or Path("<inline>")
         _logger.info("Loading inline cachelinks")
-    
+        process_doc(inline_docs, source_path)
+
     return CachelinkIndex(cachelinks=cachelinks)
 
 
@@ -79,11 +180,24 @@ def normalize_source_url(url: str) -> tuple[str, str]:
     Returns:
         Tuple of (identifier, normalized_url)
     """
-    # This would implement URL normalization
-    return url, url
+    parsed = urlparse(url.strip())
+    netloc = parsed.netloc.lower()
+    if netloc.endswith("archive.org"):
+        segments = [seg for seg in parsed.path.split("/") if seg]
+        identifier = None
+        for idx, segment in enumerate(segments[:-1]):
+            if segment in ("download", "details"):
+                identifier = segments[idx + 1]
+                break
+        if not identifier and segments:
+            identifier = segments[-1]
+        if identifier:
+            return identifier, f"https://archive.org/download/{identifier}/"
+    identifier = _derive_identifier(parsed)
+    return identifier, url.strip().rstrip("/")
 
 
-def _detect_mode(subfolder: str) -> str:
+def _detect_mode(subfolder: str) -> CachelinkMode:
     """Detect cachelink mode from subfolder.
     
     Args:
@@ -92,8 +206,43 @@ def _detect_mode(subfolder: str) -> str:
     Returns:
         Mode string
     """
-    # This would implement mode detection
-    return "plain"
+    normalized = (subfolder or "/").strip()
+    if normalized in ("", "/"):
+        return CachelinkMode.PLAIN
+    parts = [seg for seg in normalized.strip("/").split("/") if seg]
+    for idx, segment in enumerate(parts):
+        if segment.endswith(".zip") and idx < len(parts) - 1:
+            return CachelinkMode.ZIP
+    return CachelinkMode.PLAIN
+
+
+def derive_cachelink_name(url: str) -> str:
+    identifier, _ = normalize_source_url(url)
+    if identifier:
+        return f"cachelink_{_sanitize_identifier(identifier)}"
+    parsed = urlparse(url.strip())
+    return _sanitize_identifier(parsed.path.split("/")[-1] or parsed.netloc or "cachelink")
+
+
+def _parse_mode(mode_value: str | None) -> CachelinkMode | None:
+    if not mode_value:
+        return None
+    value = str(mode_value).lower()
+    if value in ("zip", "zip-folder"):
+        return CachelinkMode.ZIP
+    if value in ("plain", "directory"):
+        return CachelinkMode.PLAIN
+    return None
+
+
+def _sanitize_identifier(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", value or "")
+    return cleaned or "cachelink"
+
+
+def _derive_identifier(parsed) -> str:
+    candidate = parsed.path.split("/")[-1] if parsed.path else ""
+    return candidate or parsed.netloc or "cachelink"
 
 
 def records_for_file(index: CachelinkIndex, file_path: Path) -> List[CachelinkRecord]:

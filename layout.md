@@ -19,7 +19,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     backends: #Folder. Database backend implementations; implement HOW data is written/read.
       - postgresql.py #File. PostgreSQL database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
       - redis.py #File. Redis caching layer for performance optimization -- CAN ONLY BE IMPORTED BY: db.adapter
-      - sqlite.py #File. SQLite database connection logic for development and testing -- CAN ONLY BE IMPORTED BY: db.adapter
+      - sqlite.py #File. SQLite database connection logic for development and testing -- CAN ONLY BE IMPORTED BY: db.adapter --NOTHING ELSE CAN IMPORT (systemx): sqlite
   hosting: #Folder. End user interface implementations
     - browser_interface.py #File. User-facing browser interface for CacheInfinity operations -- CAN ONLY BE IMPORTED BY: core.services
     - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions. -- CAN ONLY BE IMPORTED BY: hosting.*
