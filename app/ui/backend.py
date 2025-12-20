@@ -456,19 +456,6 @@ class LocalControlServer:
         return json.dumps({"ok": False, "error": message}).encode("utf-8")
 
 
-def _runtime_root() -> Path:
-    candidates = [Path("/run"), Path("/var/run")]
-    for base in candidates:
-        if base.exists() and os.access(base, os.W_OK | os.X_OK):
-            return base / "cacheinfinity"
-    tmp_base = Path(os.getenv("TMPDIR") or "/tmp")
-    return tmp_base / "cacheinfinity"
-
-
-def _runtime_dir(config_dir: Path) -> Path:
-    digest = sha256(str(config_dir).encode("utf-8")).hexdigest()[:12]
-    return _runtime_root() / digest
-
     # Storage Management
     def list_storage_entries(
         self,
@@ -1149,16 +1136,6 @@ def _runtime_dir(config_dir: Path) -> Path:
         self.service.index_db.clear_api_key(username)
 
 
-def create_cli_management() -> ManagementLayer:
-    """Create a ManagementLayer for CLI usage based on env configuration."""
-    from ..core.services import CacheInfinityService
-
-    config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR")
-    if not config_dir_raw:
-        raise RuntimeError("CACHEINFINITY_CONFIG_DIR is required for CLI usage")
-    service = CacheInfinityService.from_paths(Path(config_dir_raw))
-    return ManagementLayer(service)
-
     def get_user_info(self, username: str) -> Optional[Dict[str, Any]]:
         """Get information about a specific user."""
         try:
@@ -1170,3 +1147,27 @@ def create_cli_management() -> ManagementLayer:
         except Exception as e:
             logger.error("Failed to get user info: %s", e)
             raise
+
+
+def _runtime_root() -> Path:
+    candidates = [Path("/run"), Path("/var/run")]
+    for base in candidates:
+        if base.exists() and os.access(base, os.W_OK | os.X_OK):
+            return base / "cacheinfinity"
+    tmp_base = Path(os.getenv("TMPDIR") or "/tmp")
+    return tmp_base / "cacheinfinity"
+
+
+def _runtime_dir(config_dir: Path) -> Path:
+    digest = sha256(str(config_dir).encode("utf-8")).hexdigest()[:12]
+    return _runtime_root() / digest
+
+def create_cli_management() -> ManagementLayer:
+    """Create a ManagementLayer for CLI usage based on env configuration."""
+    from ..core.services import CacheInfinityService
+
+    config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR")
+    if not config_dir_raw:
+        raise RuntimeError("CACHEINFINITY_CONFIG_DIR is required for CLI usage")
+    service = CacheInfinityService.from_paths(Path(config_dir_raw))
+    return ManagementLayer(service)

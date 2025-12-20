@@ -143,7 +143,16 @@ class WebUIApp:
         if path == "/favicon.ico" and method == "GET":
             _LOGGER.debug("Serving favicon")
             return self._respond(start_response, "204 No Content", "image/x-icon", b"")
-        if not self.management.rd_user_admin_exists():
+        admin_exists = getattr(self.management, "rd_user_admin_exists", None)
+        if callable(admin_exists):
+            has_admin = admin_exists()
+        else:
+            rd_admin = getattr(self.management, "rd_user_admin", None)
+            if callable(rd_admin):
+                has_admin = bool(rd_admin())
+            else:
+                has_admin = False
+        if not has_admin:
             _LOGGER.warning("Web UI access denied - no credentials configured")
             return self._respond(
                 start_response,
