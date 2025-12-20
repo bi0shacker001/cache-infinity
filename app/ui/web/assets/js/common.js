@@ -61,7 +61,7 @@ function initNavigation() {
 // Session management
 async function refreshSession() {
   try {
-    const data = await fetchJSON('api/session');
+    const data = await fetchJSON('session');
     const username = data.username || '';
     const box = document.getElementById('session-user');
     if (box) box.textContent = username ? `Signed in as ${username}` : '';

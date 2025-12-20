@@ -375,6 +375,7 @@ class IndexDatabase:
                     username TEXT PRIMARY KEY,
                     password_plain TEXT,
                     password_hash TEXT,
+                    api_key TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     is_admin INTEGER NOT NULL DEFAULT 1,
                     purpose TEXT NOT NULL DEFAULT 'webui'
@@ -395,6 +396,11 @@ class IndexDatabase:
             self._db.commit()
             try:
                 self._db.execute("ALTER TABLE auth_users ADD COLUMN purpose TEXT NOT NULL DEFAULT 'webui'")
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+            try:
+                self._db.execute("ALTER TABLE auth_users ADD COLUMN api_key TEXT")
                 self._db.commit()
             except Exception:
                 self._db.rollback()
@@ -1083,6 +1089,45 @@ class IndexDatabase:
     def disable_auth_user(self, username: str, *, purpose: str = "webui") -> None:
         with self._lock:
             self._db.execute("UPDATE auth_users SET enabled = 0 WHERE username = ? AND purpose = ?", (username, purpose))
+            self._db.commit()
+
+    def list_api_keys(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._db.fetchall(
+                """
+                SELECT username, api_key
+                FROM auth_users
+                WHERE purpose = 'webui' AND is_admin = 1
+                ORDER BY username
+                """
+            )
+        results: list[dict[str, object]] = []
+        for row in rows:
+            api_key = row.get("api_key")
+            last4 = api_key[-4:] if isinstance(api_key, str) and len(api_key) >= 4 else ""
+            results.append(
+                {
+                    "username": row["username"],
+                    "has_key": bool(api_key),
+                    "last4": last4,
+                }
+            )
+        return results
+
+    def set_api_key(self, username: str, api_key: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE auth_users SET api_key = ? WHERE username = ? AND purpose = 'webui'",
+                (api_key, username),
+            )
+            self._db.commit()
+
+    def clear_api_key(self, username: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE auth_users SET api_key = NULL WHERE username = ? AND purpose = 'webui'",
+                (username,),
+            )
             self._db.commit()
 
     def any_admin_users(self) -> bool:

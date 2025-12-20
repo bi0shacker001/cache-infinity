@@ -14,6 +14,9 @@ The management layer provides:
 from __future__ import annotations
 
 import logging
+import os
+import secrets
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -759,6 +762,37 @@ class ManagementLayer:
         except Exception as e:
             logger.error("Failed to check admin users: %s", e)
             return False
+
+    # API Key Management ------------------------------------------------------
+    def list_api_keys(self) -> list[dict[str, object]]:
+        """List API key status for WebUI admin users."""
+        return self.service.index_db.list_api_keys()
+
+    def generate_api_key(self, username: str) -> dict[str, object]:
+        """Generate and store a new API key for a WebUI admin user."""
+        user = self.service.index_db.get_auth_user(username, purpose="webui")
+        if not user:
+            raise ValueError("User not found")
+        if not user.get("is_admin"):
+            raise ValueError("User is not an admin")
+        api_key = secrets.token_urlsafe(32)
+        self.service.index_db.set_api_key(username, api_key)
+        return {"username": username, "api_key": api_key}
+
+    def revoke_api_key(self, username: str) -> None:
+        """Revoke API key for a WebUI admin user."""
+        self.service.index_db.clear_api_key(username)
+
+
+def create_cli_management() -> ManagementLayer:
+    """Create a ManagementLayer for CLI usage based on env configuration."""
+    from ..core.service import CacheInfinityService
+
+    config_dir_raw = os.environ.get("CACHEINFINITY_CONFIG_DIR")
+    if not config_dir_raw:
+        raise RuntimeError("CACHEINFINITY_CONFIG_DIR is required for CLI usage")
+    service = CacheInfinityService.from_paths(Path(config_dir_raw))
+    return ManagementLayer(service)
 
     def get_user_info(self, username: str) -> Optional[Dict[str, Any]]:
         """Get information about a specific user."""

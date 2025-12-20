@@ -34,7 +34,7 @@ function setupStorageEventListeners() {
 
 async function loadStorage() {
   try {
-    const data = await fetchJSON('api/storage');
+    const data = await fetchJSON('storage');
 
     // Check if backend is missing
     if (data.missing_backend) {
@@ -85,7 +85,7 @@ async function uploadFileToStorage(file) {
   formData.append('relative_path', currentStoragePath || '/');
   formData.append('file', file, file.name);
   try {
-    await fetchWithAuth('api/storage/upload', { method: 'POST', body: formData });
+    await fetchWithAuth('storage/upload', { method: 'POST', body: formData });
     alert('File uploaded.');
     loadFileBrowser(currentStoragePath);
   } catch (err) {
@@ -106,7 +106,7 @@ async function createFolder(name) {
     name,
   };
   try {
-    await fetchJSON('api/storage/folder', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('storage/folder', { method: 'POST', body: JSON.stringify(payload) });
     loadFileBrowser(currentStoragePath);
   } catch (err) {
     alert('Folder creation failed: ' + err.message);
@@ -116,7 +116,7 @@ async function createFolder(name) {
 async function deleteFile(path) {
   if (!confirm('Delete this file from backend storage?')) return;
   try {
-    await fetchWithAuth(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    await fetchWithAuth(`storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
     loadFileBrowser(currentStoragePath);
   } catch (err) {
     alert('Delete failed: ' + err.message);
@@ -126,7 +126,7 @@ async function deleteFile(path) {
 async function deleteFolder(path) {
   if (!confirm('Delete this folder? It must be empty.')) return;
   try {
-    await fetchWithAuth(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    await fetchWithAuth(`storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
     loadFileBrowser(currentStoragePath);
   } catch (err) {
     alert('Folder deletion failed: ' + err.message);
@@ -135,7 +135,7 @@ async function deleteFolder(path) {
 
 async function loadFileBrowser(path = '/') {
   try {
-    const data = await fetchJSON(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`);
+    const data = await fetchJSON(`storage/entries?location=backend&relative=${encodeURIComponent(path)}`);
     const breadcrumbs = data.breadcrumbs.map((b, i) => {
       const active = i === data.breadcrumbs.length - 1 ? 'active' : '';
       return `<button type="button" class="file-breadcrumb-item ${active}" data-action="storage-open" data-path="${escapeHtml(b.path)}">${escapeHtml(b.label)}</button>`;

@@ -9,14 +9,15 @@ for executing queries and fetching rows as dicts, plus Redis caching operations.
 
 from __future__ import annotations
 
-import sqlite3
 import threading
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence, Optional, Union
+from typing import Any, Iterable, Sequence
 
 from core.errors import ConfigError
+from .backends.postgresql import PostgreSQLBackend
+from .backends.redis import RedisBackend
+from .backends.sqlite import SQLiteBackend
 
 
 class DBAdapter:
@@ -32,53 +33,27 @@ class DBAdapter:
         self._settings = settings
         engine = settings.engine or "sqlite"
         self.engine = engine
-        self._engine = engine  # Store engine for match-case usage
-        self._recoverable_errors: tuple[type[Exception], ...] = ()
         self._lock = threading.RLock()
         
         # Redis support
         self._redis_enabled = getattr(settings, 'redis_enabled', False)
-        self._redis = None
-        self._redis_lock = threading.RLock()
+        self._redis_backend: RedisBackend | None = None
         
-        # Connection pooling for PostgreSQL
-        self._pool_size = 5
-        self._pool = []
-        self._pool_lock = threading.Lock()
-        self._pool_connections = 0
-        
-        # Initialize SQL connection using match-case pattern
-        match engine:
-            case "sqlite":
-                # Get config directory from settings
-                config_dir = settings.config_dir
-                if not config_dir:
-                    raise ConfigError("SQLite engine requires config_dir")
-                
-                # Create SQLite backend with config directory
-                from .backends.sqlite import SQLiteBackend
-                self._sqlite_backend = SQLiteBackend(config_dir)
-                self._sqlite_backend.connect()
-                self._conn = self._sqlite_backend._conn
-                self._sqlite_path = self._sqlite_backend.path
-            case "postgres":
-                dsn = settings.postgres_dsn
-                if not dsn:
-                    raise ConfigError("postgres engine requires postgres_dsn")
-                try:  # pragma: no cover - optional dependency
-                    import psycopg
-                except ImportError as exc:  # pragma: no cover
-                    raise ConfigError("psycopg package is required for postgres engine") from exc
-                self._psycopg = psycopg
-                self._postgres_dsn = dsn
-                self._conn = psycopg.connect(dsn)
-                self._conn.autocommit = False
-                self._recoverable_errors = (psycopg.OperationalError, psycopg.InterfaceError)
-                # Initialize connection pool
-                self._init_connection_pool()
-            case _:
-                # pragma: no cover - guarded by validation
-                raise ConfigError(f"Unsupported database engine '{engine}'")
+        # Initialize SQL backend
+        if engine == "sqlite":
+            config_dir = settings.config_dir
+            if not config_dir:
+                raise ConfigError("SQLite engine requires config_dir")
+            self._backend = SQLiteBackend(config_dir)
+            self._backend.connect()
+        elif engine == "postgres":
+            dsn = settings.postgres_dsn
+            if not dsn:
+                raise ConfigError("postgres engine requires postgres_dsn")
+            self._backend = PostgreSQLBackend(dsn)
+            self._backend.connect()
+        else:
+            raise ConfigError(f"Unsupported database engine '{engine}'")
         
         # Initialize authentication tables
         self._init_auth_tables()
@@ -87,207 +62,48 @@ class DBAdapter:
         if self._redis_enabled:
             self._init_redis()
 
-    def _init_connection_pool(self):
-        """Initialize the connection pool for PostgreSQL."""
-        if self.engine != "postgres":
-            return
-        
-        try:
-            for _ in range(self._pool_size):
-                conn = self._psycopg.connect(self._postgres_dsn)
-                conn.autocommit = False
-                self._pool.append(conn)
-        except Exception as exc:
-            # If pool initialization fails, continue with single connection
-            import logging
-            logging.getLogger(__name__).warning("Failed to initialize connection pool: %s", exc)
-
     def _init_redis(self):
         """Initialize Redis connection for caching."""
         if not self._redis_enabled:
             return
-        
-        try:
-            import redis
-        except ImportError as exc:
-            import logging
-            logging.getLogger(__name__).warning("Redis package not available, disabling Redis caching: %s", exc)
-            self._redis_enabled = False
-            return
-        
-        try:
-            redis_url = getattr(self._settings, 'redis_url', 'redis://localhost:6379/0')
-            self._redis = redis.from_url(redis_url)
-            # Test the connection
-            self._redis.ping()
-            import logging
-            logging.getLogger(__name__).info("Redis connection established")
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning("Failed to connect to Redis, disabling Redis caching: %s", exc)
-            self._redis_enabled = False
-            self._redis = None
 
-    def _get_connection_from_pool(self):
-        """Get a connection from the pool."""
-        if self.engine != "postgres":
-            return self._conn
-            
-        with self._pool_lock:
-            if self._pool:
-                return self._pool.pop()
-            else:
-                # Create a new connection if pool is empty
-                return self._psycopg.connect(self._postgres_dsn)
-
-    def _return_connection_to_pool(self, conn):
-        """Return a connection to the pool."""
-        if self.engine != "postgres" or not conn:
-            return
-            
-        with self._pool_lock:
-            if len(self._pool) < self._pool_size:
-                try:
-                    # Test the connection before returning to pool
-                    cur = conn.cursor()
-                    cur.execute("SELECT 1")
-                    cur.close()
-                    self._pool.append(conn)
-                except Exception:
-                    # Close broken connections
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-            else:
-                # Pool is full, close the connection
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+        redis_url = getattr(self._settings, "redis_url", "redis://localhost:6379/0")
+        self._redis_backend = RedisBackend(redis_url)
+        if not self._redis_backend.is_connected():
+            self._redis_enabled = False
+            self._redis_backend = None
 
     # Basic execution helpers -------------------------------------------
     def execute(self, sql: str, params: Sequence[Any] | None = None):
-        if self.engine == "postgres":
-            # Use connection pool for PostgreSQL
-            conn = self._get_connection_from_pool()
-            try:
-                cur = self._run_with_reconnect(lambda: conn.cursor(), conn)
-                cur.execute(self._convert_sql(sql), params or ())
-                return cur
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                raise
-            finally:
-                self._return_connection_to_pool(conn)
-        else:
-            # Use single connection for SQLite
-            return self._run_with_reconnect(lambda cur: cur.execute(self._convert_sql(sql), params or ()))
+        return self._backend.execute(self._convert_sql(sql), params or ())
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]):
-        if self.engine == "postgres":
-            conn = self._get_connection_from_pool()
-            try:
-                cur = self._run_with_reconnect(lambda: conn.cursor(), conn)
-                cur.executemany(self._convert_sql(sql), seq)
-                return cur
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                raise
-            finally:
-                self._return_connection_to_pool(conn)
-        else:
-            def _run(cur):
-                cur.executemany(self._convert_sql(sql), seq)
-                return cur
-
-            cur = self._run_with_reconnect(_run)
-            cur.close()
+        self._backend.executemany(self._convert_sql(sql), list(seq))
 
     def fetchone(self, sql: str, params: Sequence[Any] | None = None) -> dict | None:
-        cur = self.execute(sql, params)
-        row = cur.fetchone()
-        description = cur.description
-        cur.close()
-        return self._row_to_dict(row, description)
+        return self._backend.fetchone(self._convert_sql(sql), params or ())
 
     def fetchall(self, sql: str, params: Sequence[Any] | None = None) -> list[dict]:
-        cur = self.execute(sql, params)
-        description = cur.description
-        rows = cur.fetchall()
-        cur.close()
-        return [self._row_to_dict(row, description) for row in rows]
+        return self._backend.fetchall(self._convert_sql(sql), params or ())
 
     def commit(self) -> None:
-        if self.engine == "postgres":
-            # For pooled connections, we don't manage commit at this level
-            # Each operation should handle its own transaction
-            pass
-        else:
-            self._conn.commit()
+        self._backend.commit()
 
     def rollback(self) -> None:
-        if self.engine == "postgres":
-            # For pooled connections, rollback is handled per-operation
-            pass
-        else:
-            try:
-                self._conn.rollback()
-            except Exception:  # pragma: no cover - defensive
-                pass
+        self._backend.rollback()
 
     def close(self) -> None:
         # Close Redis connection
-        if self._redis:
-            try:
-                self._redis.close()
-            except Exception:
-                pass
-            self._redis = None
+        if self._redis_backend:
+            self._redis_backend.close()
+            self._redis_backend = None
         
-        # Close SQL connections using match-case pattern
-        match self._engine:
-            case "postgres":
-                # Close all pooled connections
-                with self._pool_lock:
-                    for conn in self._pool:
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                    self._pool.clear()
-                # Close the main connection
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-            case "sqlite":
-                # Close SQLite backend
-                if hasattr(self, '_sqlite_backend') and self._sqlite_backend:
-                    self._sqlite_backend.close()
-                else:
-                    # Fallback for direct connection
-                    try:
-                        self._conn.close()
-                    except Exception:
-                        pass
-            case _:
-                # Close any other connection
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
+        self._backend.close()
 
     # Operation routing helpers -------------------------------------------
     def should_use_redis(self, operation_type: str) -> bool:
         """Determine if Redis should be used for the given operation type."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return False
         
         # Operations that should use Redis when available
@@ -301,199 +117,64 @@ class DBAdapter:
         
         return operation_type in redis_operations
 
-    # Reconnect helpers -------------------------------------------------
-    def _run_with_reconnect(self, func):
-        """Execute a database operation with automatic reconnection for server resilience.
-
-        This method implements a robust reconnection strategy suitable for server software:
-        - Up to 50 attempts to handle transient network issues
-        - Exponential backoff with max 5s delay between attempts
-        - Automatic reconnection when recoverable errors occur
-        """
-        attempt = 0
-        last_exc = None
-        max_attempts = 50  # Server-grade resilience: 50 attempts
-        while attempt < max_attempts:
-            try:
-                cur = self._cursor()
-                result = func(cur)
-                return result
-            except self._recoverable_errors as exc:  # pragma: no cover - requires postgres
-                last_exc = exc
-                self.rollback()
-                attempt += 1
-                if attempt >= max_attempts:
-                    raise
-                self._reconnect()
-                # Add a small delay between reconnect attempts with exponential backoff
-                import time
-                time.sleep(min(5.0, 0.1 * attempt))  # Max 5s delay, exponential growth
-            except Exception:
-                self.rollback()
-                raise
-        if last_exc:
-            raise last_exc
-
-    def _cursor(self):
-        return self._conn.cursor()
-
-    def _reconnect(self) -> None:
-        if self.engine != "postgres":
-            return
-        self.close()
-        self._conn = self._psycopg.connect(self._postgres_dsn)
-        self._conn.autocommit = False
-
-    def ensure_connection(self) -> None:
-        """Check if connection is alive and reconnect if needed."""
-        if self.engine != "postgres":
-            return
-        try:
-            # Test the connection with a simple query
-            self.execute("SELECT 1")
-        except self._recoverable_errors:
-            self._reconnect()
-
     def health_check(self) -> bool:
         """Perform a comprehensive health check on the database connection."""
         try:
-            match self._engine:
-                case "postgres":
-                    # Test with a simple query
-                    cur = self.execute("SELECT 1 as health_check")
-                    result = cur.fetchone()
-                    cur.close()
-                    return result is not None and result[0] == 1
-                case "sqlite":
-                    # SQLite health check
-                    cur = self.execute("SELECT 1 as health_check")
-                    result = cur.fetchone()
-                    cur.close()
-                    return result is not None and result[0] == 1
-                case _:
-                    # Generic health check
-                    cur = self.execute("SELECT 1 as health_check")
-                    result = cur.fetchone()
-                    cur.close()
-                    return result is not None and result[0] == 1
+            result = self.fetchone("SELECT 1 as health_check")
+            return result is not None
         except Exception:
             return False
 
     def get_pool_stats(self) -> dict:
         """Get connection pool statistics (PostgreSQL only)."""
-        if self.engine != "postgres":
-            return {"engine": "sqlite", "pool_size": 0, "available_connections": 0}
-        
-        with self._pool_lock:
-            return {
-                "engine": "postgres",
-                "pool_size": self._pool_size,
-                "available_connections": len(self._pool),
-                "in_use_connections": self._pool_size - len(self._pool)
-            }
+        return {"engine": self.engine, "pool_size": 0, "available_connections": 0, "in_use_connections": 0}
 
     def close_idle_connections(self) -> None:
         """Close idle connections in the pool to prevent resource leaks."""
-        if self.engine != "postgres":
-            return
-        
-        with self._pool_lock:
-            healthy_connections = []
-            for conn in self._pool:
-                try:
-                    # Test each connection
-                    cur = conn.cursor()
-                    cur.execute("SELECT 1")
-                    cur.close()
-                    healthy_connections.append(conn)
-                except Exception:
-                    # Close broken connections
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-            self._pool = healthy_connections
+        return
 
     # Redis-specific operations -------------------------------------------
     def redis_set(self, key: str, value: str, ttl: int = None) -> bool:
         """Set a value in Redis with optional TTL."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return False
         
-        try:
-            with self._redis_lock:
-                if ttl:
-                    self._redis.setex(key, ttl, value)
-                else:
-                    self._redis.set(key, value)
-            return True
-        except Exception:
-            return False
+        return self._redis_backend.set_value(key, value, ttl=ttl)
 
     def redis_get(self, key: str) -> str | None:
         """Get a value from Redis."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return None
-        
-        try:
-            with self._redis_lock:
-                value = self._redis.get(key)
-                return value.decode('utf-8') if value else None
-        except Exception:
-            return None
+        return self._redis_backend.get_value(key)
 
     def redis_delete(self, key: str) -> bool:
         """Delete a key from Redis."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return False
-        
-        try:
-            with self._redis_lock:
-                result = self._redis.delete(key)
-                return result > 0
-        except Exception:
-            return False
+        return self._redis_backend.delete_value(key)
 
     def redis_exists(self, key: str) -> bool:
         """Check if a key exists in Redis."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return False
-        
-        try:
-            with self._redis_lock:
-                result = self._redis.exists(key)
-                return result > 0
-        except Exception:
-            return False
+        return self._redis_backend.exists(key)
 
     def redis_keys(self, pattern: str) -> list[str]:
         """Get keys matching a pattern from Redis."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return []
-        
-        try:
-            with self._redis_lock:
-                keys = self._redis.keys(pattern)
-                return [key.decode('utf-8') for key in keys]
-        except Exception:
-            return []
+        return self._redis_backend.keys(pattern)
 
     def redis_flushdb(self) -> bool:
         """Flush the Redis database."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return False
-        
-        try:
-            with self._redis_lock:
-                self._redis.flushdb()
-                return True
-        except Exception:
-            return False
+        return self._redis_backend.flushdb()
 
     # Sync operations -----------------------------------------------------
     def sync_redis_to_sql(self) -> bool:
         """Sync Redis data to SQL database."""
-        if not self._redis_enabled or not self._redis:
+        if not self._redis_enabled or not self._redis_backend:
             return True  # Nothing to sync
         
         try:
@@ -512,7 +193,7 @@ class DBAdapter:
 
     def is_redis_enabled(self) -> bool:
         """Check if Redis is enabled and available."""
-        return self._redis_enabled and self._redis is not None
+        return self._redis_enabled and self._redis_backend is not None
 
     # Internal helpers --------------------------------------------------
     def _convert_sql(self, sql: str) -> str:
@@ -522,13 +203,15 @@ class DBAdapter:
         converted = converted.replace("AUTOINCREMENT", "")
         return converted.replace("?", "%s")
 
-    def _row_to_dict(self, row, description) -> dict | None:
-        if row is None:
+    @property
+    def sqlite_path(self) -> Path | None:
+        if self.engine != "sqlite":
             return None
-        if self.engine == "sqlite":
-            return dict(row)
-        columns = [col.name for col in description]
-        return {col: value for col, value in zip(columns, row)}
+        return self._backend.path
+
+    def reconnect(self) -> None:
+        """Reconnect the underlying backend."""
+        self._backend.connect()
     
     def _init_auth_tables(self):
         """Create authentication tables if they don't exist."""

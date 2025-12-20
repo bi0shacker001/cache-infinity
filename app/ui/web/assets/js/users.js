@@ -32,6 +32,7 @@ function setupUsersEventListeners() {
 
   bindClick('ui-user-save-btn', saveUser);
   bindClick('webdav-user-save-btn', saveWebdavUser);
+  bindClick('api-key-generate-btn', generateApiKey);
 }
 
 function setActiveUserTab(tab) {
@@ -41,12 +42,13 @@ function setActiveUserTab(tab) {
   document.getElementById(`user-tab-${tab}`).style.display = 'block';
   if (tab === 'webui') loadUsers();
   if (tab === 'webdav') loadWebdavUsers();
+  if (tab === 'keys') loadApiKeys();
 }
 
 async function loadUsers() {
   const container = document.getElementById('ui-users-list');
   try {
-    const data = await fetchJSON('api/users');
+    const data = await fetchJSON('users');
     const rows = data.users.map((u) =>
       `<tr><td>${u.username}</td><td>${u.enabled ? 'Enabled' : 'Disabled'}</td><td>${u.is_admin ? 'Admin' : 'Viewer'}</td><td><button class="btn btn-secondary" type="button" data-action="ui-user-disable" data-username="${escapeHtml(u.username)}">Disable</button></td></tr>`
     ).join('');
@@ -62,7 +64,7 @@ async function loadWebdavUsers() {
   const select = document.getElementById('webdav-share');
 
   try {
-    const data = await fetchJSON('api/webdav-users');
+    const data = await fetchJSON('webdav-users');
     select.innerHTML = (data.shares || []).map((s) => `<option value="${s.name}">${s.name} (${s.frontend})</option>`).join('');
 
     const blocks = data.shares.map((share) => {
@@ -96,7 +98,7 @@ async function saveUser() {
   };
 
   try {
-    await fetchJSON('api/users', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('users', { method: 'POST', body: JSON.stringify(payload) });
     document.getElementById('user-status').textContent = 'User saved.';
     document.getElementById('user-status').className = 'status-msg success';
     loadUsers();
@@ -108,7 +110,7 @@ async function saveUser() {
 }
 
 async function deleteUiUser(username) {
-  await fetchJSON(`api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  await fetchJSON(`users/${encodeURIComponent(username)}`, { method: 'DELETE' });
   loadUsers();
 }
 
@@ -125,7 +127,7 @@ async function saveWebdavUser() {
   };
 
   try {
-    await fetchJSON('api/webdav-users', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('webdav-users', { method: 'POST', body: JSON.stringify(payload) });
     document.getElementById('webdav-status').textContent = 'WebDAV user saved.';
     document.getElementById('webdav-status').className = 'status-msg success';
     loadWebdavUsers();
@@ -141,8 +143,48 @@ function handleDeleteWebdavUser(btn) {
 }
 
 async function deleteWebdavUser(share, username) {
-  await fetchJSON(`api/webdav-users/${encodeURIComponent(share)}/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  await fetchJSON(`webdav-users/${encodeURIComponent(share)}/${encodeURIComponent(username)}`, { method: 'DELETE' });
   loadWebdavUsers();
+}
+
+async function loadApiKeys() {
+  const container = document.getElementById('api-keys-list');
+  try {
+    const data = await fetchJSON('keys');
+    const rows = (data.keys || []).map((item) =>
+      `<tr>
+        <td>${escapeHtml(item.username)}</td>
+        <td>${item.has_key ? 'Yes' : 'No'}</td>
+        <td>${item.last4 ? `••••${escapeHtml(item.last4)}` : '—'}</td>
+        <td>${item.has_key ? `<button class="btn btn-text" type="button" data-action="api-key-revoke" data-username="${escapeHtml(item.username)}">Revoke</button>` : ''}</td>
+      </tr>`
+    ).join('');
+
+    container.innerHTML = rows
+      ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Key</th><th>Last 4</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : '<p class="empty">No admin users found.</p>';
+  } catch (err) {
+    container.textContent = err.message;
+  }
+}
+
+async function generateApiKey() {
+  const username = document.getElementById('api-key-username').value;
+  const status = document.getElementById('api-key-status');
+  try {
+    const data = await fetchJSON('keys', { method: 'POST', body: JSON.stringify({ username }) });
+    status.textContent = data.api_key ? `API key: ${data.api_key}` : 'API key generated.';
+    status.className = 'status-msg success';
+    loadApiKeys();
+  } catch (err) {
+    status.textContent = err.message;
+    status.className = 'status-msg error';
+  }
+}
+
+async function revokeApiKey(username) {
+  await fetchJSON(`keys/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  loadApiKeys();
 }
 
 // Helper functions
@@ -164,6 +206,7 @@ document.addEventListener('DOMContentLoaded', function() {
     container.innerHTML = `
       <button class="topbar-option active" data-user-tab="webui">Web UI Users</button>
       <button class="topbar-option" data-user-tab="webdav">WebDAV Users</button>
+      <button class="topbar-option" data-user-tab="keys">API Keys</button>
     `;
 
     container.querySelectorAll('.topbar-option').forEach((btn) => {
@@ -188,6 +231,9 @@ document.addEventListener('DOMContentLoaded', function() {
     } else if (action === 'webdav-user-remove' && share && user) {
       event.preventDefault();
       handleDeleteWebdavUser(target);
+    } else if (action === 'api-key-revoke' && username) {
+      event.preventDefault();
+      revokeApiKey(username);
     }
   });
 });

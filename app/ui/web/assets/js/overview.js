@@ -34,8 +34,8 @@ async function refreshStatus() {
       });
     }
 
-    console.log('Overview: About to call fetchJSON for api/status');
-    const data = await fetchJSON('api/status');
+    console.log('Overview: About to call fetchJSON for status');
+    const data = await fetchJSON('status');
     console.log('Overview: Received status data:', data);
 
     // Check if backend is missing

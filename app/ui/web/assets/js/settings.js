@@ -46,7 +46,7 @@ async function loadSettingsDetail(force = false) {
   if (settingsLoaded && !force) return;
 
   try {
-    settingsDetail = await fetchJSON('api/settings/detail');
+    settingsDetail = await fetchJSON('settings/detail');
     settingsLoaded = true;
     renderSettingsDetail();
   } catch (err) {
@@ -338,8 +338,8 @@ function cookieConfigTemplate(data = {}) {
   return `<div class="cookie-config-block">
     <div class="form-grid">
       <label>Domain<input type="text" class="cookie-domain" value="${esc(data.domain || '')}" placeholder="example.org"></label>
-      <label>Cookie Jar<input type="text" class="cookie-path" value="${esc(data.cookie_jar || '')}" placeholder="/config/cookies/example.txt"></label>
-      <label>Credfile<input type="text" class="cookie-cred" value="${esc(data.credfile || '')}" placeholder="/config/credentials/example.txt"></label>
+      <label>Cookie Jar<input type="text" class="cookie-path" value="${esc(data.cookie_jar || '')}" placeholder="<config-dir>/cookies/example.txt"></label>
+      <label>Credfile<input type="text" class="cookie-cred" value="${esc(data.credfile || '')}" placeholder="<config-dir>/credentials/example.txt"></label>
     </div>
     <div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-cookie-remove">Remove</button></div>
   </div>`;
@@ -555,7 +555,7 @@ function collectAuthDetail() {
 async function saveSettingsDetail() {
   const payload = collectSettingsDetail();
   try {
-    await fetchJSON('api/settings/detail', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('settings/detail', { method: 'POST', body: JSON.stringify(payload) });
     document.getElementById('settings-status').textContent = 'Settings saved.';
     document.getElementById('settings-status').className = 'status-msg success';
     settingsLoaded = false;
@@ -570,7 +570,7 @@ async function saveSettingsDetail() {
 
 async function exportSettings() {
   try {
-    const data = await fetchJSON('api/config');
+    const data = await fetchJSON('settings/config');
     const text = data.settings_text || '';
     const blob = new Blob([text], { type: 'text/yaml' });
     const link = document.createElement('a');
@@ -595,7 +595,7 @@ async function handleSettingsImport(event) {
 
   try {
     const text = await file.text();
-    await fetchJSON('api/config', { method: 'POST', body: JSON.stringify({ settings_text: text }) });
+    await fetchJSON('settings/config', { method: 'POST', body: JSON.stringify({ settings_text: text }) });
     document.getElementById('settings-status').textContent = 'Settings imported.';
     document.getElementById('settings-status').className = 'status-msg success';
     settingsLoaded = false;

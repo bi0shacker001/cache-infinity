@@ -27,7 +27,7 @@ function setupCookiesEventListeners() {
 
 async function loadCookies() {
   try {
-    const data = await fetchJSON('api/cookies');
+    const data = await fetchJSON('cookies');
     const cookies = data.cookies.map((c) => {
       let className = 'cookie-item';
       if (c.auth_fail) className += ' auth-fail';
@@ -63,7 +63,7 @@ async function loadCookies() {
 async function refreshCookie(domain) {
   const payload = { domain: domain };
   try {
-    await fetchJSON('api/cookies/refresh', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('cookies/refresh', { method: 'POST', body: JSON.stringify(payload) });
     alert('Cookie refresh triggered.');
     loadCookies();
   } catch (err) {
@@ -82,7 +82,7 @@ function showCredentialDialog(domain) {
 async function updateCookieCredentials(domain, username, password) {
   const payload = { domain, username, password };
   try {
-    await fetchJSON('api/cookies/credentials', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('cookies/credentials', { method: 'POST', body: JSON.stringify(payload) });
     alert('Credentials updated.');
     loadCookies();
   } catch (err) {
@@ -105,7 +105,7 @@ async function addCookieDomain() {
   }
 
   try {
-    await fetchJSON('api/cookies/domain', {
+    await fetchJSON('cookies/domain', {
       method: 'POST',
       body: JSON.stringify({
         domain,
@@ -138,7 +138,7 @@ async function showCookieUpload(domain) {
     formData.append('cookie_file', text);
 
     try {
-      await fetchWithAuth('api/cookies/upload', { method: 'POST', body: formData });
+      await fetchWithAuth('cookies/upload', { method: 'POST', body: formData });
       alert('Cookie file uploaded.');
       loadCookies();
     } catch (err) {

@@ -27,7 +27,7 @@ function setupMaintenanceEventListeners() {
 
 async function loadDegraded() {
   try {
-    const data = await fetchJSON('api/degraded');
+    const data = await fetchJSON('degraded');
     const rows = data.degraded.map((item) =>
       `<tr><td>${item.cachelink_id}</td><td>${item.remote_url || ''}</td><td>${item.last_error || ''}</td><td>${item.last_error_at || ''}</td></tr>`
     ).join('');
@@ -41,7 +41,7 @@ async function loadDegraded() {
 async function requestReindex() {
   const payload = { canonical_id: document.getElementById('reindex-id').value };
   try {
-    await fetchJSON('api/reindex', { method: 'POST', body: JSON.stringify(payload) });
+    await fetchJSON('reindex', { method: 'POST', body: JSON.stringify(payload) });
     alert('Reindex queued.');
   } catch (err) {
     alert('Error: ' + err.message);

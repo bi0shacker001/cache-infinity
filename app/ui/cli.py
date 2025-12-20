@@ -3,548 +3,417 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import logging
-import sys
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any
 
-from ..core.service import CacheInfinityService
-from ..core.config import load_settings
-from ..auth.credentials import load_credentials
-from ..ui.management import ManagementLayer
+from .backend import create_cli_management
 
-_logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 
-class CLIInterface:
-    """Command-line interface for CacheInfinity administration."""
-    
-    def __init__(self, service: CacheInfinityService):
-        self.service = service
-        self.management = ManagementLayer(service)
-        self.cli_api_key = None
-        
-    def authenticate_cli(self, username: str, password: str) -> bool:
-        """Authenticate CLI user using API key or credentials."""
-        # Try API key authentication first
-        if self.cli_api_key:
-            result = self.management.authenticate_request("api-key", self.cli_api_key)
-            if result.get('authenticated'):
-                return True
-        
-        # Fall back to credentials
-        result = self.management.authenticate_request(username, password)
-        return result.get('authenticated', False)
-    
-    def run_command(self, args: argparse.Namespace) -> int:
-        """Run a CLI command based on parsed arguments."""
-        try:
-            if args.command == 'status':
-                return self.show_status()
-            elif args.command == 'users':
-                return self.manage_users(args)
-            elif args.command == 'cachelinks':
-                return self.manage_cachelinks(args)
-            elif args.command == 'cookies':
-                return self.manage_cookies(args)
-            elif args.command == 'storage':
-                return self.manage_storage(args)
-            elif args.command == 'indexing':
-                return self.manage_indexing(args)
-            elif args.command == 'config':
-                return self.manage_config(args)
-            elif args.command == 'maintenance':
-                return self.manage_maintenance(args)
-            else:
-                _logger.error(f"Unknown command: {args.command}")
-                return 1
-                
-        except Exception as e:
-            _logger.error(f"Command failed: {e}")
-            return 1
-    
-    def show_status(self) -> int:
-        """Show system status."""
-        try:
-            status = self.management.get_system_status()
-            print(json.dumps(status, indent=2, default=str))
+def _print_json(payload: Any) -> None:
+    print(json.dumps(payload, indent=2, default=str))
+
+
+def _require_file(path: str) -> Path:
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    return file_path
+
+
+def _handle_status(mgmt, args) -> int:
+    _print_json(mgmt.get_system_status())
+    return 0
+
+
+def _handle_storage(mgmt, args) -> int:
+    if args.action == "list":
+        result = mgmt.list_storage_entries(
+            location=args.location,
+            relative_path=args.path,
+            sort_by=args.sort_by,
+            sort_order=args.sort_order,
+            view_mode=args.view_mode,
+            show_hidden=args.show_hidden,
+            search_query=args.search_query,
+        )
+        _print_json(result)
+        return 0
+    if args.action == "upload":
+        data = _require_file(args.file).read_bytes()
+        mgmt.upload_storage_file(
+            location=args.location,
+            relative_path=args.path,
+            filename=Path(args.file).name,
+            file_data=data,
+        )
+        print("ok")
+        return 0
+    if args.action == "mkdir":
+        mgmt.create_storage_folder(
+            location=args.location,
+            relative_path=args.path,
+            folder_name=args.name,
+        )
+        print("ok")
+        return 0
+    if args.action == "delete":
+        mgmt.delete_storage_entry(location=args.location, relative_path=args.path)
+        print("ok")
+        return 0
+    raise ValueError("Unknown storage action")
+
+
+def _handle_cachelinks(mgmt, args) -> int:
+    if args.action == "list":
+        _print_json(mgmt.describe_cachelinks())
+        return 0
+    if args.action == "tree":
+        _print_json(mgmt.describe_cachelink_tree())
+        return 0
+    if args.action == "create":
+        result = mgmt.create_cachelink(
+            parent_path=args.parent_path,
+            name=args.name,
+            url=args.url,
+            subfolder=args.subfolder,
+        )
+        _print_json(result)
+        return 0
+    if args.action == "update":
+        mgmt.update_cachelink(args.canonical_id, url=args.url, subfolder=args.subfolder)
+        print("ok")
+        return 0
+    if args.action == "delete":
+        mgmt.delete_cachelink(args.canonical_id)
+        print("ok")
+        return 0
+    if args.action == "preview":
+        _print_json(mgmt.preview_cachelink(args.url, args.subfolder))
+        return 0
+    if args.action == "folder-add":
+        mgmt.add_cachelink_folder(args.path)
+        print("ok")
+        return 0
+    if args.action == "folder-delete":
+        mgmt.delete_cachelink_folder(args.path)
+        print("ok")
+        return 0
+    raise ValueError("Unknown cachelinks action")
+
+
+def _handle_cookies(mgmt, args) -> int:
+    if args.action == "list":
+        _print_json(mgmt.describe_cookies())
+        return 0
+    if args.action == "upload":
+        if args.file:
+            content = _require_file(args.file).read_text(encoding="utf-8")
+        else:
+            content = args.content or ""
+        mgmt.upload_cookie_file(args.domain, content)
+        print("ok")
+        return 0
+    if args.action == "credentials":
+        mgmt.update_cookie_credentials(args.domain, args.username, args.password)
+        print("ok")
+        return 0
+    if args.action == "refresh":
+        mgmt.regenerate_cookie(args.domain)
+        print("ok")
+        return 0
+    if args.action == "domain-add":
+        mgmt.add_cookie_domain(
+            domain=args.domain,
+            credfile=args.credfile,
+            cookie_jar=args.cookie_jar,
+            credfile_path=args.credfile_path,
+        )
+        print("ok")
+        return 0
+    raise ValueError("Unknown cookies action")
+
+
+def _handle_users(mgmt, args) -> int:
+    if args.user_type == "admin":
+        if args.action == "list":
+            _print_json(mgmt.list_users(purpose="webui"))
             return 0
-        except Exception as e:
-            _logger.error(f"Failed to get status: {e}")
-            return 1
-    
-    def manage_users(self, args: argparse.Namespace) -> int:
-        """Manage users."""
-        if args.action == 'list':
-            users = self.management.list_users(purpose="webui")
-            print(json.dumps(users, indent=2))
-            return 0
-        elif args.action == 'create':
-            self.management.upsert_user(
-                username=args.username,
-                password=args.password,
-                enabled=True,
-                is_admin=args.admin
-            )
-            print(f"User {args.username} created successfully")
-            return 0
-        elif args.action == 'update':
-            self.management.upsert_user(
+        if args.action == "set":
+            mgmt.upsert_user(
                 username=args.username,
                 password=args.password,
                 enabled=args.enabled,
-                is_admin=args.admin
+                is_admin=args.admin,
+                purpose="webui",
             )
-            print(f"User {args.username} updated successfully")
+            print("ok")
             return 0
-        elif args.action == 'disable':
-            self.management.disable_user(args.username)
-            print(f"User {args.username} disabled successfully")
+        if args.action == "disable":
+            mgmt.disable_user(args.username, purpose="webui")
+            print("ok")
             return 0
-        else:
-            _logger.error(f"Unknown user action: {args.action}")
-            return 1
-    
-    def manage_cachelinks(self, args: argparse.Namespace) -> int:
-        """Manage cachelinks."""
-        if args.action == 'list':
-            cachelinks = self.management.describe_cachelinks()
-            print(json.dumps(cachelinks, indent=2))
+    elif args.user_type == "webdav":
+        if args.action == "list":
+            _print_json(mgmt.describe_webdav_users())
             return 0
-        elif args.action == 'create':
-            self.management.create_cachelink(
-                parent_path=args.parent_path,
-                name=args.name,
-                url=args.url,
-                subfolder=args.subfolder
+        if args.action == "set":
+            mgmt.upsert_user(
+                username=args.username,
+                password=args.password,
+                enabled=args.enabled,
+                is_admin=False,
+                purpose="webdav",
+                share=args.share,
+                login=args.login,
+                read=args.read,
+                write=args.write,
+                cache=args.cache,
             )
-            print(f"Cachelink {args.name} created successfully")
+            print("ok")
             return 0
-        elif args.action == 'update':
-            self.management.update_cachelink(
-                canonical_id=args.canonical_id,
-                url=args.url,
-                subfolder=args.subfolder
-            )
-            print(f"Cachelink {args.canonical_id} updated successfully")
+        if args.action == "disable":
+            mgmt.disable_user(args.username, purpose="webdav", share=args.share)
+            print("ok")
             return 0
-        elif args.action == 'delete':
-            self.management.delete_cachelink(args.canonical_id)
-            print(f"Cachelink {args.canonical_id} deleted successfully")
-            return 0
-        elif args.action == 'preview':
-            preview = self.management.preview_cachelink(args.url, args.subfolder)
-            print(json.dumps(preview, indent=2))
-            return 0
-        else:
-            _logger.error(f"Unknown cachelink action: {args.action}")
-            return 1
-    
-    def manage_cookies(self, args: argparse.Namespace) -> int:
-        """Manage cookies."""
-        if args.action == 'list':
-            cookies = self.management.describe_cookies()
-            print(json.dumps(cookies, indent=2))
-            return 0
-        elif args.action == 'upload':
-            cookie_content = args.cookie_content
-            if args.cookie_file:
-                cookie_content = Path(args.cookie_file).read_text()
-            self.management.upload_cookie_file(args.domain, cookie_content)
-            print(f"Cookies uploaded for {args.domain}")
-            return 0
-        elif args.action == 'refresh':
-            self.management.regenerate_cookie(args.domain)
-            print(f"Cookies refreshed for {args.domain}")
-            return 0
-        elif args.action == 'update-credentials':
-            self.management.update_cookie_credentials(
-                args.domain,
-                args.username,
-                args.password
-            )
-            print(f"Credentials updated for {args.domain}")
-            return 0
-        else:
-            _logger.error(f"Unknown cookie action: {args.action}")
-            return 1
-    
-    def manage_storage(self, args: argparse.Namespace) -> int:
-        """Manage storage."""
-        if args.action == 'list':
-            entries = self.management.list_storage_entries(
-                location=args.location,
-                relative_path=args.path,
-                sort_by=args.sort_by,
-                sort_order=args.sort_order,
-                view_mode=args.view_mode,
-                show_hidden=args.show_hidden,
-                search_query=args.search_query
-            )
-            print(json.dumps(entries, indent=2))
-            return 0
-        elif args.action == 'upload':
-            file_data = Path(args.file).read_bytes()
-            self.management.upload_storage_file(
-                location=args.location,
-                relative_path=args.path,
-                filename=Path(args.file).name,
-                file_data=file_data
-            )
-            print(f"File {args.file} uploaded successfully")
-            return 0
-        elif args.action == 'create-folder':
-            self.management.create_storage_folder(
-                location=args.location,
-                relative_path=args.path,
-                folder_name=args.name
-            )
-            print(f"Folder {args.name} created successfully")
-            return 0
-        elif args.action == 'delete':
-            self.management.delete_storage_entry(
-                location=args.location,
-                relative_path=args.path
-            )
-            print(f"Entry {args.path} deleted successfully")
-            return 0
-        else:
-            _logger.error(f"Unknown storage action: {args.action}")
-            return 1
-    
-    def manage_indexing(self, args: argparse.Namespace) -> int:
-        """Manage indexing."""
-        if args.action == 'status':
-            status = self.management.get_all_index_status()
-            print(json.dumps(status, indent=2))
-            return 0
-        elif args.action == 'trigger':
-            self.management.trigger_reindex(args.canonical_id)
-            print(f"Reindex triggered for {args.canonical_id}")
-            return 0
-        elif args.action == 'degraded':
-            degraded = self.management.list_degraded_targets()
-            print(json.dumps(degraded, indent=2))
-            return 0
-        else:
-            _logger.error(f"Unknown indexing action: {args.action}")
-            return 1
-    
-    def manage_config(self, args: argparse.Namespace) -> int:
-        """Manage configuration."""
-        if args.action == 'get':
-            config = self.management.get_config_payload()
-            print(json.dumps(config, indent=2))
-            return 0
-        elif args.action == 'update':
-            settings_text = None
-            cachelinks_text = None
-            
-            if args.settings_file:
-                settings_text = Path(args.settings_file).read_text()
-            if args.cachelinks_file:
-                cachelinks_text = Path(args.cachelinks_file).read_text()
-            
-            self.management.update_config(
-                settings_text=settings_text,
-                cachelinks_text=cachelinks_text
-            )
-            print("Configuration updated successfully")
-            return 0
-        elif args.action == 'detail':
-            detail = self.management.describe_settings_detail()
-            print(json.dumps(detail, indent=2))
-            return 0
-        else:
-            _logger.error(f"Unknown config action: {args.action}")
-            return 1
-    
-    def manage_maintenance(self, args: argparse.Namespace) -> int:
-        """Manage maintenance operations."""
-        if args.action == 'backup':
-            # Trigger backup operation
-            print("Backup operation initiated")
-            return 0
-        elif args.action == 'cleanup':
-            # Trigger cleanup operation
-            print("Cleanup operation initiated")
-            return 0
-        elif args.action == 'health-check':
-            # Run health check
-            health_status = {
-                'database': self.service.index_db.health_check(),
-                'storage': self.service.describe_storage(),
-                'indexing': len(self.management.get_all_index_status())
-            }
-            print(json.dumps(health_status, indent=2))
-            return 0
-        else:
-            _logger.error(f"Unknown maintenance action: {args.action}")
-            return 1
+    raise ValueError("Unknown users action")
+
+
+def _handle_webdav(mgmt, args) -> int:
+    if args.action == "list":
+        _print_json(mgmt.describe_webdav_users())
+        return 0
+    if args.action == "set":
+        mgmt.upsert_user(
+            username=args.username,
+            password=args.password,
+            enabled=args.enabled,
+            is_admin=False,
+            purpose="webdav",
+            share=args.share,
+            login=args.login,
+            read=args.read,
+            write=args.write,
+            cache=args.cache,
+        )
+        print("ok")
+        return 0
+    if args.action == "remove":
+        mgmt.disable_user(args.username, purpose="webdav", share=args.share)
+        print("ok")
+        return 0
+    raise ValueError("Unknown webdav action")
+
+
+def _handle_keys(mgmt, args) -> int:
+    if args.action == "list":
+        _print_json(mgmt.list_api_keys())
+        return 0
+    if args.action == "generate":
+        _print_json(mgmt.generate_api_key(args.username))
+        return 0
+    if args.action == "revoke":
+        mgmt.revoke_api_key(args.username)
+        print("ok")
+        return 0
+    raise ValueError("Unknown keys action")
+
+
+def _handle_settings(mgmt, args) -> int:
+    if args.action == "detail":
+        _print_json(mgmt.describe_settings_detail())
+        return 0
+    if args.action == "update-detail":
+        payload = json.loads(_require_file(args.file).read_text(encoding="utf-8"))
+        mgmt.update_settings_detail(payload)
+        print("ok")
+        return 0
+    if args.action == "get-config":
+        _print_json(mgmt.get_config_payload())
+        return 0
+    if args.action == "update-config":
+        settings_text = _require_file(args.settings_file).read_text(encoding="utf-8") if args.settings_file else None
+        cachelinks_text = _require_file(args.cachelinks_file).read_text(encoding="utf-8") if args.cachelinks_file else None
+        mgmt.update_config(settings_text=settings_text, cachelinks_text=cachelinks_text)
+        print("ok")
+        return 0
+    raise ValueError("Unknown settings action")
+
+
+def _handle_maintenance(mgmt, args) -> int:
+    if args.action == "degraded":
+        _print_json(mgmt.list_degraded_targets())
+        return 0
+    if args.action == "reindex":
+        mgmt.trigger_reindex(args.canonical_id)
+        print("ok")
+        return 0
+    raise ValueError("Unknown maintenance action")
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
-    """Create and configure the argument parser."""
-    parser = argparse.ArgumentParser(
-        description="CacheInfinity Command-Line Interface",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Show system status
-  cacheinfinity-cli status
-  
-  # List users
-  cacheinfinity-cli users list
-  
-  # Create a user
-  cacheinfinity-cli users create --username admin --password secret --admin
-  
-  # List cachelinks
-  cacheinfinity-cli cachelinks list
-  
-  # Create a cachelink
-  cacheinfinity-cli cachelinks create --parent-path games --name psx --url https://archive.org/download/psx_games
-  
-  # Upload cookies
-  cacheinfinity-cli cookies upload --domain archive.org --cookie-file cookies.txt
-  
-  # List storage entries
-  cacheinfinity-cli storage list --location backend --path /games
-  
-  # Show indexing status
-  cacheinfinity-cli indexing status
-  
-  # Get configuration
-  cacheinfinity-cli config get
-  
-  # Run health check
-  cacheinfinity-cli maintenance health-check
-        """
-    )
-    
-    parser.add_argument(
-        '--config-dir',
-        type=Path,
-        default=Path('/config'),
-        help='Configuration directory (default: /config)'
-    )
-    
-    parser.add_argument(
-        '--username',
-        type=str,
-        help='Username for authentication'
-    )
-    
-    parser.add_argument(
-        '--password',
-        type=str,
-        help='Password for authentication (will prompt if not provided)'
-    )
-    
-    parser.add_argument(
-        '--verbose', '-v',
-        action='count',
-        default=0,
-        help='Increase verbosity (can be used multiple times)'
-    )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # Status command
-    status_parser = subparsers.add_parser('status', help='Show system status')
-    
-    # Users command
-    users_parser = subparsers.add_parser('users', help='Manage users')
-    users_subparsers = users_parser.add_subparsers(dest='action', help='User actions')
-    
-    users_list = users_subparsers.add_parser('list', help='List users')
-    
-    users_create = users_subparsers.add_parser('create', help='Create a user')
-    users_create.add_argument('--username', required=True, help='Username')
-    users_create.add_argument('--password', help='Password')
-    users_create.add_argument('--admin', action='store_true', help='Make user admin')
-    
-    users_update = users_subparsers.add_parser('update', help='Update a user')
-    users_update.add_argument('--username', required=True, help='Username')
-    users_update.add_argument('--password', help='New password')
-    users_update.add_argument('--enabled', action='store_true', help='Enable user')
-    users_update.add_argument('--admin', action='store_true', help='Make user admin')
-    
-    users_disable = users_subparsers.add_parser('disable', help='Disable a user')
-    users_disable.add_argument('--username', required=True, help='Username')
-    
-    # Cachelinks command
-    cachelinks_parser = subparsers.add_parser('cachelinks', help='Manage cachelinks')
-    cachelinks_subparsers = cachelinks_parser.add_subparsers(dest='action', help='Cachelink actions')
-    
-    cachelinks_list = cachelinks_subparsers.add_parser('list', help='List cachelinks')
-    
-    cachelinks_create = cachelinks_subparsers.add_parser('create', help='Create a cachelink')
-    cachelinks_create.add_argument('--parent-path', required=True, help='Parent path')
-    cachelinks_create.add_argument('--name', required=True, help='Cachelink name')
-    cachelinks_create.add_argument('--url', required=True, help='Remote URL')
-    cachelinks_create.add_argument('--subfolder', default='/', help='Subfolder (default: /)')
-    
-    cachelinks_update = cachelinks_subparsers.add_parser('update', help='Update a cachelink')
-    cachelinks_update.add_argument('--canonical-id', required=True, help='Canonical ID')
-    cachelinks_update.add_argument('--url', help='New URL')
-    cachelinks_update.add_argument('--subfolder', help='New subfolder')
-    
-    cachelinks_delete = cachelinks_subparsers.add_parser('delete', help='Delete a cachelink')
-    cachelinks_delete.add_argument('--canonical-id', required=True, help='Canonical ID')
-    
-    cachelinks_preview = cachelinks_subparsers.add_parser('preview', help='Preview a cachelink')
-    cachelinks_preview.add_argument('--url', required=True, help='Remote URL')
-    cachelinks_preview.add_argument('--subfolder', default='/', help='Subfolder (default: /)')
-    
-    # Cookies command
-    cookies_parser = subparsers.add_parser('cookies', help='Manage cookies')
-    cookies_subparsers = cookies_parser.add_subparsers(dest='action', help='Cookie actions')
-    
-    cookies_list = cookies_subparsers.add_parser('list', help='List cookies')
-    
-    cookies_upload = cookies_subparsers.add_parser('upload', help='Upload cookies')
-    cookies_upload.add_argument('--domain', required=True, help='Domain')
-    cookies_upload.add_argument('--cookie-content', help='Cookie content')
-    cookies_upload.add_argument('--cookie-file', help='Cookie file path')
-    
-    cookies_refresh = cookies_subparsers.add_parser('refresh', help='Refresh cookies')
-    cookies_refresh.add_argument('--domain', required=True, help='Domain')
-    
-    cookies_update_creds = cookies_subparsers.add_parser('update-credentials', help='Update cookie credentials')
-    cookies_update_creds.add_argument('--domain', required=True, help='Domain')
-    cookies_update_creds.add_argument('--username', required=True, help='Username')
-    cookies_update_creds.add_argument('--password', required=True, help='Password')
-    
-    # Storage command
-    storage_parser = subparsers.add_parser('storage', help='Manage storage')
-    storage_subparsers = storage_parser.add_subparsers(dest='action', help='Storage actions')
-    
-    storage_list = storage_subparsers.add_parser('list', help='List storage entries')
-    storage_list.add_argument('--location', choices=['backend', 'staging'], default='backend', help='Storage location')
-    storage_list.add_argument('--path', default='/', help='Path to list (default: /)')
-    storage_list.add_argument('--sort-by', help='Sort by field')
-    storage_list.add_argument('--sort-order', choices=['asc', 'desc'], default='asc', help='Sort order')
-    storage_list.add_argument('--view-mode', choices=['list', 'grid'], default='list', help='View mode')
-    storage_list.add_argument('--show-hidden', action='store_true', help='Show hidden files')
-    storage_list.add_argument('--search-query', help='Search query')
-    
-    storage_upload = storage_subparsers.add_parser('upload', help='Upload a file')
-    storage_upload.add_argument('--location', choices=['backend', 'staging'], default='backend', help='Storage location')
-    storage_upload.add_argument('--path', required=True, help='Destination path')
-    storage_upload.add_argument('--file', required=True, help='File to upload')
-    
-    storage_create_folder = storage_subparsers.add_parser('create-folder', help='Create a folder')
-    storage_create_folder.add_argument('--location', choices=['backend', 'staging'], default='backend', help='Storage location')
-    storage_create_folder.add_argument('--path', required=True, help='Parent path')
-    storage_create_folder.add_argument('--name', required=True, help='Folder name')
-    
-    storage_delete = storage_subparsers.add_parser('delete', help='Delete an entry')
-    storage_delete.add_argument('--location', choices=['backend', 'staging'], default='backend', help='Storage location')
-    storage_delete.add_argument('--path', required=True, help='Path to delete')
-    
-    # Indexing command
-    indexing_parser = subparsers.add_parser('indexing', help='Manage indexing')
-    indexing_subparsers = indexing_parser.add_subparsers(dest='action', help='Indexing actions')
-    
-    indexing_status = indexing_subparsers.add_parser('status', help='Show indexing status')
-    
-    indexing_trigger = indexing_subparsers.add_parser('trigger', help='Trigger reindexing')
-    indexing_trigger.add_argument('--canonical-id', required=True, help='Canonical ID')
-    
-    indexing_degraded = indexing_subparsers.add_parser('degraded', help='List degraded targets')
-    
-    # Config command
-    config_parser = subparsers.add_parser('config', help='Manage configuration')
-    config_subparsers = config_parser.add_subparsers(dest='action', help='Config actions')
-    
-    config_get = config_subparsers.add_parser('get', help='Get configuration')
-    
-    config_update = config_subparsers.add_parser('update', help='Update configuration')
-    config_update.add_argument('--settings-file', help='Settings file path')
-    config_update.add_argument('--cachelinks-file', help='Cachelinks file path')
-    
-    config_detail = config_subparsers.add_parser('detail', help='Get detailed settings')
-    
-    # Maintenance command
-    maintenance_parser = subparsers.add_parser('maintenance', help='Manage maintenance operations')
-    maintenance_subparsers = maintenance_parser.add_subparsers(dest='action', help='Maintenance actions')
-    
-    maintenance_backup = maintenance_subparsers.add_parser('backup', help='Create backup')
-    maintenance_cleanup = maintenance_subparsers.add_parser('cleanup', help='Run cleanup')
-    maintenance_health = maintenance_subparsers.add_parser('health-check', help='Run health check')
-    
+    parser = argparse.ArgumentParser(description="CacheInfinity admin CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("status", help="Show system status")
+
+    storage = subparsers.add_parser("storage", help="Manage storage")
+    storage_sub = storage.add_subparsers(dest="action", required=True)
+    storage_list = storage_sub.add_parser("list", help="List storage entries")
+    storage_list.add_argument("--location", default="backend")
+    storage_list.add_argument("--path", default="/")
+    storage_list.add_argument("--sort-by")
+    storage_list.add_argument("--sort-order", default="asc")
+    storage_list.add_argument("--view-mode")
+    storage_list.add_argument("--show-hidden", action="store_true")
+    storage_list.add_argument("--search-query")
+
+    storage_upload = storage_sub.add_parser("upload", help="Upload file")
+    storage_upload.add_argument("--location", default="backend")
+    storage_upload.add_argument("--path", required=True)
+    storage_upload.add_argument("--file", required=True)
+
+    storage_mkdir = storage_sub.add_parser("mkdir", help="Create folder")
+    storage_mkdir.add_argument("--location", default="backend")
+    storage_mkdir.add_argument("--path", required=True)
+    storage_mkdir.add_argument("--name", required=True)
+
+    storage_delete = storage_sub.add_parser("delete", help="Delete entry")
+    storage_delete.add_argument("--location", default="backend")
+    storage_delete.add_argument("--path", required=True)
+
+    cachelinks = subparsers.add_parser("cachelinks", help="Manage cachelinks")
+    cachelinks_sub = cachelinks.add_subparsers(dest="action", required=True)
+    cachelinks_sub.add_parser("list", help="List cachelinks")
+    cachelinks_sub.add_parser("tree", help="Show cachelink tree")
+    cachelinks_create = cachelinks_sub.add_parser("create", help="Create cachelink")
+    cachelinks_create.add_argument("--parent-path", required=True)
+    cachelinks_create.add_argument("--name", required=True)
+    cachelinks_create.add_argument("--url", required=True)
+    cachelinks_create.add_argument("--subfolder", default="/")
+    cachelinks_update = cachelinks_sub.add_parser("update", help="Update cachelink")
+    cachelinks_update.add_argument("--canonical-id", required=True)
+    cachelinks_update.add_argument("--url")
+    cachelinks_update.add_argument("--subfolder")
+    cachelinks_delete = cachelinks_sub.add_parser("delete", help="Delete cachelink")
+    cachelinks_delete.add_argument("--canonical-id", required=True)
+    cachelinks_preview = cachelinks_sub.add_parser("preview", help="Preview cachelink")
+    cachelinks_preview.add_argument("--url", required=True)
+    cachelinks_preview.add_argument("--subfolder", default="/")
+    cachelinks_folder_add = cachelinks_sub.add_parser("folder-add", help="Add cachelink folder")
+    cachelinks_folder_add.add_argument("--path", required=True)
+    cachelinks_folder_delete = cachelinks_sub.add_parser("folder-delete", help="Delete cachelink folder")
+    cachelinks_folder_delete.add_argument("--path", required=True)
+
+    cookies = subparsers.add_parser("cookies", help="Manage cookies")
+    cookies_sub = cookies.add_subparsers(dest="action", required=True)
+    cookies_sub.add_parser("list", help="List cookies")
+    cookies_upload = cookies_sub.add_parser("upload", help="Upload cookies")
+    cookies_upload.add_argument("--domain", required=True)
+    cookies_upload.add_argument("--file")
+    cookies_upload.add_argument("--content")
+    cookies_creds = cookies_sub.add_parser("credentials", help="Update cookie credentials")
+    cookies_creds.add_argument("--domain", required=True)
+    cookies_creds.add_argument("--username", required=True)
+    cookies_creds.add_argument("--password", required=True)
+    cookies_refresh = cookies_sub.add_parser("refresh", help="Refresh cookies")
+    cookies_refresh.add_argument("--domain", required=True)
+    cookies_domain = cookies_sub.add_parser("domain-add", help="Add cookie domain")
+    cookies_domain.add_argument("--domain", required=True)
+    cookies_domain.add_argument("--cookie-jar")
+    cookies_domain.add_argument("--credfile", action="store_true")
+    cookies_domain.add_argument("--credfile-path")
+
+    users = subparsers.add_parser("users", help="Manage users")
+    users.add_argument("--type", dest="user_type", choices=["admin", "webdav"], required=True)
+    users_sub = users.add_subparsers(dest="action", required=True)
+    users_sub.add_parser("list", help="List users")
+    users_set = users_sub.add_parser("set", help="Create or update user")
+    users_set.add_argument("--username", required=True)
+    users_set.add_argument("--password")
+    users_set.add_argument("--enabled", action="store_true")
+    users_set.add_argument("--admin", action="store_true")
+    users_set.add_argument("--share")
+    users_set.add_argument("--login", action="store_true")
+    users_set.add_argument("--read", action="store_true")
+    users_set.add_argument("--write", action="store_true")
+    users_set.add_argument("--cache", action="store_true")
+    users_disable = users_sub.add_parser("disable", help="Disable user")
+    users_disable.add_argument("--username", required=True)
+    users_disable.add_argument("--share")
+
+    webdav = subparsers.add_parser("webdav", help="Manage WebDAV shares and permissions")
+    webdav_sub = webdav.add_subparsers(dest="action", required=True)
+    webdav_sub.add_parser("list", help="List WebDAV users")
+    webdav_set = webdav_sub.add_parser("set", help="Create or update WebDAV mapping")
+    webdav_set.add_argument("--share", required=True)
+    webdav_set.add_argument("--username", required=True)
+    webdav_set.add_argument("--password")
+    webdav_set.add_argument("--enabled", action="store_true")
+    webdav_set.add_argument("--login", action="store_true")
+    webdav_set.add_argument("--read", action="store_true")
+    webdav_set.add_argument("--write", action="store_true")
+    webdav_set.add_argument("--cache", action="store_true")
+    webdav_remove = webdav_sub.add_parser("remove", help="Remove WebDAV mapping")
+    webdav_remove.add_argument("--share", required=True)
+    webdav_remove.add_argument("--username", required=True)
+
+    keys = subparsers.add_parser("keys", help="Manage API keys")
+    keys_sub = keys.add_subparsers(dest="action", required=True)
+    keys_sub.add_parser("list", help="List API keys")
+    keys_generate = keys_sub.add_parser("generate", help="Generate API key")
+    keys_generate.add_argument("--username", required=True)
+    keys_revoke = keys_sub.add_parser("revoke", help="Revoke API key")
+    keys_revoke.add_argument("--username", required=True)
+
+    settings = subparsers.add_parser("settings", help="Manage settings")
+    settings_sub = settings.add_subparsers(dest="action", required=True)
+    settings_sub.add_parser("detail", help="Show settings detail")
+    settings_update_detail = settings_sub.add_parser("update-detail", help="Update settings detail from JSON")
+    settings_update_detail.add_argument("--file", required=True)
+    settings_sub.add_parser("get-config", help="Get config payload")
+    settings_update_config = settings_sub.add_parser("update-config", help="Update config payload")
+    settings_update_config.add_argument("--settings-file")
+    settings_update_config.add_argument("--cachelinks-file")
+
+    maintenance = subparsers.add_parser("maintenance", help="Maintenance operations")
+    maintenance_sub = maintenance.add_subparsers(dest="action", required=True)
+    maintenance_sub.add_parser("degraded", help="List degraded targets")
+    maintenance_reindex = maintenance_sub.add_parser("reindex", help="Trigger reindex")
+    maintenance_reindex.add_argument("--canonical-id", required=True)
+
     return parser
 
 
-def setup_logging(verbose: int) -> None:
-    """Set up logging configuration."""
-    if verbose >= 3:
-        level = logging.DEBUG
-    elif verbose == 2:
-        level = logging.INFO
-    elif verbose == 1:
-        level = logging.WARNING
-    else:
-        level = logging.ERROR
-    
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-
-def main():
-    """Main CLI entry point."""
+def main() -> int:
     parser = create_argument_parser()
     args = parser.parse_args()
-    
-    if not args.command:
-        parser.print_help()
-        return 1
-    
-    # Set up logging
-    setup_logging(args.verbose)
-    
-    try:
-        # Load configuration
-        settings = load_settings(args.config_dir)
-        credentials_file = args.config_dir / "credentials" / "users.yaml"
-        credentials = load_credentials(credentials_file) if credentials_file.exists() else None
-        
-        # Create service
-        service = CacheInfinityService.from_settings(settings, credentials)
-        
-        # Create CLI interface
-        cli = CLIInterface(service)
-        
-        # Get credentials if not provided
-        username = args.username
-        password = args.password
-        
-        if not username:
-            username = input("Username: ")
-        
-        if not password:
-            password = getpass.getpass("Password: ")
-        
-        # Authenticate
-        if not cli.authenticate_cli(username, password):
-            print("Authentication failed")
-            return 1
-        
-        # Run command
-        return cli.run_command(args)
-        
-    except KeyboardInterrupt:
-        print("\nOperation cancelled")
-        return 1
-    except Exception as e:
-        _logger.error(f"CLI error: {e}")
-        return 1
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    mgmt = create_cli_management()
+    if args.command == "status":
+        return _handle_status(mgmt, args)
+    if args.command == "storage":
+        return _handle_storage(mgmt, args)
+    if args.command == "cachelinks":
+        return _handle_cachelinks(mgmt, args)
+    if args.command == "cookies":
+        return _handle_cookies(mgmt, args)
+    if args.command == "users":
+        return _handle_users(mgmt, args)
+    if args.command == "webdav":
+        return _handle_webdav(mgmt, args)
+    if args.command == "keys":
+        return _handle_keys(mgmt, args)
+    if args.command == "settings":
+        return _handle_settings(mgmt, args)
+    if args.command == "maintenance":
+        return _handle_maintenance(mgmt, args)
+    raise SystemExit("Unknown command")
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

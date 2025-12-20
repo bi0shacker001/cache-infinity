@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request
 
-from .management import ManagementLayer
+from .backend import ManagementLayer
 
 _logger = logging.getLogger(__name__)
 

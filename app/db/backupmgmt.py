@@ -6,11 +6,14 @@ import json
 import logging
 import yaml
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, TYPE_CHECKING
 
 from core.errors import ConfigError
 
 _logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from db.schema import IndexDatabase
 
 class ConfigExportError(Exception):
     """Raised when configuration export fails."""

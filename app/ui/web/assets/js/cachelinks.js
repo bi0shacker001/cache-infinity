@@ -39,7 +39,7 @@ function setupCachelinksEventListeners() {
 
 async function loadCachelinks() {
   try {
-    cachelinkData = await fetchJSON('api/cachelinks/tree');
+    cachelinkData = await fetchJSON('cachelinks/tree');
     if (!cachelinkData || !Array.isArray(cachelinkData.folders)) {
       cachelinkData = { folders: [], entries: {} };
     }
@@ -180,7 +180,7 @@ async function saveCachelink() {
         return;
       }
       const payload = { parent_path: selectedCachelinkFolder, url, subfolder };
-      const created = await fetchJSON('api/cachelinks', { method: 'POST', body: JSON.stringify(payload) });
+      const created = await fetchJSON('cachelinks', { method: 'POST', body: JSON.stringify(payload) });
       await loadCachelinks();
       if (created?.cachelink?.canonical_id) {
         selectCachelinkFolder(selectedCachelinkFolder);
@@ -195,7 +195,7 @@ async function saveCachelink() {
         url,
         subfolder,
       };
-      await fetchJSON('api/cachelinks/update', { method: 'POST', body: JSON.stringify(payload) });
+      await fetchJSON('cachelinks/update', { method: 'POST', body: JSON.stringify(payload) });
     }
     document.getElementById('cachelink-status').textContent = 'Saved.';
     document.getElementById('cachelink-status').className = 'status-msg success';
@@ -211,7 +211,7 @@ async function deleteCachelink() {
   if (editorMode !== 'edit' || !selectedCachelinkEntry) return;
   if (!confirm(`Delete cachelink "${selectedCachelinkEntry.name}"?`)) return;
   try {
-    await fetchJSON(`api/cachelinks/${encodeURIComponent(selectedCachelinkEntry.canonical_id)}`, { method: 'DELETE' });
+    await fetchJSON(`cachelinks/${encodeURIComponent(selectedCachelinkEntry.canonical_id)}`, { method: 'DELETE' });
     document.getElementById('cachelink-status').textContent = 'Cachelink deleted.';
     document.getElementById('cachelink-status').className = 'status-msg success';
     selectedCachelinkEntry = null;
@@ -241,7 +241,7 @@ async function processCachelink() {
     return;
   }
   try {
-    const data = await fetchJSON('api/cachelinks/preview', { method: 'POST', body: JSON.stringify({ url, subfolder }) });
+    const data = await fetchJSON('cachelinks/preview', { method: 'POST', body: JSON.stringify({ url, subfolder }) });
     const rows = (data.entries || []).slice(0, 200).map((entry) =>
       `<tr><td>${entry.path}</td><td>${entry.is_dir ? 'Dir' : 'File'}</td><td>${entry.size || ''}</td><td>${entry.modified || ''}</td></tr>`
     ).join('');
@@ -261,7 +261,7 @@ async function addCachelinkFolder() {
     return;
   }
   try {
-    await fetchJSON('api/cachelinks/folder', { method: 'POST', body: JSON.stringify({ path: value }) });
+    await fetchJSON('cachelinks/folder', { method: 'POST', body: JSON.stringify({ path: value }) });
     field.value = '';
     await loadCachelinks();
   } catch (err) {
@@ -272,7 +272,7 @@ async function addCachelinkFolder() {
 async function removeCachelinkFolder(path) {
   if (!confirm(`Remove folder /${path}? It must be empty.`)) return;
   try {
-    await fetchJSON(`api/cachelinks/folder?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    await fetchJSON(`cachelinks/folder?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
     if (selectedCachelinkFolder === path) {
       selectedCachelinkFolder = '';
       localStorage.removeItem('ci_cachelink_folder');

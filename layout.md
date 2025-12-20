@@ -11,12 +11,12 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - logging.py #File. Centralized logging configuration and utilities
     - server.py #File. Core server loop. Handles startup and shutdown of the server overall
     - services.py #File. Service orchestration and lifecycle management
-  db: #Folder. All database functionality
-    - adapter.py #File. Database access shim to allow transparent background provider management
+  db: #Folder. All database functionality. Database flow: dbmanage.py (formats/maintains data using schema.py) -> adapter.py (routes WHERE data is written) -> backends/* (implement HOW the DB is accessed)
+    - adapter.py #File. Database access shim that routes WHERE data is written; never touches the database directly.
     - backupmgmt.py #File. Database backup and restore management.
-    - dbmanage.py #File. Database controller. Also handles migration and maintenance utilities
-    - schema.py #File. Contains active database schema, as well as query parsing logic, to ensure correct data location and seamless upgrades.
-    backends: #Folder. Database backend implementations
+    - dbmanage.py #File. Database controller. Formats data using schema.py and runs maintenance tasks before handing off to adapter.py.
+    - schema.py #File. Active database schema and query logic. Used by dbmanage.py to format and validate DB data.
+    backends: #Folder. Database backend implementations; implement HOW data is written/read.
       - postgresql.py #File. PostgreSQL database connection logic with connection pooling
       - redis.py #File. Redis caching layer for performance optimization
       - sqlite.py #File. SQLite database connection logic for development and testing

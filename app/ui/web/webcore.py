@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Callable, Dict, Any
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..service import CacheInfinityService
-    from ..management import ManagementLayer
+    from ..backend import ManagementLayer
 
-from ..management import ManagementLayer
+from ..backend import ManagementLayer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -192,9 +192,9 @@ class WebUIApp:
             return self._serve_static_file(f"/assets/pages/{page_name}.html", start_response)
 
         # Check if this is a module-specific route
-        if path.startswith("/api/") and len(path) > 5:
-            # Extract module name from path (e.g., /api/storage/upload -> storage)
-            module_path = path[5:]  # Remove "/api/" prefix
+        if path.startswith("/") and len(path) > 1:
+            # Extract module name from path (e.g., /storage/upload -> storage)
+            module_path = path[1:]  # Remove "/" prefix
             if "/" in module_path:
                 module_name = module_path.split("/")[0]
             else:
@@ -234,17 +234,17 @@ class WebUIApp:
         """Handle routes delegated to modules."""
         _LOGGER.debug("Handling module route: %s %s", method, path)
 
-        # Handle the main API routes
-        if path == "/api/session" and method == "GET":
+        # Handle the main UI routes
+        if path == "/session" and method == "GET":
             _LOGGER.debug("Serving session info")
             return self._json_response(start_response, {"username": self._get_username_from_session(environ)})
-        if path == "/api/status" and method == "GET":
+        if path == "/status" and method == "GET":
             _LOGGER.debug("Serving system status")
             return self._serve_status(start_response)
-        if path == "/api/storage" and method == "GET":
+        if path == "/storage" and method == "GET":
             _LOGGER.debug("Serving storage utilization")
             return self._json_response(start_response, self.management.get_storage_utilization())
-        if path == "/api/settings/detail" and method == "GET":
+        if path == "/settings/detail" and method == "GET":
             _LOGGER.debug("Serving settings detail")
             try:
                 # Call ManagementLayer to get settings detail
@@ -254,7 +254,7 @@ class WebUIApp:
             except Exception as e:
                 _LOGGER.error("Failed to retrieve settings detail: %s", e, exc_info=True)
                 return self._json_error(start_response, f"Failed to retrieve settings: {e}", status="500 Internal Server Error")
-        if path == "/api/settings/detail" and method == "POST":
+        if path == "/settings/detail" and method == "POST":
             _LOGGER.debug("Updating settings detail")
             try:
                 if 'settings' in self.handlers:
@@ -266,8 +266,18 @@ class WebUIApp:
                 _LOGGER.error("Failed to update settings detail: %s", e, exc_info=True)
                 return self._json_error(start_response, f"Failed to update settings: {e}", status="500 Internal Server Error")
 
-        # Add missing API endpoints for storage
-        if path == "/api/storage/entries" and method == "GET":
+        if path == "/settings/config" and method == "GET":
+            _LOGGER.debug("Serving config payload")
+            return self._json_response(start_response, self.management.get_config_payload())
+
+        if path == "/settings/config" and method == "POST":
+            _LOGGER.debug("Updating config payload")
+            if 'settings' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['settings'].handle_config_update)
+            return self._json_error(start_response, "Settings handler not available", status="500 Internal Server Error")
+
+        # Storage routes
+        if path == "/storage/entries" and method == "GET":
             _LOGGER.debug("Serving storage entries")
             params = self._parse_query_params(environ)
             location = params.get("location", "backend")
@@ -291,165 +301,183 @@ class WebUIApp:
             except Exception as exc:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
 
-        if path == "/api/storage/upload" and method == "POST":
+        if path == "/storage/upload" and method == "POST":
             _LOGGER.debug("Handling storage upload")
             if 'storage' in self.handlers:
                 return self.handlers['storage'].handle_storage_upload(environ, start_response)
             return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
 
-        if path == "/api/storage/folder" and method == "POST":
+        if path == "/storage/folder" and method == "POST":
             _LOGGER.debug("Handling folder creation")
             if 'storage' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['storage'].handle_folder_create)
             return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
 
-        if path == "/api/storage/entries" and method == "DELETE":
+        if path == "/storage/entries" and method == "DELETE":
             _LOGGER.debug("Handling storage entry deletion")
             if 'storage' in self.handlers:
                 return self.handlers['storage'].handle_storage_entry_delete(environ, start_response)
             return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
 
-        if path == "/api/storage/folder" and method == "DELETE":
+        if path == "/storage/folder" and method == "DELETE":
             _LOGGER.debug("Handling folder deletion")
             if 'storage' in self.handlers:
                 return self.handlers['storage'].handle_storage_folder_delete(environ, start_response)
             return self._json_error(start_response, "Storage handler not available", status="500 Internal Server Error")
 
-        # Add missing API endpoints for cachelinks
-        if path == "/api/cachelinks" and method == "GET":
+        # Cachelinks routes
+        if path == "/cachelinks" and method == "GET":
             _LOGGER.debug("Serving cachelinks tree")
             if 'cachelinks' in self.handlers:
                 return self._json_response(start_response, self.management.describe_cachelink_tree())
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks/tree" and method == "GET":
+        if path == "/cachelinks/tree" and method == "GET":
             _LOGGER.debug("Serving cachelinks tree")
             if 'cachelinks' in self.handlers:
                 return self._json_response(start_response, self.management.describe_cachelink_tree())
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks" and method == "POST":
+        if path == "/cachelinks" and method == "POST":
             _LOGGER.debug("Handling cachelink creation")
             if 'cachelinks' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_create)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks/update" and method == "POST":
+        if path == "/cachelinks/update" and method == "POST":
             _LOGGER.debug("Handling cachelink update")
             if 'cachelinks' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_update)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks/preview" and method == "POST":
+        if path == "/cachelinks/preview" and method == "POST":
             _LOGGER.debug("Handling cachelink preview")
             if 'cachelinks' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_preview)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks/folder" and method == "POST":
+        if path == "/cachelinks/folder" and method == "POST":
             _LOGGER.debug("Handling cachelink folder creation")
             if 'cachelinks' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cachelinks'].handle_cachelink_folder_add)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cachelinks/folder" and method == "DELETE":
+        if path == "/cachelinks/folder" and method == "DELETE":
             _LOGGER.debug("Handling cachelink folder deletion")
             if 'cachelinks' in self.handlers:
                 return self.handlers['cachelinks'].handle_cachelink_folder_delete(environ, start_response)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        if path.startswith("/api/cachelinks/") and method == "DELETE":
+        if path.startswith("/cachelinks/") and method == "DELETE":
             _LOGGER.debug("Handling cachelink deletion")
             if 'cachelinks' in self.handlers:
                 return self.handlers['cachelinks'].handle_cachelink_delete(environ, start_response)
             return self._json_error(start_response, "Cachelinks handler not available", status="500 Internal Server Error")
 
-        # Add missing API endpoints for cookies
-        if path == "/api/cookies" and method == "GET":
+        # Cookies routes
+        if path == "/cookies" and method == "GET":
             _LOGGER.debug("Serving cookies list")
             if 'cookies' in self.handlers:
                 return self._json_response(start_response, {"cookies": self.management.describe_cookies()})
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cookies/upload" and method == "POST":
+        if path == "/cookies/upload" and method == "POST":
             _LOGGER.debug("Handling cookie upload")
             if 'cookies' in self.handlers:
                 return self.handlers['cookies'].handle_cookie_upload(environ, start_response)
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cookies/credentials" and method == "POST":
+        if path == "/cookies/credentials" and method == "POST":
             _LOGGER.debug("Handling cookie credentials update")
             if 'cookies' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_credentials)
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cookies/refresh" and method == "POST":
+        if path == "/cookies/refresh" and method == "POST":
             _LOGGER.debug("Handling cookie refresh")
             if 'cookies' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_refresh)
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        if path == "/api/cookies/domain" and method == "POST":
+        if path == "/cookies/domain" and method == "POST":
             _LOGGER.debug("Handling cookie domain addition")
             if 'cookies' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_domain_add)
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        # Add missing API endpoints for users
-        if path == "/api/users" and method == "GET":
+        # Users routes
+        if path == "/users" and method == "GET":
             _LOGGER.debug("Serving users list")
             if 'users' in self.handlers:
                 return self._json_response(start_response, {"users": self.management.list_users()})
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
-        if path == "/api/users" and method == "POST":
+        if path == "/users" and method == "POST":
             _LOGGER.debug("Handling user creation/update")
             if 'users' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['users'].handle_user_upsert)
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
-        if path.startswith("/api/users/") and method == "DELETE":
+        if path.startswith("/users/") and method == "DELETE":
             _LOGGER.debug("Handling user deletion")
             if 'users' in self.handlers:
                 return self.handlers['users'].handle_user_disable(environ, start_response)
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
         # Add WebDAV user management endpoints
-        if path == "/api/webdav-users" and method == "GET":
+        if path == "/webdav-users" and method == "GET":
             _LOGGER.debug("Serving WebDAV users list")
             if 'users' in self.handlers:
                 return self._json_response(start_response, {"shares": self.management.rd_user_webdav()["shares"]})
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
-        if path == "/api/webdav-users" and method == "POST":
+        if path == "/webdav-users" and method == "POST":
             _LOGGER.debug("Handling WebDAV user creation/update")
             if 'users' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['users'].handle_webdav_user_upsert)
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
-        if path.startswith("/api/webdav-users/") and method == "DELETE":
+        if path.startswith("/webdav-users/") and method == "DELETE":
             _LOGGER.debug("Handling WebDAV user deletion")
             if 'users' in self.handlers:
                 return self.handlers['users'].handle_webdav_user_delete(environ, start_response)
             return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
 
-        # Add missing API endpoints for maintenance
-        if path == "/api/reindex" and method == "POST":
+        if path == "/keys" and method == "GET":
+            _LOGGER.debug("Serving API keys list")
+            if 'users' in self.handlers:
+                return self._json_response(start_response, {"keys": self.management.list_api_keys()})
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path == "/keys" and method == "POST":
+            _LOGGER.debug("Handling API key generation")
+            if 'users' in self.handlers:
+                return self._handle_json_request(environ, start_response, self.handlers['users'].handle_api_key_generate)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        if path.startswith("/keys/") and method == "DELETE":
+            _LOGGER.debug("Handling API key revocation")
+            if 'users' in self.handlers:
+                return self.handlers['users'].handle_api_key_revoke(environ, start_response)
+            return self._json_error(start_response, "Users handler not available", status="500 Internal Server Error")
+
+        # Maintenance routes
+        if path == "/reindex" and method == "POST":
             _LOGGER.debug("Handling reindex request")
             if 'maintenance' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['maintenance'].handle_reindex)
             return self._json_error(start_response, "Maintenance handler not available", status="500 Internal Server Error")
 
-        if path == "/api/degraded" and method == "GET":
+        if path == "/degraded" and method == "GET":
             _LOGGER.debug("Serving degraded targets list")
             if 'maintenance' in self.handlers:
                 return self._json_response(start_response, {"degraded": self.management.list_degraded_targets()})
             return self._json_error(start_response, "Maintenance handler not available", status="500 Internal Server Error")
 
         # Check if this is a module-specific route
-        if path.startswith("/api/") and len(path) > 5:
-            # Extract module name from path (e.g., /api/storage/upload -> storage)
-            module_path = path[5:]  # Remove "/api/" prefix
+        if path.startswith("/") and len(path) > 1:
+            # Extract module name from path (e.g., /storage/upload -> storage)
+            module_path = path[1:]  # Remove "/" prefix
             if "/" in module_path:
                 module_name = module_path.split("/")[0]
             else:
@@ -636,7 +664,7 @@ class WebUIApp:
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
     def _login_required_response(self, path: str, start_response):
-        if path.startswith("/api/"):
+        if path.startswith("/"):
             return self._json_error(start_response, "login required", status="401 Unauthorized")
         headers = [("Location", "/login")]
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
@@ -815,7 +843,7 @@ class CachelinksHandlers:
     def handle_cachelink_delete(self, environ, start_response):
         """Handle cachelink deletion."""
         path = environ.get("PATH_INFO", "")
-        canonical_id = unquote(path[len("/api/cachelinks/"):])
+        canonical_id = unquote(path[len("/cachelinks/"):])
         if not canonical_id:
             return self._json_error(start_response, "cachelink id required", status="400 Bad Request")
         try:
@@ -1153,7 +1181,7 @@ class UsersHandlers:
     def handle_user_disable(self, environ, start_response):
         """Handle user disable."""
         path = environ.get("PATH_INFO", "")
-        username = path[len("/api/users/"):]
+        username = path[len("/users/"):]
         try:
             self.management.disable_user(username, purpose="webui")
             return self._json_response(start_response, {"status": "ok"})
@@ -1186,7 +1214,7 @@ class UsersHandlers:
     def handle_webdav_user_delete(self, environ, start_response):
         """Handle WebDAV user deletion."""
         path = environ.get("PATH_INFO", "")
-        remainder = path[len("/api/webdav-users/"):]
+        remainder = path[len("/webdav-users/"):]
         parts = remainder.split("/", 1)
         if len(parts) != 2:
             return self._json_error(start_response, "Share and username required", status="400 Bad Request")
@@ -1204,6 +1232,29 @@ class UsersHandlers:
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("WebDAV user deletion failed: %s", exc, exc_info=True)
+            return self._json_error(start_response, str(exc), status="400 Bad Request")
+
+    def handle_api_key_generate(self, payload: dict[str, object], start_response):
+        """Handle API key generation for a WebUI user."""
+        username = (payload.get("username") or "").strip()
+        if not username:
+            return self._json_error(start_response, "username required", status="400 Bad Request")
+        try:
+            result = self.management.generate_api_key(username)
+            return self._json_response(start_response, result)
+        except Exception as exc:
+            return self._json_error(start_response, str(exc), status="400 Bad Request")
+
+    def handle_api_key_revoke(self, environ, start_response):
+        """Handle API key revocation for a WebUI user."""
+        path = environ.get("PATH_INFO", "")
+        username = path[len("/keys/"):].strip()
+        if not username:
+            return self._json_error(start_response, "username required", status="400 Bad Request")
+        try:
+            self.management.revoke_api_key(unquote(username))
+            return self._json_response(start_response, {"status": "ok"})
+        except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _json_response(self, start_response, payload: dict[str, object], status: str = "200 OK"):

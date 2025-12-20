@@ -79,6 +79,69 @@ class RedisBackend:
             # Fallback to string
             return value
 
+    def set_value(self, key: str, value: str, ttl: int | None = None) -> bool:
+        """Set a raw value in Redis with optional TTL."""
+        if not self._redis:
+            return False
+        try:
+            with self._lock:
+                if ttl:
+                    self._redis.setex(key, ttl, value)
+                else:
+                    self._redis.set(key, value)
+            return True
+        except Exception as exc:
+            _logger.error("Failed to set Redis key %s: %s", key, exc)
+            return False
+
+    def get_value(self, key: str) -> Optional[str]:
+        """Get a raw value from Redis."""
+        if not self._redis:
+            return None
+        try:
+            with self._lock:
+                value = self._redis.get(key)
+                return value.decode("utf-8") if value else None
+        except Exception as exc:
+            _logger.error("Failed to get Redis key %s: %s", key, exc)
+            return None
+
+    def delete_value(self, key: str) -> bool:
+        """Delete a raw value from Redis."""
+        if not self._redis:
+            return False
+        try:
+            with self._lock:
+                result = self._redis.delete(key)
+                return result > 0
+        except Exception as exc:
+            _logger.error("Failed to delete Redis key %s: %s", key, exc)
+            return False
+
+    def exists(self, key: str) -> bool:
+        """Check if a key exists in Redis."""
+        if not self._redis:
+            return False
+        try:
+            with self._lock:
+                result = self._redis.exists(key)
+                return result > 0
+        except Exception as exc:
+            _logger.error("Failed to check Redis key %s: %s", key, exc)
+            return False
+
+    def keys(self, pattern: str) -> List[str]:
+        """Return keys matching the given pattern."""
+        if not self._redis:
+            return []
+        try:
+            with self._lock:
+                keys = self._redis.keys(pattern)
+                return [key.decode("utf-8") for key in keys]
+        except Exception as exc:
+            _logger.error("Failed to list Redis keys for %s: %s", pattern, exc)
+            return []
+
     # File metadata operations
     def set_file_metadata(self, file_path: str, metadata: Dict[str, Any], ttl: int = 3600) -> bool:
         """Set file metadata in Redis.
