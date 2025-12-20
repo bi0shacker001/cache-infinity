@@ -13,11 +13,22 @@ let originalEntry = null;
 // Initialize cachelinks page
 export function initCachelinks() {
   console.log('Cachelinks page initialized - loading cachelinks data');
+  const topbar = document.getElementById('topbar-options');
+  if (topbar) topbar.innerHTML = '';
   loadCachelinks();
   setupCachelinksEventListeners();
+  bindCachelinksDelegatedEvents();
 }
 
+if (typeof window !== 'undefined') {
+  window.initCachelinks = initCachelinks;
+}
+
+let cachelinksListenersBound = false;
+
 function setupCachelinksEventListeners() {
+  if (cachelinksListenersBound) return;
+  cachelinksListenersBound = true;
   // Bind event listeners for cachelinks page elements
   const bindClick = (id, handler) => {
     const el = document.getElementById(id);
@@ -35,6 +46,33 @@ function setupCachelinksEventListeners() {
   bindClick('cachelink-save-btn', saveCachelink);
   bindClick('cachelink-revert-btn', revertCachelink);
   bindClick('cachelink-delete-btn', deleteCachelink);
+}
+
+let cachelinksDelegatedBound = false;
+
+function bindCachelinksDelegatedEvents() {
+  if (cachelinksDelegatedBound) return;
+  cachelinksDelegatedBound = true;
+
+  document.body.addEventListener('click', (event) => {
+    const target = event.target?.closest?.('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    const path = target.dataset.path;
+    const canonicalId = target.dataset.id;
+
+    if (action === 'cachelinks-folder-select' && path !== undefined) {
+      event.preventDefault();
+      selectCachelinkFolder(path);
+    } else if (action === 'cachelinks-folder-remove' && path !== undefined) {
+      event.stopPropagation();
+      event.preventDefault();
+      removeCachelinkFolder(path);
+    } else if (action === 'cachelinks-entry-select' && canonicalId) {
+      event.preventDefault();
+      selectCachelinkEntry(canonicalId);
+    }
+  });
 }
 
 async function loadCachelinks() {
@@ -287,31 +325,9 @@ async function removeCachelinkFolder(path) {
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/"/g, '"');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
-
-// Initialize event listeners for cachelinks actions
-document.addEventListener('DOMContentLoaded', function() {
-  document.body.addEventListener('click', (event) => {
-    const target = event.target?.closest?.('[data-action]');
-    if (!target) return;
-    const action = target.dataset.action;
-    const path = target.dataset.path;
-    const canonicalId = target.dataset.id;
-
-    if (action === 'cachelinks-folder-select' && path !== undefined) {
-      event.preventDefault();
-      selectCachelinkFolder(path);
-    } else if (action === 'cachelinks-folder-remove' && path !== undefined) {
-      event.stopPropagation();
-      event.preventDefault();
-      removeCachelinkFolder(path);
-    } else if (action === 'cachelinks-entry-select' && canonicalId) {
-      event.preventDefault();
-      selectCachelinkEntry(canonicalId);
-    }
-  });
-});

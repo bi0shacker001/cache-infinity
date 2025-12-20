@@ -21,6 +21,8 @@ services:
     ports:
       - "9080:9080"                           # expose WebDAV service
       - "9090:9090"                           # expose Web UI control plane
+    tmpfs:
+      - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
     volumes:
       - ${HOME}/.dev/docker-test/cache-infinity/backend:/backend            # persistent backend storage mount
       - ${HOME}/.dev/docker-test/cache-infinity/staging:/staging            # staging workspace for downloads
@@ -48,4 +50,3 @@ networks:
   cacheinfinity-db-link-test:
     driver: bridge
     internal: true
-

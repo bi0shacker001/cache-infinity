@@ -5,12 +5,16 @@
 
 // Users page state
 let currentUserTab = 'webui';
+let usersListenersBound = false;
+let usersDelegatedBound = false;
 
 // Initialize users page
 function initUsers() {
   console.log('Users page initialized - loading users data');
+  renderUserTopbar();
   setActiveUserTab(currentUserTab);
   setupUsersEventListeners();
+  bindUsersDelegatedEvents();
 }
 
 // Make the init function available globally for the page loader
@@ -19,6 +23,8 @@ if (typeof window !== 'undefined') {
 }
 
 function setupUsersEventListeners() {
+  if (usersListenersBound) return;
+  usersListenersBound = true;
   // Bind event listeners for users page elements
   const bindClick = (id, handler) => {
     const el = document.getElementById(id);
@@ -33,6 +39,48 @@ function setupUsersEventListeners() {
   bindClick('ui-user-save-btn', saveUser);
   bindClick('webdav-user-save-btn', saveWebdavUser);
   bindClick('api-key-generate-btn', generateApiKey);
+}
+
+function bindUsersDelegatedEvents() {
+  if (usersDelegatedBound) return;
+  usersDelegatedBound = true;
+
+  document.body.addEventListener('click', (event) => {
+    const target = event.target?.closest?.('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    const username = target.dataset.username;
+    const share = target.dataset.share;
+    const user = target.dataset.user;
+
+    if (action === 'ui-user-disable' && username) {
+      event.preventDefault();
+      deleteUiUser(username);
+    } else if (action === 'webdav-user-remove' && share && user) {
+      event.preventDefault();
+      handleDeleteWebdavUser(target);
+    } else if (action === 'api-key-revoke' && username) {
+      event.preventDefault();
+      revokeApiKey(username);
+    }
+  });
+}
+
+function renderUserTopbar() {
+  const container = document.getElementById('topbar-options');
+  if (!container) return;
+  container.innerHTML = `
+      <button class="topbar-option active" data-user-tab="webui">Web UI Users</button>
+      <button class="topbar-option" data-user-tab="webdav">WebDAV Users</button>
+      <button class="topbar-option" data-user-tab="keys">API Keys</button>
+    `;
+
+  container.querySelectorAll('.topbar-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.userTab;
+      setActiveUserTab(tab);
+    });
+  });
 }
 
 function setActiveUserTab(tab) {
@@ -50,7 +98,7 @@ async function loadUsers() {
   try {
     const data = await fetchJSON('users');
     const rows = data.users.map((u) =>
-      `<tr><td>${u.username}</td><td>${u.enabled ? 'Enabled' : 'Disabled'}</td><td>${u.is_admin ? 'Admin' : 'Viewer'}</td><td><button class="btn btn-secondary" type="button" data-action="ui-user-disable" data-username="${escapeHtml(u.username)}">Disable</button></td></tr>`
+      `<tr><td>${escapeHtml(u.username)}</td><td>${u.enabled ? 'Enabled' : 'Disabled'}</td><td>${u.is_admin ? 'Admin' : 'Viewer'}</td><td><button class="btn btn-secondary" type="button" data-action="ui-user-disable" data-username="${escapeHtml(u.username)}">Disable</button></td></tr>`
     ).join('');
 
     container.innerHTML = rows ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Role</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No Web UI users.</p>';
@@ -65,12 +113,12 @@ async function loadWebdavUsers() {
 
   try {
     const data = await fetchJSON('webdav-users');
-    select.innerHTML = (data.shares || []).map((s) => `<option value="${s.name}">${s.name} (${s.frontend})</option>`).join('');
+    select.innerHTML = (data.shares || []).map((s) => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} (${escapeHtml(s.frontend)})</option>`).join('');
 
     const blocks = data.shares.map((share) => {
       const rows = share.users.map((user) => {
         return `<tr>
-          <td>${user.username}</td>
+          <td>${escapeHtml(user.username)}</td>
           <td>${user.enabled ? 'Enabled' : 'Disabled'}</td>
           <td>${user.login ? 'Login' : '—'}</td>
           <td>${user.read ? 'Read' : '—'}</td>
@@ -80,7 +128,7 @@ async function loadWebdavUsers() {
         </tr>`;
       }).join('');
 
-      return `<div class="share-block"><h4>${share.name} <span class="badge">${share.frontend}</span></h4>${rows ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Login</th><th>Read</th><th>Write</th><th>Cache</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No users assigned.</p>'}</div>`;
+      return `<div class="share-block"><h4>${escapeHtml(share.name)} <span class="badge">${escapeHtml(share.frontend)}</span></h4>${rows ? `<div class="table-wrap"><table><thead><tr><th>User</th><th>Status</th><th>Login</th><th>Read</th><th>Write</th><th>Cache</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="empty">No users assigned.</p>'}</div>`;
     }).join('');
 
     container.innerHTML = blocks || '<p class="empty">No shares configured.</p>';
@@ -191,49 +239,9 @@ async function revokeApiKey(username) {
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/"/g, '"')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
-
-// Initialize event listeners for users actions
-document.addEventListener('DOMContentLoaded', function() {
-  // Set up topbar options for user tabs
-  const container = document.getElementById('topbar-options');
-  if (container) {
-    container.innerHTML = `
-      <button class="topbar-option active" data-user-tab="webui">Web UI Users</button>
-      <button class="topbar-option" data-user-tab="webdav">WebDAV Users</button>
-      <button class="topbar-option" data-user-tab="keys">API Keys</button>
-    `;
-
-    container.querySelectorAll('.topbar-option').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const tab = btn.dataset.userTab;
-        setActiveUserTab(tab);
-      });
-    });
-  }
-
-  document.body.addEventListener('click', (event) => {
-    const target = event.target?.closest?.('[data-action]');
-    if (!target) return;
-    const action = target.dataset.action;
-    const username = target.dataset.username;
-    const share = target.dataset.share;
-    const user = target.dataset.user;
-
-    if (action === 'ui-user-disable' && username) {
-      event.preventDefault();
-      deleteUiUser(username);
-    } else if (action === 'webdav-user-remove' && share && user) {
-      event.preventDefault();
-      handleDeleteWebdavUser(target);
-    } else if (action === 'api-key-revoke' && username) {
-      event.preventDefault();
-      revokeApiKey(username);
-    }
-  });
-});

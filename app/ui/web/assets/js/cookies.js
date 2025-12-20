@@ -6,11 +6,22 @@
 // Initialize cookies page
 export function initCookies() {
   console.log('Cookies page initialized - loading cookies data');
+  const topbar = document.getElementById('topbar-options');
+  if (topbar) topbar.innerHTML = '';
   loadCookies();
   setupCookiesEventListeners();
+  bindCookiesDelegatedEvents();
 }
 
+if (typeof window !== 'undefined') {
+  window.initCookies = initCookies;
+}
+
+let cookiesListenersBound = false;
+
 function setupCookiesEventListeners() {
+  if (cookiesListenersBound) return;
+  cookiesListenersBound = true;
   // Bind event listeners for cookies page elements
   const bindClick = (id, handler) => {
     const el = document.getElementById(id);
@@ -25,10 +36,36 @@ function setupCookiesEventListeners() {
   bindClick('cookies-domain-add-btn', addCookieDomain);
 }
 
+let cookiesDelegatedBound = false;
+
+function bindCookiesDelegatedEvents() {
+  if (cookiesDelegatedBound) return;
+  cookiesDelegatedBound = true;
+
+  document.body.addEventListener('click', (event) => {
+    const target = event.target?.closest?.('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    const domain = target.dataset.domain;
+
+    if (action === 'cookie-refresh' && domain) {
+      event.preventDefault();
+      refreshCookie(domain);
+    } else if (action === 'cookie-upload' && domain) {
+      event.preventDefault();
+      showCookieUpload(domain);
+    } else if (action === 'cookie-credentials' && domain) {
+      event.preventDefault();
+      showCredentialDialog(domain);
+    }
+  });
+}
+
 async function loadCookies() {
   try {
     const data = await fetchJSON('cookies');
     const cookies = data.cookies.map((c) => {
+      const domain = escapeHtml(c.domain);
       let className = 'cookie-item';
       if (c.auth_fail) className += ' auth-fail';
       else if (c.cookie_present) className += ' has-cookie';
@@ -37,17 +74,17 @@ async function loadCookies() {
       return `
         <div class="${className}">
           <div class="cookie-header">
-            <div class="cookie-domain">${c.domain}</div>
+            <div class="cookie-domain">${domain}</div>
             <div class="cookie-actions">
-              ${c.supports_generation ? `<button class="btn btn-secondary btn-small" type="button" data-action="cookie-credentials" data-domain="${escapeHtml(c.domain)}">Update Credentials</button>` : ''}
-              <button class="btn btn-secondary btn-small" type="button" data-action="cookie-upload" data-domain="${escapeHtml(c.domain)}">Upload cookies.txt</button>
-              ${c.configured ? `<button class="btn btn-primary btn-small" type="button" data-action="cookie-refresh" data-domain="${escapeHtml(c.domain)}">Refresh</button>` : ''}
+              ${c.supports_generation ? `<button class="btn btn-secondary btn-small" type="button" data-action="cookie-credentials" data-domain="${domain}">Update Credentials</button>` : ''}
+              <button class="btn btn-secondary btn-small" type="button" data-action="cookie-upload" data-domain="${domain}">Upload cookies.txt</button>
+              ${c.configured ? `<button class="btn btn-primary btn-small" type="button" data-action="cookie-refresh" data-domain="${domain}">Refresh</button>` : ''}
             </div>
           </div>
           <div class="cookie-info">
             <div><strong>Cookie Present:</strong> ${c.cookie_present ? '<span class="badge success">Yes</span>' : '<span class="badge warning">No</span>'}</div>
             <div><strong>Auth Failure:</strong> ${c.auth_fail ? '<span class="badge danger">Yes</span>' : '<span class="badge success">No</span>'}</div>
-            ${c.last_error ? `<div><strong>Last Error:</strong> ${c.last_error}</div>` : ''}
+            ${c.last_error ? `<div><strong>Last Error:</strong> ${escapeHtml(c.last_error)}</div>` : ''}
             ${c.last_updated ? `<div><strong>Last Updated:</strong> ${new Date(c.last_updated * 1000).toLocaleString()}</div>` : ''}
           </div>
         </div>
@@ -153,29 +190,9 @@ async function showCookieUpload(domain) {
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/"/g, '"');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
-
-// Initialize event listeners for cookies actions
-document.addEventListener('DOMContentLoaded', function() {
-  document.body.addEventListener('click', (event) => {
-    const target = event.target?.closest?.('[data-action]');
-    if (!target) return;
-    const action = target.dataset.action;
-    const domain = target.dataset.domain;
-
-    if (action === 'cookie-refresh' && domain) {
-      event.preventDefault();
-      refreshCookie(domain);
-    } else if (action === 'cookie-upload' && domain) {
-      event.preventDefault();
-      showCookieUpload(domain);
-    } else if (action === 'cookie-credentials' && domain) {
-      event.preventDefault();
-      showCredentialDialog(domain);
-    }
-  });
-});

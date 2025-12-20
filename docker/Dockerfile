@@ -1,4 +1,4 @@
-FROM python:3.14-alpine
+FROM python:3.14
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -10,15 +10,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 ARG UID=1000
 ARG GID=1000
-RUN addgroup -g "${GID}" cacheinfinity && \
-    adduser -D -G cacheinfinity -u "${UID}" cacheinfinity
+RUN groupadd -g "${GID}" cacheinfinity && \
+    useradd -m -u "${UID}" -g "${GID}" cacheinfinity
 
 WORKDIR /app
 COPY pyproject.toml README.md SPEC.md setup.cfg setup.py ./
-RUN apk add --no-cache --virtual .build-deps build-base libffi-dev openssl-dev && \
-    pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir "WsgiDAV[all]>=4.0" && \
-    apk del .build-deps
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        libffi-dev \
+        libssl-dev \
+        libcurl4-openssl-dev \
+        python3-dev \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir "WsgiDAV[all]>=4.0"
 COPY app/ ./
 RUN pip install --no-cache-dir \
         PyYAML>=6.0 \
@@ -27,7 +34,8 @@ RUN pip install --no-cache-dir \
         psycopg[binary]>=3.2 \
         pytest>=8.0 \
         requests>=2.0 \
-        beautifulsoup4>=4.0 && \
+        beautifulsoup4>=4.0 \
+        pycurl>=7.45.7 && \
     mkdir -p /backend /staging /config && \
     chown -R cacheinfinity:cacheinfinity /app /backend /staging /config
 

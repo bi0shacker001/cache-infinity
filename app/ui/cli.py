@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
+import os
+import socket
 from pathlib import Path
 from typing import Any
-
-from .backend import create_cli_management
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,231 +25,430 @@ def _require_file(path: str) -> Path:
     return file_path
 
 
-def _handle_status(mgmt, args) -> int:
-    _print_json(mgmt.get_system_status())
+class LocalControlClient:
+    def __init__(self, socket_path: Path) -> None:
+        self._socket_path = socket_path
+
+    def request(self, payload: dict) -> dict:
+        if not self._socket_path.exists():
+            raise RuntimeError(f"Local control socket not found: {self._socket_path}")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(str(self._socket_path))
+            sock.sendall(json.dumps(payload).encode("utf-8"))
+            sock.shutdown(socket.SHUT_WR)
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        response = json.loads(data.decode("utf-8") or "{}")
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "Unknown error"))
+        return response.get("result", {})
+
+
+def _handle_status(client: LocalControlClient, args) -> int:
+    _print_json(client.request({"command": "status"}))
     return 0
 
 
-def _handle_storage(mgmt, args) -> int:
+def _handle_storage(client: LocalControlClient, args) -> int:
     if args.action == "list":
-        result = mgmt.list_storage_entries(
-            location=args.location,
-            relative_path=args.path,
-            sort_by=args.sort_by,
-            sort_order=args.sort_order,
-            view_mode=args.view_mode,
-            show_hidden=args.show_hidden,
-            search_query=args.search_query,
+        result = client.request(
+            {
+                "command": "storage",
+                "action": "list",
+                "args": {
+                    "location": args.location,
+                    "path": args.path,
+                    "sort_by": args.sort_by,
+                    "sort_order": args.sort_order,
+                    "view_mode": args.view_mode,
+                    "show_hidden": args.show_hidden,
+                    "search_query": args.search_query,
+                },
+            }
         )
         _print_json(result)
         return 0
     if args.action == "upload":
         data = _require_file(args.file).read_bytes()
-        mgmt.upload_storage_file(
-            location=args.location,
-            relative_path=args.path,
-            filename=Path(args.file).name,
-            file_data=data,
+        client.request(
+            {
+                "command": "storage",
+                "action": "upload",
+                "args": {
+                    "location": args.location,
+                    "path": args.path,
+                    "filename": Path(args.file).name,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            }
         )
         print("ok")
         return 0
     if args.action == "mkdir":
-        mgmt.create_storage_folder(
-            location=args.location,
-            relative_path=args.path,
-            folder_name=args.name,
+        client.request(
+            {
+                "command": "storage",
+                "action": "mkdir",
+                "args": {
+                    "location": args.location,
+                    "path": args.path,
+                    "name": args.name,
+                },
+            }
         )
         print("ok")
         return 0
     if args.action == "delete":
-        mgmt.delete_storage_entry(location=args.location, relative_path=args.path)
+        client.request(
+            {
+                "command": "storage",
+                "action": "delete",
+                "args": {
+                    "location": args.location,
+                    "path": args.path,
+                },
+            }
+        )
         print("ok")
         return 0
     raise ValueError("Unknown storage action")
 
 
-def _handle_cachelinks(mgmt, args) -> int:
+def _handle_cachelinks(client: LocalControlClient, args) -> int:
     if args.action == "list":
-        _print_json(mgmt.describe_cachelinks())
+        result = client.request({"command": "cachelinks", "action": "list"})
+        _print_json(result.get("cachelinks", result))
         return 0
     if args.action == "tree":
-        _print_json(mgmt.describe_cachelink_tree())
+        _print_json(client.request({"command": "cachelinks", "action": "tree"}))
         return 0
     if args.action == "create":
-        result = mgmt.create_cachelink(
-            parent_path=args.parent_path,
-            name=args.name,
-            url=args.url,
-            subfolder=args.subfolder,
+        result = client.request(
+            {
+                "command": "cachelinks",
+                "action": "create",
+                "args": {
+                    "parent_path": args.parent_path,
+                    "name": args.name,
+                    "url": args.url,
+                    "subfolder": args.subfolder,
+                },
+            }
         )
         _print_json(result)
         return 0
     if args.action == "update":
-        mgmt.update_cachelink(args.canonical_id, url=args.url, subfolder=args.subfolder)
+        client.request(
+            {
+                "command": "cachelinks",
+                "action": "update",
+                "args": {
+                    "canonical_id": args.canonical_id,
+                    "url": args.url,
+                    "subfolder": args.subfolder,
+                },
+            }
+        )
         print("ok")
         return 0
     if args.action == "delete":
-        mgmt.delete_cachelink(args.canonical_id)
+        client.request(
+            {
+                "command": "cachelinks",
+                "action": "delete",
+                "args": {"canonical_id": args.canonical_id},
+            }
+        )
         print("ok")
         return 0
     if args.action == "preview":
-        _print_json(mgmt.preview_cachelink(args.url, args.subfolder))
+        _print_json(
+            client.request(
+                {
+                    "command": "cachelinks",
+                    "action": "preview",
+                    "args": {"url": args.url, "subfolder": args.subfolder},
+                }
+            )
+        )
         return 0
     if args.action == "folder-add":
-        mgmt.add_cachelink_folder(args.path)
+        client.request(
+            {
+                "command": "cachelinks",
+                "action": "folder-add",
+                "args": {"path": args.path},
+            }
+        )
         print("ok")
         return 0
     if args.action == "folder-delete":
-        mgmt.delete_cachelink_folder(args.path)
+        client.request(
+            {
+                "command": "cachelinks",
+                "action": "folder-delete",
+                "args": {"path": args.path},
+            }
+        )
         print("ok")
         return 0
     raise ValueError("Unknown cachelinks action")
 
 
-def _handle_cookies(mgmt, args) -> int:
+def _handle_cookies(client: LocalControlClient, args) -> int:
     if args.action == "list":
-        _print_json(mgmt.describe_cookies())
+        _print_json(client.request({"command": "cookies", "action": "list"}).get("cookies", []))
         return 0
     if args.action == "upload":
         if args.file:
             content = _require_file(args.file).read_text(encoding="utf-8")
         else:
             content = args.content or ""
-        mgmt.upload_cookie_file(args.domain, content)
+        client.request(
+            {
+                "command": "cookies",
+                "action": "upload",
+                "args": {"domain": args.domain, "content": content},
+            }
+        )
         print("ok")
         return 0
     if args.action == "credentials":
-        mgmt.update_cookie_credentials(args.domain, args.username, args.password)
+        client.request(
+            {
+                "command": "cookies",
+                "action": "credentials",
+                "args": {
+                    "domain": args.domain,
+                    "username": args.username,
+                    "password": args.password,
+                },
+            }
+        )
         print("ok")
         return 0
     if args.action == "refresh":
-        mgmt.regenerate_cookie(args.domain)
+        client.request(
+            {
+                "command": "cookies",
+                "action": "refresh",
+                "args": {"domain": args.domain},
+            }
+        )
         print("ok")
         return 0
     if args.action == "domain-add":
-        mgmt.add_cookie_domain(
-            domain=args.domain,
-            credfile=args.credfile,
-            cookie_jar=args.cookie_jar,
-            credfile_path=args.credfile_path,
+        client.request(
+            {
+                "command": "cookies",
+                "action": "domain-add",
+                "args": {
+                    "domain": args.domain,
+                    "credfile": args.credfile,
+                    "cookie_jar": args.cookie_jar,
+                    "credfile_path": args.credfile_path,
+                },
+            }
         )
         print("ok")
         return 0
     raise ValueError("Unknown cookies action")
 
 
-def _handle_users(mgmt, args) -> int:
+def _handle_users(client: LocalControlClient, args) -> int:
     if args.user_type == "admin":
         if args.action == "list":
-            _print_json(mgmt.list_users(purpose="webui"))
+            result = client.request(
+                {"command": "users", "action": "list", "args": {"user_type": "admin"}}
+            )
+            _print_json(result.get("users", []))
             return 0
         if args.action == "set":
-            mgmt.upsert_user(
-                username=args.username,
-                password=args.password,
-                enabled=args.enabled,
-                is_admin=args.admin,
-                purpose="webui",
+            client.request(
+                {
+                    "command": "users",
+                    "action": "set",
+                    "args": {
+                        "user_type": "admin",
+                        "username": args.username,
+                        "password": args.password,
+                        "enabled": args.enabled,
+                        "admin": args.admin,
+                    },
+                }
             )
             print("ok")
             return 0
         if args.action == "disable":
-            mgmt.disable_user(args.username, purpose="webui")
+            client.request(
+                {
+                    "command": "users",
+                    "action": "disable",
+                    "args": {"user_type": "admin", "username": args.username},
+                }
+            )
             print("ok")
             return 0
     elif args.user_type == "webdav":
         if args.action == "list":
-            _print_json(mgmt.describe_webdav_users())
+            _print_json(
+                client.request({"command": "users", "action": "list", "args": {"user_type": "webdav"}})
+            )
             return 0
         if args.action == "set":
-            mgmt.upsert_user(
-                username=args.username,
-                password=args.password,
-                enabled=args.enabled,
-                is_admin=False,
-                purpose="webdav",
-                share=args.share,
-                login=args.login,
-                read=args.read,
-                write=args.write,
-                cache=args.cache,
+            client.request(
+                {
+                    "command": "users",
+                    "action": "set",
+                    "args": {
+                        "user_type": "webdav",
+                        "username": args.username,
+                        "password": args.password,
+                        "enabled": args.enabled,
+                        "share": args.share,
+                        "login": args.login,
+                        "read": args.read,
+                        "write": args.write,
+                        "cache": args.cache,
+                    },
+                }
             )
             print("ok")
             return 0
         if args.action == "disable":
-            mgmt.disable_user(args.username, purpose="webdav", share=args.share)
+            client.request(
+                {
+                    "command": "users",
+                    "action": "disable",
+                    "args": {
+                        "user_type": "webdav",
+                        "username": args.username,
+                        "share": args.share,
+                    },
+                }
+            )
             print("ok")
             return 0
     raise ValueError("Unknown users action")
 
 
-def _handle_webdav(mgmt, args) -> int:
+def _handle_webdav(client: LocalControlClient, args) -> int:
     if args.action == "list":
-        _print_json(mgmt.describe_webdav_users())
+        _print_json(client.request({"command": "webdav", "action": "list"}))
         return 0
     if args.action == "set":
-        mgmt.upsert_user(
-            username=args.username,
-            password=args.password,
-            enabled=args.enabled,
-            is_admin=False,
-            purpose="webdav",
-            share=args.share,
-            login=args.login,
-            read=args.read,
-            write=args.write,
-            cache=args.cache,
+        client.request(
+            {
+                "command": "webdav",
+                "action": "set",
+                "args": {
+                    "share": args.share,
+                    "username": args.username,
+                    "password": args.password,
+                    "enabled": args.enabled,
+                    "login": args.login,
+                    "read": args.read,
+                    "write": args.write,
+                    "cache": args.cache,
+                },
+            }
         )
         print("ok")
         return 0
     if args.action == "remove":
-        mgmt.disable_user(args.username, purpose="webdav", share=args.share)
+        client.request(
+            {
+                "command": "webdav",
+                "action": "remove",
+                "args": {"share": args.share, "username": args.username},
+            }
+        )
         print("ok")
         return 0
     raise ValueError("Unknown webdav action")
 
 
-def _handle_keys(mgmt, args) -> int:
+def _handle_keys(client: LocalControlClient, args) -> int:
     if args.action == "list":
-        _print_json(mgmt.list_api_keys())
+        result = client.request({"command": "keys", "action": "list"})
+        _print_json(result.get("keys", []))
         return 0
     if args.action == "generate":
-        _print_json(mgmt.generate_api_key(args.username))
+        _print_json(
+            client.request({"command": "keys", "action": "generate", "args": {"username": args.username}})
+        )
         return 0
     if args.action == "revoke":
-        mgmt.revoke_api_key(args.username)
+        client.request({"command": "keys", "action": "revoke", "args": {"username": args.username}})
         print("ok")
         return 0
     raise ValueError("Unknown keys action")
 
 
-def _handle_settings(mgmt, args) -> int:
+def _handle_settings(client: LocalControlClient, args) -> int:
     if args.action == "detail":
-        _print_json(mgmt.describe_settings_detail())
+        _print_json(client.request({"command": "settings", "action": "detail"}))
         return 0
     if args.action == "update-detail":
         payload = json.loads(_require_file(args.file).read_text(encoding="utf-8"))
-        mgmt.update_settings_detail(payload)
+        client.request({"command": "settings", "action": "update-detail", "args": {"payload": payload}})
         print("ok")
         return 0
     if args.action == "get-config":
-        _print_json(mgmt.get_config_payload())
+        _print_json(client.request({"command": "settings", "action": "get-config"}))
         return 0
     if args.action == "update-config":
         settings_text = _require_file(args.settings_file).read_text(encoding="utf-8") if args.settings_file else None
         cachelinks_text = _require_file(args.cachelinks_file).read_text(encoding="utf-8") if args.cachelinks_file else None
-        mgmt.update_config(settings_text=settings_text, cachelinks_text=cachelinks_text)
+        client.request(
+            {
+                "command": "settings",
+                "action": "update-config",
+                "args": {
+                    "settings_text": settings_text,
+                    "cachelinks_text": cachelinks_text,
+                },
+            }
+        )
         print("ok")
         return 0
     raise ValueError("Unknown settings action")
 
 
-def _handle_maintenance(mgmt, args) -> int:
+def _handle_maintenance(client: LocalControlClient, args) -> int:
     if args.action == "degraded":
-        _print_json(mgmt.list_degraded_targets())
+        _print_json(client.request({"command": "maintenance", "action": "degraded"}).get("degraded", []))
         return 0
     if args.action == "reindex":
-        mgmt.trigger_reindex(args.canonical_id)
+        client.request(
+            {
+                "command": "maintenance",
+                "action": "reindex",
+                "args": {"canonical_id": args.canonical_id},
+            }
+        )
+        print("ok")
+        return 0
+    if args.action == "reload":
+        client.request(
+            {
+                "command": "maintenance",
+                "action": "reload",
+                "args": {"allow_switch": args.allow_switch, "dump": args.dump},
+            }
+        )
+        print("ok")
+        return 0
+    if args.action == "reinit":
+        client.request({"command": "maintenance", "action": "reinit"})
+        print("ok")
+        return 0
+    if args.action == "shutdown":
+        client.request({"command": "maintenance", "action": "shutdown"})
         print("ok")
         return 0
     raise ValueError("Unknown maintenance action")
@@ -384,6 +584,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     maintenance_sub.add_parser("degraded", help="List degraded targets")
     maintenance_reindex = maintenance_sub.add_parser("reindex", help="Trigger reindex")
     maintenance_reindex.add_argument("--canonical-id", required=True)
+    maintenance_reload = maintenance_sub.add_parser("reload", help="Reload configuration and reinitialize service")
+    maintenance_reload.add_argument("--allow-switch", action="store_true", help="Allow switching databases on reload")
+    maintenance_reload.add_argument("--dump", action="store_true", help="Dump bootstrap.yml before switching databases")
+    maintenance_sub.add_parser("reinit", help="Restart the running service process")
+    maintenance_sub.add_parser("shutdown", help="Stop the running service process")
 
     return parser
 
@@ -393,25 +598,42 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    mgmt = create_cli_management()
+    runtime_root = Path("/run")
+    if not runtime_root.exists():
+        runtime_root = Path("/var/run")
+    runtime_path = runtime_root / "cacheinfinity" / "runtime.json"
+    if not runtime_path.exists():
+        raise RuntimeError("No running server found (missing /run/cacheinfinity/runtime.json)")
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    pid = payload.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            runtime_path.unlink(missing_ok=True)
+            raise RuntimeError("Stale runtime file (server not running)")
+    socket_path = Path(payload.get("socket_path", ""))
+    if not socket_path:
+        raise RuntimeError("Invalid runtime info: socket_path missing")
+    client = LocalControlClient(socket_path)
     if args.command == "status":
-        return _handle_status(mgmt, args)
+        return _handle_status(client, args)
     if args.command == "storage":
-        return _handle_storage(mgmt, args)
+        return _handle_storage(client, args)
     if args.command == "cachelinks":
-        return _handle_cachelinks(mgmt, args)
+        return _handle_cachelinks(client, args)
     if args.command == "cookies":
-        return _handle_cookies(mgmt, args)
+        return _handle_cookies(client, args)
     if args.command == "users":
-        return _handle_users(mgmt, args)
+        return _handle_users(client, args)
     if args.command == "webdav":
-        return _handle_webdav(mgmt, args)
+        return _handle_webdav(client, args)
     if args.command == "keys":
-        return _handle_keys(mgmt, args)
+        return _handle_keys(client, args)
     if args.command == "settings":
-        return _handle_settings(mgmt, args)
+        return _handle_settings(client, args)
     if args.command == "maintenance":
-        return _handle_maintenance(mgmt, args)
+        return _handle_maintenance(client, args)
     raise SystemExit("Unknown command")
 
 

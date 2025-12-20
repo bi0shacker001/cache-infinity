@@ -6,11 +6,21 @@
 // Initialize maintenance page
 export function initMaintenance() {
   console.log('Maintenance page initialized - loading maintenance data');
+  const topbar = document.getElementById('topbar-options');
+  if (topbar) topbar.innerHTML = '';
   loadDegraded();
   setupMaintenanceEventListeners();
 }
 
+if (typeof window !== 'undefined') {
+  window.initMaintenance = initMaintenance;
+}
+
+let maintenanceListenersBound = false;
+
 function setupMaintenanceEventListeners() {
+  if (maintenanceListenersBound) return;
+  maintenanceListenersBound = true;
   // Bind event listeners for maintenance page elements
   const bindClick = (id, handler) => {
     const el = document.getElementById(id);
@@ -23,6 +33,8 @@ function setupMaintenanceEventListeners() {
   };
 
   bindClick('reindex-btn', requestReindex);
+  bindClick('reload-btn', requestReload);
+  bindClick('reinit-btn', requestReinit);
 }
 
 async function loadDegraded() {
@@ -45,5 +57,47 @@ async function requestReindex() {
     alert('Reindex queued.');
   } catch (err) {
     alert('Error: ' + err.message);
+  }
+}
+
+async function requestReload() {
+  const status = document.getElementById('reload-status');
+  if (status) {
+    status.textContent = 'Reloading...';
+    status.className = 'status-msg';
+  }
+  try {
+    const allowSwitch = document.getElementById('reload-allow-switch')?.checked || false;
+    const dump = document.getElementById('reload-dump')?.checked || false;
+    await fetchJSON('reload', { method: 'POST', body: JSON.stringify({ allow_switch: allowSwitch, dump }) });
+    if (status) {
+      status.textContent = 'Reload completed.';
+      status.className = 'status-msg success';
+    }
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message;
+      status.className = 'status-msg error';
+    }
+  }
+}
+
+async function requestReinit() {
+  const status = document.getElementById('reinit-status');
+  if (status) {
+    status.textContent = 'Restarting...';
+    status.className = 'status-msg';
+  }
+  try {
+    await fetchJSON('reinit', { method: 'POST', body: JSON.stringify({}) });
+    if (status) {
+      status.textContent = 'Reinit triggered.';
+      status.className = 'status-msg success';
+    }
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message;
+      status.className = 'status-msg error';
+    }
   }
 }

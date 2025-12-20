@@ -19,6 +19,8 @@ services:
     ports:
       - "8080:8080"                           # expose WebDAV service
       - "8090:8090"                           # expose Web UI control plane
+    tmpfs:
+      - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
     volumes:
       - ./volumes/backend:/backend            # persistent backend storage mount
       - ./volumes/staging:/staging            # staging workspace for downloads

@@ -32,7 +32,15 @@ from cache.cachelinks import (
     render_cachelink_records,
 )
 from cache.checksum import ChecksumCatalog
-from core.config import ConfigError, Settings, load_two_file_settings, load_database_backed_settings, ConfigService
+from core.config import (
+    ConfigError,
+    Settings,
+    load_two_file_settings,
+    load_database_backed_settings,
+    load_database_settings,
+    validate_settings,
+    ConfigService,
+)
 from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
 from net.fetcher import Fetcher
 from db.dbmanage import DatabaseManager
@@ -224,6 +232,58 @@ class CacheInfinityService:
     def get_webui_app(self) -> WebUIApp:
         with self._lock:
             return self._webui_app
+
+    def reload_from_database(
+        self,
+        args=None,
+        env=None,
+        *,
+        allow_switch: bool = False,
+        dump: bool = False,
+    ) -> None:
+        config_dir = self.settings.config_dir
+        effective_args = args if args is not None else getattr(self, "_reload_args", None)
+        effective_env = env if env is not None else getattr(self, "_reload_env", os.environ)
+
+        current_db = self.settings.database
+        current_signature = self._database_signature(current_db)
+        new_db = load_database_settings(config_dir, effective_args, effective_env)
+        new_signature = self._database_signature(new_db)
+        if new_signature != current_signature and not allow_switch:
+            raise ConfigError("Database switch requires allow_switch")
+        if dump:
+            if new_signature != current_signature and not allow_switch:
+                raise ConfigError("Dump requires allow_switch when switching databases")
+            from db.backupmgmt import DatabaseBackupManager
+            manager = DatabaseBackupManager(self.index_db, config_dir)
+            manager.export_config_to_yaml(config_dir / "bootstrap.yml")
+
+        bootstrap_path = config_dir / "bootstrap.yml" if dump else None
+
+        settings = load_database_backed_settings(
+            config_dir,
+            effective_args,
+            effective_env,
+            bootstrap_path=bootstrap_path,
+        )
+        errors = validate_settings(settings)
+        if errors:
+            for error in errors:
+                _LOGGER.error("Reload validation error: %s", error)
+            raise ConfigError("Reload aborted due to invalid configuration")
+        self.apply_settings(settings, self.credentials)
+        self.ensure_filesystems()
+
+    def _database_signature(self, db_settings) -> tuple[object, ...]:
+        sqlite_path = db_settings.sqlite_path
+        if not sqlite_path and db_settings.config_dir:
+            sqlite_path = db_settings.config_dir / "cacheinfinity.db"
+        return (
+            db_settings.engine,
+            str(sqlite_path) if sqlite_path else None,
+            db_settings.postgres_dsn or db_settings.database_url,
+            db_settings.db_user,
+        )
 
     # Internal helpers ----------------------------------------------------
     def _build_wsgi_app(self):

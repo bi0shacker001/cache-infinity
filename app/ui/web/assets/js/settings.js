@@ -6,12 +6,17 @@
 // Settings page state
 let settingsDetail = null;
 let settingsLoaded = false;
+let settingsListenersBound = false;
+let settingsDelegatedBound = false;
 
 // Initialize settings page
 function initSettings() {
   console.log('Settings page initialized - loading settings data');
+  const topbar = document.getElementById('topbar-options');
+  if (topbar) topbar.innerHTML = '';
   loadSettingsDetail();
   setupSettingsEventListeners();
+  bindSettingsDelegatedEvents();
 }
 
 // Make the init function available globally for the page loader
@@ -20,6 +25,8 @@ if (typeof window !== 'undefined') {
 }
 
 function setupSettingsEventListeners() {
+  if (settingsListenersBound) return;
+  settingsListenersBound = true;
   // Bind event listeners for settings page elements
   const bindClick = (id, handler) => {
     const el = document.getElementById(id);
@@ -42,6 +49,37 @@ function setupSettingsEventListeners() {
   }
 }
 
+function bindSettingsDelegatedEvents() {
+  if (settingsDelegatedBound) return;
+  settingsDelegatedBound = true;
+
+  document.body.addEventListener('click', (event) => {
+    const target = event.target?.closest?.('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+
+    if (action === 'settings-backend-add') {
+      event.preventDefault();
+      addBackendBlock();
+    } else if (action === 'settings-cookie-add') {
+      event.preventDefault();
+      addCookieConfig();
+    } else if (action === 'settings-share-add') {
+      event.preventDefault();
+      addShareBlock();
+    } else if (action === 'settings-backend-remove') {
+      event.preventDefault();
+      removeBackendBlock(target);
+    } else if (action === 'settings-cookie-remove') {
+      event.preventDefault();
+      removeCookieConfig(target);
+    } else if (action === 'settings-share-remove') {
+      event.preventDefault();
+      removeShareBlock(target);
+    }
+  });
+}
+
 async function loadSettingsDetail(force = false) {
   if (settingsLoaded && !force) return;
 
@@ -58,7 +96,7 @@ function renderSettingsDetail() {
   if (!settingsDetail) return;
 
   const detail = settingsDetail;
-  const esc = (v) => (v === null || v === undefined ? '' : String(v).replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"'));
+  const esc = escapeHtml;
   const container = document.getElementById('settings-dynamic');
   const staging = detail.staging || {};
   const limits = detail.limits || {};
@@ -614,10 +652,10 @@ async function handleSettingsImport(event) {
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
-    .replace(/&/g, '&')
-    .replace(/</g, '<')
-    .replace(/>/g, '>')
-    .replace(/"/g, '"')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
 
@@ -634,32 +672,3 @@ function parseList(value) {
     .map((v) => v.trim())
     .filter(Boolean);
 }
-
-// Initialize event listeners for settings actions
-document.addEventListener('DOMContentLoaded', function() {
-  document.body.addEventListener('click', (event) => {
-    const target = event.target?.closest?.('[data-action]');
-    if (!target) return;
-    const action = target.dataset.action;
-
-    if (action === 'settings-backend-add') {
-      event.preventDefault();
-      addBackendBlock();
-    } else if (action === 'settings-cookie-add') {
-      event.preventDefault();
-      addCookieConfig();
-    } else if (action === 'settings-share-add') {
-      event.preventDefault();
-      addShareBlock();
-    } else if (action === 'settings-backend-remove') {
-      event.preventDefault();
-      removeBackendBlock(target);
-    } else if (action === 'settings-cookie-remove') {
-      event.preventDefault();
-      removeCookieConfig(target);
-    } else if (action === 'settings-share-remove') {
-      event.preventDefault();
-      removeShareBlock(target);
-    }
-  });
-});

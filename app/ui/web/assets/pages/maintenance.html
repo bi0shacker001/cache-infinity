@@ -10,3 +10,17 @@
     <div id="degraded-table">Loading…</div>
   </div>
 </div>
+<div class="panel">
+  <h3>Reload Service</h3>
+  <p class="panel-subtitle">Reinitialize configuration and reload runtime state.</p>
+  <div class="check-row">
+    <label><input type="checkbox" id="reload-allow-switch" /> Allow DB switch</label>
+    <label><input type="checkbox" id="reload-dump" /> Dump bootstrap before switch</label>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-secondary" id="reload-btn" type="button">Reload Now</button>
+    <button class="btn btn-danger" id="reinit-btn" type="button">Reinit (Restart)</button>
+  </div>
+  <div id="reload-status" class="status-msg"></div>
+  <div id="reinit-status" class="status-msg"></div>
+</div>

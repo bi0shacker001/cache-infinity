@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..services import CacheInfinityService
     from ..backend import ManagementLayer
 
-from ..backend import ManagementLayer
+from ..backend import ManagementLayer, ensure_local_control_server
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class WebUIApp:
         _LOGGER.info("Initializing WebUI application")
         self.service = service
         self.management = ManagementLayer(service)
+        ensure_local_control_server(service)
         self.sessions: dict[str, dict[str, object]] = {}
         self.pages: Dict[str, str] = {}
         self.handlers: Dict[str, Any] = {}
@@ -467,6 +468,30 @@ class WebUIApp:
             if 'maintenance' in self.handlers:
                 return self._handle_json_request(environ, start_response, self.handlers['maintenance'].handle_reindex)
             return self._json_error(start_response, "Maintenance handler not available", status="500 Internal Server Error")
+
+        if path == "/reload" and method == "POST":
+            _LOGGER.debug("Handling reload request")
+            try:
+                length = int(environ.get("CONTENT_LENGTH") or 0)
+                body = environ["wsgi.input"].read(length) if length > 0 else b""
+                try:
+                    payload = json.loads(body.decode("utf-8") or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                allow_switch = bool(payload.get("allow_switch"))
+                dump = bool(payload.get("dump"))
+                result = self.management.reload_service(allow_switch=allow_switch, dump=dump)
+                return self._json_response(start_response, result)
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="500 Internal Server Error")
+
+        if path == "/reinit" and method == "POST":
+            _LOGGER.debug("Handling reinit request")
+            try:
+                result = self.management.reinit_service()
+                return self._json_response(start_response, result)
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="500 Internal Server Error")
 
         if path == "/degraded" and method == "GET":
             _LOGGER.debug("Serving degraded targets list")

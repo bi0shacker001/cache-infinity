@@ -2,11 +2,14 @@
 """CacheInfinity server implementation and initialization logic."""
 
 import argparse
+import atexit
+import json
 import logging
 import os
 import signal
 import sys
 import threading
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -22,6 +25,12 @@ _LOGGER = logging.getLogger(__name__)
 
 _CONF_DIR_ENV = "CONFIG_DIR"
 _DEFAULT_UI_PORT = 9090
+_PID_FILENAME = "cacheinfinity.pid"
+def _runtime_root() -> Path:
+    base = Path("/run")
+    if not base.exists():
+        base = Path("/var/run")
+    return base / "cacheinfinity"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the Web UI server even if credentials are configured",
     )
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Detach from the console and run in the background (POSIX only)",
+    )
+    parser.add_argument(
         "--bootstrap",
         metavar="PATH",
         nargs="?",
@@ -79,6 +93,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _daemonize() -> None:
+    if os.name != "posix" or not hasattr(os, "fork"):
+        raise ConfigError("Daemon mode is only supported on POSIX platforms")
+    try:
+        pid = os.fork()
+        if pid > 0:
+            os._exit(0)
+    except OSError as exc:
+        raise ConfigError(f"First fork failed: {exc}") from exc
+
+    os.setsid()
+
+    try:
+        pid = os.fork()
+        if pid > 0:
+            os._exit(0)
+    except OSError as exc:
+        raise ConfigError(f"Second fork failed: {exc}") from exc
+
+    os.chdir("/")
+    os.umask(0)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    with open("/dev/null", "rb") as read_handle, open("/dev/null", "ab") as write_handle:
+        os.dup2(read_handle.fileno(), sys.stdin.fileno())
+        os.dup2(write_handle.fileno(), sys.stdout.fileno())
+        os.dup2(write_handle.fileno(), sys.stderr.fileno())
+
+
 def _resolve_config_dir(cli_value: str | None) -> Path:
     candidate = cli_value or os.getenv(_CONF_DIR_ENV)
     if not candidate:
@@ -94,6 +138,59 @@ def _resolve_credentials_path(cli_value: str | None, config_dir: Path) -> Path |
         path = Path(candidate).expanduser()
         return path if path.exists() else None
     return None
+
+
+def _pidfile_path(config_dir: Path) -> Path:
+    return _runtime_dir(config_dir) / _PID_FILENAME
+
+
+def _write_pidfile(config_dir: Path) -> None:
+    path = _pidfile_path(config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pid = str(os.getpid())
+    path.write_text(pid, encoding="utf-8")
+
+    def _cleanup() -> None:
+        try:
+            if path.exists() and path.read_text(encoding="utf-8").strip() == pid:
+                path.unlink()
+        except OSError:
+            pass
+
+    atexit.register(_cleanup)
+
+
+def _runtime_dir(config_dir: Path) -> Path:
+    digest = sha256(str(config_dir).encode("utf-8")).hexdigest()[:12]
+    return _runtime_root() / digest
+
+
+def _runtime_info_path() -> Path:
+    return _runtime_root() / "runtime.json"
+
+
+def _write_runtime_info(config_dir: Path) -> None:
+    _runtime_root().mkdir(parents=True, exist_ok=True)
+    runtime_dir = _runtime_dir(config_dir)
+    payload = {
+        "config_dir": str(config_dir),
+        "socket_path": str(runtime_dir / "cacheinfinity.sock"),
+        "pidfile": str(runtime_dir / _PID_FILENAME),
+        "pid": os.getpid(),
+    }
+    path = _runtime_info_path()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _cleanup() -> None:
+        try:
+            if path.exists():
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                if stored.get("pid") == os.getpid():
+                    path.unlink()
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    atexit.register(_cleanup)
 
 
 def _start_server_async(server: cheroot_wsgi.Server, label: str) -> threading.Thread:
@@ -142,12 +239,38 @@ def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings) -> None:
 def _trigger_reload(
     service: CacheInfinityService,
     reason: str,
+    config_dir: Path,
+    args,
+    env,
     tls_updater: Optional[Callable[[TLSSettings], None]] = None,
 ) -> None:
     _LOGGER.info("Reload requested: %s", reason)
-    # Note: Config reloading logic would need to be implemented
-    # For now, we'll just log the request
-    _LOGGER.info("Reload functionality not yet implemented")
+    try:
+        runtime_dir = _runtime_dir(config_dir)
+        options_path = runtime_dir / "reload.json"
+        allow_switch = False
+        dump = False
+        if options_path.exists():
+            try:
+                payload = json.loads(options_path.read_text(encoding="utf-8"))
+                allow_switch = bool(payload.get("allow_switch"))
+                dump = bool(payload.get("dump"))
+            except (OSError, json.JSONDecodeError) as exc:
+                _LOGGER.warning("Failed to read reload options: %s", exc)
+            finally:
+                try:
+                    options_path.unlink()
+                except OSError:
+                    pass
+
+        service.reload_from_database(args=args, env=env, allow_switch=allow_switch, dump=dump)
+
+        if tls_updater:
+            tls_updater(service.settings.tls)
+
+        _LOGGER.info("Reload completed successfully")
+    except Exception as exc:
+        _LOGGER.error("Reload failed: %s", exc, exc_info=True)
 
 
 def _install_reload_signal(callback: Callable[[str], None]) -> None:
@@ -157,10 +280,41 @@ def _install_reload_signal(callback: Callable[[str], None]) -> None:
         _LOGGER.debug("SIGHUP not supported on this platform")
 
 
+def _trigger_reinit(reason: str, argv: list[str], env: dict[str, str]) -> None:
+    _LOGGER.info("Reinit requested: %s", reason)
+    try:
+        os.execvpe(argv[0], argv, env)
+    except Exception as exc:
+        _LOGGER.error("Reinit failed: %s", exc, exc_info=True)
+
+
+def _install_reinit_signal(callback: Callable[[str], None]) -> None:
+    try:
+        signal.signal(signal.SIGUSR1, lambda signum, frame: callback("SIGUSR1"))
+    except AttributeError:
+        _LOGGER.debug("SIGUSR1 not supported on this platform")
+
+
+def _install_shutdown_signal(callback: Callable[[str], None]) -> None:
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, lambda signum, frame: callback(signal.Signals(signum).name))
+        except (AttributeError, ValueError):
+            continue
+
+
 def run_server(args) -> None:
     """Main server execution function."""
     config_dir = _resolve_config_dir(args.config_dir)
+    if args.daemon:
+        _daemonize()
     configure_logging(config_dir / "logs", args.log_level)
+    if args.daemon:
+        _LOGGER.info("Daemon mode enabled")
+    _write_runtime_info(config_dir)
+    _write_pidfile(config_dir)
     
     # Resolve bootstrap path
     bootstrap_path = None
@@ -191,14 +345,33 @@ def run_server(args) -> None:
         None,
         state_store=None
     )
+    service._reload_args = args
+    service._reload_env = dict(os.environ)
     service.ensure_filesystems()
     reloadable_app = _ReloadableApp(service)
     server = cheroot_wsgi.Server((args.host, args.port), reloadable_app)
     _configure_tls(server, service.settings.tls)
     
-    # Set up reload signal handler
-    reload_callback = lambda reason: _trigger_reload(service, reason, lambda tls: _configure_tls(server, tls))
+    # Set up reload/reinit/shutdown signal handlers
+    reload_callback = lambda reason: _trigger_reload(
+        service,
+        reason,
+        config_dir,
+        args,
+        os.environ,
+        lambda tls: _configure_tls(server, tls),
+    )
     _install_reload_signal(reload_callback)
+    restart_argv = [sys.executable] + sys.argv
+    reinit_callback = lambda reason: _trigger_reinit(reason, restart_argv, os.environ)
+    _install_reinit_signal(reinit_callback)
+    def shutdown_callback(reason: str) -> None:
+        _LOGGER.info("Shutdown requested: %s", reason)
+        server.stop()
+        if ui_server:
+            ui_server.stop()
+
+    _install_shutdown_signal(shutdown_callback)
     
     service.start_background_tasks()
     

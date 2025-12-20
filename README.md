@@ -188,7 +188,8 @@ When running natively the config search order is:
 - **Docker Compose:** `docker/compose.yaml` launches the published
   `siliconautomaton/cache-infinity` image plus a private PostgreSQL container. It
   mounts host directories into `/backend`, `/staging`, and `/config`, publishes the
-  WebDAV port, and wires `UID`/`GID` overrides through the `environment:` block.
+  WebDAV port, mounts a tmpfs at `/run` for runtime artifacts (CLI socket, PID),
+  and wires `UID`/`GID` overrides through the `environment:` block.
 - **Environment variables:** besides the config/credential/DB overrides noted above,
   standard `UID`/`GID` env vars set the runtime identity inside Docker so host
   permissions stay predictable.

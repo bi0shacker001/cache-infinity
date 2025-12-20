@@ -77,6 +77,9 @@ The test compose file uses volumes in `$HOME/.dev/docker-test/cache-infinity/`:
 
 These directories are created automatically when you start the containers.
 
+The test compose file also mounts a tmpfs at `/run` so the CLI control socket
+and PID files live in a writable runtime directory.
+
 ### Environment Variables
 
 You can override defaults with environment variables:
@@ -85,4 +88,3 @@ You can override defaults with environment variables:
 UID=1000 GID=1000 DB_USER=testuser DB_PASS=testpass \
   docker compose -f testing/compose.yml up -d
 ```
-

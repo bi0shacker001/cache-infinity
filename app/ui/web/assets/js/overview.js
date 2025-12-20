@@ -6,6 +6,8 @@
 // Initialize overview page
 export function initOverview() {
   console.log('Overview page initialized - loading status data');
+  const topbar = document.getElementById('topbar-options');
+  if (topbar) topbar.innerHTML = '';
   refreshStatus();
   setupOverviewEventListeners();
 }
@@ -13,9 +15,11 @@ export function initOverview() {
 // Make the function available on window object for dynamic loading
 window.initOverview = initOverview;
 
+let overviewInterval = null;
+
 function setupOverviewEventListeners() {
-  // Set up periodic status refresh
-  setInterval(refreshStatus, 15000);
+  if (overviewInterval) return;
+  overviewInterval = setInterval(refreshStatus, 15000);
 }
 
 async function refreshStatus() {

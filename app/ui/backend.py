@@ -13,9 +13,15 @@ The management layer provides:
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import secrets
+import signal
+import socket
+import threading
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -111,6 +117,357 @@ class ManagementLayer:
         except Exception as e:
             logger.error("Failed to get storage utilization: %s", e)
             raise
+
+    def reload_service(self, allow_switch: bool = False, dump: bool = False) -> Dict[str, Any]:
+        """Reload configuration and reinitialize the running service."""
+        try:
+            if self._running_in_server():
+                self.service.reload_from_database(allow_switch=allow_switch, dump=dump)
+            else:
+                self._write_reload_options(allow_switch=allow_switch, dump=dump)
+                self._signal_server(signal.SIGHUP)
+            return {"status": "success", "message": "Reload completed"}
+        except Exception as exc:
+            logger.error("Reload failed: %s", exc)
+            raise
+
+    def reinit_service(self) -> Dict[str, Any]:
+        """Restart the running service process."""
+        try:
+            self._signal_server(signal.SIGUSR1)
+            return {"status": "success", "message": "Reinit triggered"}
+        except Exception as exc:
+            logger.error("Reinit failed: %s", exc)
+            raise
+
+    def shutdown_service(self) -> Dict[str, Any]:
+        """Stop the running service process."""
+        try:
+            self._signal_server(signal.SIGTERM)
+            return {"status": "success", "message": "Shutdown triggered"}
+        except Exception as exc:
+            logger.error("Shutdown failed: %s", exc)
+            raise
+
+    def _signal_server(self, sig: signal.Signals) -> None:
+        config_dir = self.service.settings.config_dir
+        pidfile = _runtime_dir(config_dir) / "cacheinfinity.pid"
+        if not pidfile.exists():
+            raise RuntimeError(f"Server PID file not found: {pidfile}")
+        pid_text = pidfile.read_text(encoding="utf-8").strip()
+        if not pid_text.isdigit():
+            raise RuntimeError(f"Invalid PID file contents: {pid_text}")
+        os.kill(int(pid_text), sig)
+
+    def _running_in_server(self) -> bool:
+        config_dir = self.service.settings.config_dir
+        pidfile = _runtime_dir(config_dir) / "cacheinfinity.pid"
+        if not pidfile.exists():
+            return True
+        pid_text = pidfile.read_text(encoding="utf-8").strip()
+        return pid_text.isdigit() and int(pid_text) == os.getpid()
+
+    def _write_reload_options(self, *, allow_switch: bool, dump: bool) -> None:
+        config_dir = self.service.settings.config_dir
+        runtime_dir = _runtime_dir(config_dir)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        options_path = runtime_dir / "reload.json"
+        payload = {"allow_switch": bool(allow_switch), "dump": bool(dump)}
+        options_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+_LOCAL_CONTROL_SERVER = None
+
+
+def ensure_local_control_server(service: "CacheInfinityService") -> None:
+    global _LOCAL_CONTROL_SERVER
+    if _LOCAL_CONTROL_SERVER is None:
+        _LOCAL_CONTROL_SERVER = LocalControlServer(service)
+        _LOCAL_CONTROL_SERVER.start()
+    else:
+        _LOCAL_CONTROL_SERVER.update_service(service)
+
+
+class LocalControlServer:
+    """Local Unix socket server for admin CLI."""
+
+    def __init__(self, service: "CacheInfinityService") -> None:
+        self._service = service
+        self._management = ManagementLayer(service)
+        runtime_dir = _runtime_dir(service.settings.config_dir)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._socket_path = runtime_dir / "cacheinfinity.sock"
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None
+
+    def update_service(self, service: "CacheInfinityService") -> None:
+        with self._lock:
+            self._service = service
+            self._management = ManagementLayer(service)
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._cleanup_socket()
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(str(self._socket_path))
+        os.chmod(self._socket_path, 0o600)
+        self._sock.listen(4)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _cleanup_socket(self) -> None:
+        if self._socket_path.exists():
+            try:
+                os.unlink(self._socket_path)
+            except OSError:
+                pass
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                break
+            with conn:
+                data = b""
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                response = self._handle_request(data)
+                conn.sendall(response)
+
+    def _handle_request(self, data: bytes) -> bytes:
+        try:
+            payload = json.loads(data.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            return self._json_error("Invalid JSON")
+        try:
+            result = self._dispatch(payload)
+            return self._json_ok(result)
+        except Exception as exc:
+            return self._json_error(str(exc))
+
+    def _dispatch(self, payload: dict) -> dict:
+        command = payload.get("command")
+        action = payload.get("action")
+        args = payload.get("args") or {}
+        mgmt = self._management
+
+        if command == "status":
+            return mgmt.get_system_status()
+
+        if command == "storage":
+            if action == "list":
+                return mgmt.list_storage_entries(
+                    location=args.get("location", "backend"),
+                    relative_path=args.get("path", "/"),
+                    sort_by=args.get("sort_by"),
+                    sort_order=args.get("sort_order"),
+                    view_mode=args.get("view_mode"),
+                    show_hidden=bool(args.get("show_hidden")),
+                    search_query=args.get("search_query", ""),
+                )
+            if action == "upload":
+                data_b64 = args.get("data") or ""
+                file_bytes = base64.b64decode(data_b64.encode("ascii"))
+                return mgmt.upload_storage_file(
+                    location=args.get("location", "backend"),
+                    relative_path=args.get("path", "/"),
+                    filename=args.get("filename", "upload.bin"),
+                    file_data=file_bytes,
+                )
+            if action == "mkdir":
+                return mgmt.create_storage_folder(
+                    location=args.get("location", "backend"),
+                    relative_path=args.get("path", "/"),
+                    folder_name=args.get("name", ""),
+                )
+            if action == "delete":
+                return mgmt.delete_storage_entry(
+                    location=args.get("location", "backend"),
+                    relative_path=args.get("path", "/"),
+                )
+
+        if command == "cachelinks":
+            if action == "list":
+                return {"cachelinks": mgmt.describe_cachelinks()}
+            if action == "tree":
+                return mgmt.describe_cachelink_tree()
+            if action == "create":
+                return mgmt.create_cachelink(
+                    parent_path=args.get("parent_path"),
+                    name=args.get("name"),
+                    url=args.get("url"),
+                    subfolder=args.get("subfolder", "/"),
+                )
+            if action == "update":
+                mgmt.update_cachelink(
+                    args.get("canonical_id"),
+                    url=args.get("url"),
+                    subfolder=args.get("subfolder"),
+                )
+                return {"status": "ok"}
+            if action == "delete":
+                mgmt.delete_cachelink(args.get("canonical_id"))
+                return {"status": "ok"}
+            if action == "preview":
+                return mgmt.preview_cachelink(args.get("url"), args.get("subfolder", "/"))
+            if action == "folder-add":
+                mgmt.add_cachelink_folder(args.get("path"))
+                return {"status": "ok"}
+            if action == "folder-delete":
+                mgmt.delete_cachelink_folder(args.get("path"))
+                return {"status": "ok"}
+
+        if command == "cookies":
+            if action == "list":
+                return {"cookies": mgmt.describe_cookies()}
+            if action == "upload":
+                mgmt.upload_cookie_file(args.get("domain"), args.get("content", ""))
+                return {"status": "ok"}
+            if action == "credentials":
+                mgmt.update_cookie_credentials(
+                    args.get("domain"),
+                    args.get("username"),
+                    args.get("password"),
+                )
+                return {"status": "ok"}
+            if action == "refresh":
+                mgmt.regenerate_cookie(args.get("domain"))
+                return {"status": "ok"}
+            if action == "domain-add":
+                mgmt.add_cookie_domain(
+                    domain=args.get("domain"),
+                    credfile=bool(args.get("credfile")),
+                    cookie_jar=args.get("cookie_jar"),
+                    credfile_path=args.get("credfile_path"),
+                )
+                return {"status": "ok"}
+
+        if command == "users":
+            user_type = args.get("user_type")
+            if user_type == "admin":
+                if action == "list":
+                    return {"users": mgmt.list_users(purpose="webui")}
+                if action == "set":
+                    mgmt.upsert_user(
+                        username=args.get("username"),
+                        password=args.get("password"),
+                        enabled=bool(args.get("enabled")),
+                        is_admin=bool(args.get("admin")),
+                        purpose="webui",
+                    )
+                    return {"status": "ok"}
+                if action == "disable":
+                    mgmt.disable_user(args.get("username"), purpose="webui")
+                    return {"status": "ok"}
+            if user_type == "webdav":
+                if action == "list":
+                    return mgmt.describe_webdav_users()
+                if action == "set":
+                    mgmt.upsert_user(
+                        username=args.get("username"),
+                        password=args.get("password"),
+                        enabled=bool(args.get("enabled")),
+                        is_admin=False,
+                        purpose="webdav",
+                        share=args.get("share"),
+                        login=bool(args.get("login")),
+                        read=bool(args.get("read")),
+                        write=bool(args.get("write")),
+                        cache=bool(args.get("cache")),
+                    )
+                    return {"status": "ok"}
+                if action == "disable":
+                    mgmt.disable_user(args.get("username"), purpose="webdav", share=args.get("share"))
+                    return {"status": "ok"}
+
+        if command == "webdav":
+            if action == "list":
+                return mgmt.describe_webdav_users()
+            if action == "set":
+                mgmt.upsert_user(
+                    username=args.get("username"),
+                    password=args.get("password"),
+                    enabled=bool(args.get("enabled")),
+                    is_admin=False,
+                    purpose="webdav",
+                    share=args.get("share"),
+                    login=bool(args.get("login")),
+                    read=bool(args.get("read")),
+                    write=bool(args.get("write")),
+                    cache=bool(args.get("cache")),
+                )
+                return {"status": "ok"}
+            if action == "remove":
+                mgmt.disable_user(args.get("username"), purpose="webdav", share=args.get("share"))
+                return {"status": "ok"}
+
+        if command == "keys":
+            if action == "list":
+                return {"keys": mgmt.list_api_keys()}
+            if action == "generate":
+                return mgmt.generate_api_key(args.get("username"))
+            if action == "revoke":
+                mgmt.revoke_api_key(args.get("username"))
+                return {"status": "ok"}
+
+        if command == "settings":
+            if action == "detail":
+                return mgmt.describe_settings_detail()
+            if action == "update-detail":
+                mgmt.update_settings_detail(args.get("payload", {}))
+                return {"status": "ok"}
+            if action == "get-config":
+                return mgmt.get_config_payload()
+            if action == "update-config":
+                mgmt.update_config(
+                    settings_text=args.get("settings_text"),
+                    cachelinks_text=args.get("cachelinks_text"),
+                )
+                return {"status": "ok"}
+
+        if command == "maintenance":
+            if action == "degraded":
+                return {"degraded": mgmt.list_degraded_targets()}
+            if action == "reindex":
+                mgmt.trigger_reindex(args.get("canonical_id"))
+                return {"status": "ok"}
+            if action == "reload":
+                return mgmt.reload_service(
+                    allow_switch=bool(args.get("allow_switch")),
+                    dump=bool(args.get("dump")),
+                )
+            if action == "reinit":
+                return mgmt.reinit_service()
+            if action == "shutdown":
+                return mgmt.shutdown_service()
+
+        raise ValueError("Unknown command")
+
+    @staticmethod
+    def _json_ok(payload: dict) -> bytes:
+        return json.dumps({"ok": True, "result": payload}).encode("utf-8")
+
+    @staticmethod
+    def _json_error(message: str) -> bytes:
+        return json.dumps({"ok": False, "error": message}).encode("utf-8")
+
+
+def _runtime_root() -> Path:
+    base = Path("/run")
+    if not base.exists():
+        base = Path("/var/run")
+    return base / "cacheinfinity"
+
+
+def _runtime_dir(config_dir: Path) -> Path:
+    digest = sha256(str(config_dir).encode("utf-8")).hexdigest()[:12]
+    return _runtime_root() / digest
 
     # Storage Management
     def list_storage_entries(

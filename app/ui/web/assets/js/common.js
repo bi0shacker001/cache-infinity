@@ -69,12 +69,3 @@ async function refreshSession() {
     console.error('Session refresh failed:', err);
   }
 }
-
-// Initialize when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-  initNavigation();
-  const currentSection = localStorage.getItem('ci_section') || 'overview';
-  setActiveSection(currentSection);
-  refreshSession();
-  setInterval(refreshSession, 15000);
-});
