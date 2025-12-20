@@ -76,7 +76,7 @@ class Fetcher:
         self._active_downloads = 0
         self._download_lock = threading.Lock()
         self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
-        _logger.info("Fetcher initialized")
+        _logger.debug("Fetcher initialized")
         
     def add_progress_callback(self, callback: Callable[[str, DownloadProgress], None]) -> None:
         """Add a callback to receive download progress updates.
@@ -152,11 +152,11 @@ class Fetcher:
                                             checksum,
                                         )
                                 else:
-                                    _logger.info("Calculated checksum for %s: %s", destination, checksum)
+                                    _logger.debug("Calculated checksum for %s: %s", destination, checksum)
                             except Exception as exc:
                                 _logger.warning("Failed to calculate checksum for %s: %s", destination, exc)
 
-                        _logger.info("Download successful: %s (%d bytes)", destination, size)
+                        _logger.debug("Download successful: %s (%d bytes)", destination, size)
                         return DownloadResult(
                             success=True,
                             file_path=destination,
@@ -174,7 +174,7 @@ class Fetcher:
 
                     if attempt < self.max_retries and is_retryable:
                         delay = self.retry_delay * (2 ** attempt)
-                        _logger.info("Download attempt %d failed (%s), retrying in %ds", attempt + 1, last_error, delay)
+                        _logger.debug("Download attempt %d failed (%s), retrying in %ds", attempt + 1, last_error, delay)
                         time.sleep(delay)
                         continue
 
@@ -191,7 +191,7 @@ class Fetcher:
                     _logger.warning(last_error)
                     if attempt < self.max_retries:
                         delay = self.retry_delay * (2 ** attempt)
-                        _logger.info("Retrying in %ds...", delay)
+                        _logger.debug("Retrying in %ds...", delay)
                         time.sleep(delay)
                     else:
                         duration = time.time() - start_time
@@ -464,7 +464,7 @@ class Fetcher:
                 curl.close()
 
             if 200 <= status_code < 400:
-                _logger.info("Successfully refreshed cookies for domain: %s", domain)
+                _logger.debug("Successfully refreshed cookies for domain: %s", domain)
                 return True
 
             _logger.warning("Failed to refresh cookies for domain %s: HTTP %d", domain, status_code)
@@ -519,11 +519,11 @@ class Fetcher:
     def download_with_staging(self, url: str, destination: Path,
                              expected_checksum: Optional[str] = None,
                              staging_dir: Optional[Path] = None) -> bool:
-        """Download with enhanced staging and backend integration.
+        """Download with enhanced staging and datadir integration.
         
         Args:
             url: URL to download from
-            destination: Path relative to backend where file should be stored
+            destination: Path relative to datadir where file should be stored
             expected_checksum: Expected SHA-256 checksum for verification
             staging_dir: Optional staging directory
             
@@ -540,7 +540,7 @@ class Fetcher:
                 staging_path = Path(staging_file.name)
             
             # Download to staging area
-            _logger.info(f"Starting download: {url} -> {destination}")
+            _logger.debug(f"Starting download: {url} -> {destination}")
             result = self.download_file(
                 url=url,
                 destination=staging_path,
@@ -562,14 +562,14 @@ class Fetcher:
                 staging_path.unlink()
                 return False
             
-            # Move from staging to backend
+            # Move from staging to datadir
             destination.parent.mkdir(parents=True, exist_ok=True)
             
-            # Atomic move from staging to backend
+            # Atomic move from staging to datadir
             import shutil
             shutil.move(str(staging_path), str(destination))
             
-            _logger.info(f"Successfully downloaded and cached: {url} -> {destination}")
+            _logger.debug(f"Successfully downloaded and cached: {url} -> {destination}")
             return True
             
         except Exception as exc:

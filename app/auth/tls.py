@@ -61,7 +61,7 @@ class TLSAutomationService:
                 check=True,
                 timeout=10
             )
-            _LOGGER.info("Certbot available: %s", result.stdout.strip())
+            _LOGGER.debug("Certbot available: %s", result.stdout.strip())
             return True
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             _LOGGER.warning("Certbot not found. Install certbot to enable automated TLS.")
@@ -90,10 +90,10 @@ class TLSAutomationService:
         # Check if certificate already exists and is valid
         existing_cert = self._get_existing_certificate(domains)
         if existing_cert and self._is_certificate_valid(existing_cert):
-            _LOGGER.info("Using existing valid certificate for domains: %s", ", ".join(domains))
+            _LOGGER.debug("Using existing valid certificate for domains: %s", ", ".join(domains))
             return existing_cert
         
-        _LOGGER.info("Obtaining new certificate for domains: %s", ", ".join(domains))
+        _LOGGER.debug("Obtaining new certificate for domains: %s", ", ".join(domains))
         
         # Prepare certbot command
         cmd = [
@@ -108,7 +108,7 @@ class TLSAutomationService:
         
         if http_settings.staging:
             cmd.append("--staging")
-            _LOGGER.info("Using Let's Encrypt staging environment")
+            _LOGGER.debug("Using Let's Encrypt staging environment")
         
         # Add domains
         for domain in domains:
@@ -123,7 +123,7 @@ class TLSAutomationService:
                 check=True,
                 timeout=300  # 5 minutes timeout
             )
-            _LOGGER.info("Certificate obtained successfully: %s", result.stdout)
+            _LOGGER.debug("Certificate obtained successfully: %s", result.stdout)
             
             # Return the new certificate
             return self._get_existing_certificate(domains)
@@ -149,10 +149,10 @@ class TLSAutomationService:
         # Check if certificate already exists and is valid
         existing_cert = self._get_existing_certificate(domains)
         if existing_cert and self._is_certificate_valid(existing_cert):
-            _LOGGER.info("Using existing valid certificate for domains: %s", ", ".join(domains))
+            _LOGGER.debug("Using existing valid certificate for domains: %s", ", ".join(domains))
             return existing_cert
         
-        _LOGGER.info("Obtaining new certificate for domains: %s", ", ".join(domains))
+        _LOGGER.debug("Obtaining new certificate for domains: %s", ", ".join(domains))
         
         # Prepare certbot command with DNS plugin
         cmd = [
@@ -173,7 +173,7 @@ class TLSAutomationService:
         
         if dns_settings.staging:
             cmd.append("--staging")
-            _LOGGER.info("Using Let's Encrypt staging environment")
+            _LOGGER.debug("Using Let's Encrypt staging environment")
         
         # Handle credentials file
         if dns_settings.credentials_ini:
@@ -198,7 +198,7 @@ class TLSAutomationService:
                 check=True,
                 timeout=600  # 10 minutes timeout for DNS
             )
-            _LOGGER.info("Certificate obtained successfully: %s", result.stdout)
+            _LOGGER.debug("Certificate obtained successfully: %s", result.stdout)
             
             # Return the new certificate
             return self._get_existing_certificate(domains)
@@ -224,7 +224,7 @@ class TLSAutomationService:
                 check=True,
                 timeout=120
             )
-            _LOGGER.info("Renewal dry-run successful: %s", result.stdout)
+            _LOGGER.debug("Renewal dry-run successful: %s", result.stdout)
             
             # Actually renew
             result = subprocess.run(
@@ -234,7 +234,7 @@ class TLSAutomationService:
                 check=True,
                 timeout=300
             )
-            _LOGGER.info("Certificate renewal successful: %s", result.stdout)
+            _LOGGER.debug("Certificate renewal successful: %s", result.stdout)
             return True
             
         except subprocess.CalledProcessError as e:
@@ -362,7 +362,7 @@ class TLSAutomationService:
                 if cert_dir.is_dir():
                     age_days = (current_time - cert_dir.stat().st_mtime) / (24 * 3600)
                     if age_days > keep_days:
-                        _LOGGER.info("Removing old certificate directory: %s", cert_dir)
+                        _LOGGER.debug("Removing old certificate directory: %s", cert_dir)
                         shutil.rmtree(cert_dir)
         except Exception as e:
             _LOGGER.warning("Failed to cleanup old certificates: %s", e)

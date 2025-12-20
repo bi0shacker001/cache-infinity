@@ -114,7 +114,7 @@ class StagingArea:
                 except Exception as e:
                     _logger.warning(f"Failed to clean up {file_path}: {e}")
             
-            _logger.info(f"Cleaned up {cleaned_count} old files from staging area")
+            _logger.debug(f"Cleaned up {cleaned_count} old files from staging area")
             return cleaned_count
             
         except Exception as e:
@@ -219,7 +219,7 @@ class StagingArea:
                 _logger.error(f"File copy verification failed: {source_path}")
                 return None
             
-            _logger.info(f"Successfully staged file: {source_path} -> {temp_path}")
+            _logger.debug(f"Successfully staged file: {source_path} -> {temp_path}")
             return temp_path
             
         except Exception as e:

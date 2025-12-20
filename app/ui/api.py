@@ -22,7 +22,7 @@ class WebUIAPI:
             service: Reference to the main CacheInfinity service
         """
         self.management = ManagementLayer(service)
-        _logger.info("WebUI API initialized")
+        _logger.debug("WebUI API initialized")
     
     def register_routes(self, app: Flask) -> None:
         """Register API routes with Flask app.
@@ -39,7 +39,7 @@ class WebUIAPI:
                     'version': '1.0.0',
                     'uptime': '00:00:00',
                     'storage': {
-                        'primary': str(self.service.storage_registry.primary.definition.backend_cache_root),
+                        'primary': str(self.service.datadir_registry.primary.definition.datadir_cache_root),
                         'staging': str(self.service.staging.definition.staging_mount_root)
                     }
                 }
@@ -52,7 +52,7 @@ class WebUIAPI:
         def list_files():
             """List files in storage."""
             try:
-                location = request.args.get('location', 'backend_1')
+                location = request.args.get('location', 'datadir_1')
                 path = request.args.get('path', '/')
                 
                 # This would implement actual file listing

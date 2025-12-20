@@ -46,6 +46,211 @@ class DatabaseManager:
             _logger.error("Failed to initialize database schema: %s", exc)
             return False
 
+    def ensure_indexer_tables(self) -> None:
+        """Ensure indexer support tables exist."""
+        self.adapter.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_access (
+                file_path TEXT NOT NULL,
+                user TEXT NOT NULL,
+                last_accessed INTEGER NOT NULL,
+                access_count INTEGER DEFAULT 1,
+                PRIMARY KEY (file_path, user)
+            )
+            """
+        )
+        self.adapter.execute(
+            """
+            CREATE TABLE IF NOT EXISTS indexing_log (
+                target_id TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                success BOOLEAN NOT NULL,
+                entries_processed INTEGER DEFAULT 0,
+                error_message TEXT
+            )
+            """
+        )
+        self.adapter.execute(
+            """
+            CREATE TABLE IF NOT EXISTS indexing_cache (
+                target_id TEXT NOT NULL PRIMARY KEY,
+                etag TEXT,
+                last_modified TEXT,
+                cached_at INTEGER NOT NULL
+            )
+            """
+        )
+        self.adapter.execute(
+            """
+            CREATE TABLE IF NOT EXISTS indexed_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cachelink_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                is_dir BOOLEAN NOT NULL,
+                size INTEGER DEFAULT 0,
+                checksum TEXT,
+                last_modified TEXT,
+                url TEXT,
+                accessed_at INTEGER NOT NULL,
+                UNIQUE(cachelink_id, relative_path)
+            )
+            """
+        )
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_path ON file_access(file_path)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_time ON indexing_log(timestamp)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_cachelink ON indexed_entries(cachelink_id)")
+        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_path ON indexed_entries(relative_path)")
+        self.adapter.commit()
+
+    def get_indexing_cache(self, target_id: str) -> dict[str, object] | None:
+        return self.adapter.fetchone(
+            "SELECT etag, last_modified FROM indexing_cache WHERE target_id = ?",
+            (target_id,),
+        )
+
+    def set_indexing_cache(
+        self,
+        target_id: str,
+        etag: str | None,
+        last_modified: str | None,
+        cached_at: int,
+    ) -> None:
+        self.adapter.execute(
+            """
+            INSERT OR REPLACE INTO indexing_cache (target_id, etag, last_modified, cached_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (target_id, etag or "", last_modified or "", cached_at),
+        )
+        self.adapter.commit()
+
+    def record_indexing_log(
+        self,
+        target_id: str,
+        timestamp: int,
+        success: bool,
+        entries_processed: int,
+        error_message: str | None,
+    ) -> None:
+        self.adapter.execute(
+            """
+            INSERT OR REPLACE INTO indexing_log (
+                target_id, timestamp, success, entries_processed, error_message
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_id, timestamp, success, entries_processed, error_message),
+        )
+        self.adapter.commit()
+
+    def upsert_indexed_entry(
+        self,
+        target_id: str,
+        relative_path: str,
+        is_dir: bool,
+        size: int,
+        checksum: str | None,
+        modified: str | None,
+        url: str | None,
+        accessed_at: int,
+    ) -> None:
+        self.adapter.execute(
+            """
+            INSERT OR REPLACE INTO indexed_entries (
+                cachelink_id, relative_path, is_dir, size, checksum,
+                last_modified, url, accessed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (target_id, relative_path, is_dir, size, checksum, modified, url, accessed_at),
+        )
+
+    def count_successful_indexing_today(self, now_ts: int) -> int:
+        row = self.adapter.fetchone(
+            """
+            SELECT COUNT(*) as count
+            FROM indexing_log
+            WHERE date(timestamp, 'unixepoch') = date(?, 'unixepoch')
+            AND success = 1
+            """,
+            (now_ts,),
+        )
+        return int(row["count"]) if row else 0
+
+    def count_successful_indexing_since(self, since_ts: int) -> int:
+        row = self.adapter.fetchone(
+            """
+            SELECT COUNT(*) as count
+            FROM indexing_log
+            WHERE timestamp >= ?
+            AND success = 1
+            """,
+            (since_ts,),
+        )
+        return int(row["count"]) if row else 0
+
+    def list_degraded_indexing(self, since_ts: int) -> list[dict]:
+        return self.adapter.fetchall(
+            """
+            SELECT target_id, error_message, timestamp as last_error_at
+            FROM indexing_log
+            WHERE success = 0
+            AND timestamp >= ?
+            GROUP BY target_id
+            ORDER BY last_error_at DESC
+            """,
+            (since_ts,),
+        )
+
+    def record_file_access(self, file_path: str, user: str, accessed_at: int) -> None:
+        self.adapter.execute(
+            """
+            INSERT OR REPLACE INTO file_access (
+                file_path, user, last_accessed, access_count
+            ) VALUES (?, ?, ?,
+                COALESCE((SELECT access_count FROM file_access WHERE file_path = ? AND user = ?), 0) + 1
+            )
+            """,
+            (file_path, user, accessed_at, file_path, user),
+        )
+        self.adapter.commit()
+
+    def get_file_access(self, file_path: str, window_start: int) -> dict | None:
+        return self.adapter.fetchone(
+            """
+            SELECT access_count, last_accessed
+            FROM file_access
+            WHERE file_path = ? AND last_accessed >= ?
+            ORDER BY last_accessed DESC
+            LIMIT 1
+            """,
+            (file_path, window_start),
+        )
+
+    def list_recent_file_access(self, window_start: int, limit: int) -> list[dict]:
+        return self.adapter.fetchall(
+            """
+            SELECT file_path, access_count, last_accessed
+            FROM file_access
+            WHERE last_accessed >= ?
+            ORDER BY access_count DESC, last_accessed DESC
+            LIMIT ?
+            """,
+            (window_start, limit),
+        )
+
+    def mark_indexed_entries_accessed_at(self, cachelink_id: str, accessed_at: int) -> None:
+        self.adapter.execute(
+            """
+            UPDATE indexed_entries
+            SET accessed_at = ?
+            WHERE cachelink_id = ?
+            """,
+            (accessed_at, cachelink_id),
+        )
+        self.adapter.commit()
+
     def close(self) -> None:
         """Close database connections."""
         self.index_db.close()

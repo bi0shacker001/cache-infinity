@@ -18,9 +18,6 @@ import yaml
 from wsgidav.dc.simple_dc import SimpleDomainController
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from auth.tls import TLSAutomationService, create_tls_automation_service
-
-from storage.backend import BackendRegistry
 from cache.cachelinks import (
     CachelinkDescriptor,
     CachelinkIndex,
@@ -41,14 +38,101 @@ from core.config import (
     validate_settings,
     ConfigService,
 )
-from auth.credentials import CredentialStore, load_credentials, AuthConfigManager
+from auth.credentials import AuthConfigManager, CredentialStore, load_credentials
+from auth.tls import TLSAutomationService, create_tls_automation_service
 from net.fetcher import Fetcher
-from db.dbmanage import DatabaseManager
-from net.indexer import RemoteListingFetcher, Indexer
+from net.indexer import Indexer, RemoteListingFetcher
+from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
 from ui.web.webcore import WebUIApp
+from db.dbmanage import DatabaseManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _build_datadir_registry(settings: Settings) -> DatadirRegistry:
+    primary_datadir_name = next(iter(settings.datadirs.keys())) if settings.datadirs else None
+    if settings.datadirs:
+        registry = DatadirRegistry.from_settings(settings.datadirs, primary_datadir_name)
+        _LOGGER.debug("Initialized datadir registry with %d datadirs", len(registry.storages))
+        return registry
+    _LOGGER.debug("No datadirs configured - created empty datadir registry")
+    return DatadirRegistry({}, None)
+
+
+def _build_staging(settings: Settings) -> StagingArea:
+    staging = StagingArea(settings.staging)
+    _LOGGER.debug("Initialized staging area at: %s", settings.staging.staging_mount_root)
+    return staging
+
+
+def _build_cachelinks(settings: Settings) -> CachelinkIndex:
+    _LOGGER.debug("Loading cachelinks from %d mount paths", len(settings.mount_tree_paths))
+    cachelinks = load_cachelinks(
+        settings.mount_tree_paths,
+        inline_docs=settings.inline_cachelinks,
+        inline_source=settings.config_path,
+    )
+    _LOGGER.debug("Loaded %d cachelinks", len(cachelinks.cachelinks))
+    return cachelinks
+
+
+def _build_database(settings: Settings) -> DatabaseManager:
+    index_db = DatabaseManager.from_settings(settings.database)
+    _LOGGER.debug("Initialized database connection with engine: %s", settings.database.engine)
+    return index_db
+
+
+def _sync_database_state(
+    index_db: DatabaseManager,
+    credentials: Optional[CredentialStore],
+    cachelinks: CachelinkIndex,
+) -> None:
+    index_db.ensure_default_admin()
+    _LOGGER.debug("Ensured default admin user exists")
+    index_db.sync_users_from_config(credentials)
+    _LOGGER.debug("Synced users from configuration")
+    index_db.replace_cachelinks(cachelinks.cachelinks.values())
+    _LOGGER.debug("Replaced cachelinks in database")
+
+
+def _build_checksum_catalog(settings: Settings, index_db: DatabaseManager) -> ChecksumCatalog:
+    checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
+    _LOGGER.debug("Initialized checksum catalog")
+    return checksum_catalog
+
+
+def _build_fetcher(settings: Settings) -> Fetcher:
+    fetcher = Fetcher(settings.cookies)
+    _LOGGER.debug("Initialized fetcher with %d cookie domains", len(settings.cookies))
+    return fetcher
+
+
+def _build_indexer(
+    settings: Settings,
+    cachelinks: CachelinkIndex,
+    index_db: DatabaseManager,
+) -> Indexer:
+    indexer = Indexer(settings.indexing, settings.cookies, index_db, cachelinks)
+    _LOGGER.debug(
+        "Initialized indexer with settings: min_days=%d, max_days=%d",
+        settings.indexing.min_full_reindex_days,
+        settings.indexing.max_full_reindex_days,
+    )
+    return indexer
+
+
+def _build_tls_service(settings: Settings) -> TLSAutomationService | None:
+    service = create_tls_automation_service(settings.config_dir, settings.tls)
+    _LOGGER.debug("Initialized TLS automation service with mode: %s", settings.tls.mode)
+    return service
+
+
+def _build_auth_manager(index_db: DatabaseManager) -> AuthConfigManager:
+    auth_manager = AuthConfigManager(index_db)
+    auth_manager.create_cli_api_key()
+    _LOGGER.debug("Created CLI API key")
+    return auth_manager
 
 
 class CacheInfinityService:
@@ -60,7 +144,7 @@ class CacheInfinityService:
         credentials: Optional[CredentialStore],
         state_store: ConfigStateStore | None = None,
     ) -> None:
-        _LOGGER.info("Initializing CacheInfinityService with settings: %s", settings.config_dir)
+        _LOGGER.debug("Initializing CacheInfinityService with settings: %s", settings.config_dir)
         self._lock = threading.RLock()
         self._background_running = False
         self._state_store = state_store
@@ -78,13 +162,13 @@ class CacheInfinityService:
         credentials_file: Optional[Path] = None,
         state_store: ConfigStateStore | None = None,
     ) -> "CacheInfinityService":
-        _LOGGER.info("Creating CacheInfinityService from paths: config_dir=%s", config_dir)
+        _LOGGER.debug("Creating CacheInfinityService from paths: config_dir=%s", config_dir)
         # Load database-backed configuration
         try:
             _LOGGER.debug("Loading database-backed settings from: %s", config_dir)
             settings = load_database_backed_settings(config_dir, None, os.environ)
-            _LOGGER.info("Successfully loaded settings with %d backends, %d shares",
-                        len(settings.backends), len(settings.shares))
+            _LOGGER.debug("Successfully loaded settings with %d datadirs, %d shares",
+                        len(settings.datadirs), len(settings.shares))
         except Exception as exc:
             _LOGGER.error("Failed to load configuration from %s: %s", config_dir, exc, exc_info=True)
             raise
@@ -103,38 +187,16 @@ class CacheInfinityService:
     # Configuration application -------------------------------------------
     def apply_settings(self, settings: Settings, credentials: Optional[CredentialStore]) -> None:
         """Apply new settings/credentials atomically."""
-        _LOGGER.info("Applying new configuration from: %s", settings.config_path)
-        _LOGGER.debug("Configuration details: %d backends, %d shares, %d cookies",
-                     len(settings.backends), len(settings.shares), len(settings.cookies))
+        _LOGGER.debug("Applying new configuration from: %s", settings.config_path)
+        _LOGGER.debug("Configuration details: %d datadirs, %d shares, %d cookies",
+                     len(settings.datadirs), len(settings.shares), len(settings.cookies))
 
-        # For TwoFileSettings, use the first backend as primary
-        primary_backend_name = next(iter(settings.backends.keys())) if settings.backends else None
-        _LOGGER.debug("Using primary backend: %s", primary_backend_name)
+        if not settings.datadirs:
+            _LOGGER.debug("No datadirs configured - WebUI will show appropriate message")
 
-        # Check if we have any backends configured
-        if not settings.backends:
-            _LOGGER.info("No backends configured - WebUI will show appropriate message")
-            # Don't create default backend automatically - let user configure it explicitly
-
-        # Only create backend registry if we have backends configured
-        if settings.backends:
-            backend_registry = BackendRegistry.from_settings(settings.backends, primary_backend_name)
-            _LOGGER.info("Initialized backend registry with %d backends", len(backend_registry.storages))
-        else:
-            # Create empty backend registry
-            backend_registry = BackendRegistry({}, None)
-            _LOGGER.info("No backends configured - created empty backend registry")
-
-        staging = StagingArea(settings.staging)
-        _LOGGER.info("Initialized staging area at: %s", settings.staging.staging_mount_root)
-
-        _LOGGER.debug("Loading cachelinks from %d mount paths", len(settings.mount_tree_paths))
-        cachelinks = load_cachelinks(
-            settings.mount_tree_paths,
-            inline_docs=settings.inline_cachelinks,
-            inline_source=settings.config_path,
-        )
-        _LOGGER.info("Loaded %d cachelinks", len(cachelinks.cachelinks))
+        datadir_registry = _build_datadir_registry(settings)
+        staging = _build_staging(settings)
+        cachelinks = _build_cachelinks(settings)
 
         # Close existing database connection if present
         if getattr(self, "index_db", None):
@@ -142,50 +204,32 @@ class CacheInfinityService:
             self.index_db.close()
 
         # DEBUG: Check database settings before initialization
-        _LOGGER.info("DEBUG: Database settings - engine: %s, postgres_dsn: %s",
+        _LOGGER.debug("Database settings - engine: %s, postgres_dsn: %s",
                     settings.database.engine, getattr(settings.database, 'postgres_dsn', 'N/A'))
 
-        index_db = DatabaseManager.from_settings(settings.database)
-        _LOGGER.info("Initialized database connection with engine: %s", settings.database.engine)
+        index_db = _build_database(settings)
 
         # DEBUG: Test database connection immediately after initialization
         try:
             test_stats = index_db.stats_summary()
-            _LOGGER.info("DEBUG: Database connection test successful. Stats: %s", test_stats)
+            _LOGGER.debug("Database connection test successful. Stats: %s", test_stats)
         except Exception as e:
             _LOGGER.error("DEBUG: Database connection test failed: %s", e, exc_info=True)
 
-        index_db.ensure_default_admin()
-        _LOGGER.debug("Ensured default admin user exists")
-
-        index_db.sync_users_from_config(credentials)
-        _LOGGER.debug("Synced users from configuration")
-
-        index_db.replace_cachelinks(cachelinks.cachelinks.values())
-        _LOGGER.debug("Replaced cachelinks in database")
-
-        checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
-        _LOGGER.debug("Initialized checksum catalog")
-
-        fetcher = Fetcher(settings.cookies)
-        _LOGGER.info("Initialized fetcher with %d cookie domains", len(settings.cookies))
-
-        # Initialize indexer with settings and database
-        indexer = Indexer(settings.indexing, settings.cookies, index_db)
-        _LOGGER.info("Initialized indexer with settings: min_days=%d, max_days=%d",
-                    settings.indexing.min_full_reindex_days, settings.indexing.max_full_reindex_days)
+        _sync_database_state(index_db, credentials, cachelinks)
+        checksum_catalog = _build_checksum_catalog(settings, index_db)
+        fetcher = _build_fetcher(settings)
+        indexer = _build_indexer(settings, cachelinks, index_db)
 
         self._validate_tls_requirements(settings)
         _LOGGER.debug("TLS requirements validated")
 
-        # Initialize TLS automation service
-        self._tls_automation = create_tls_automation_service(settings.config_dir, settings.tls)
-        _LOGGER.info("Initialized TLS automation service with mode: %s", settings.tls.mode)
+        self._tls_automation = _build_tls_service(settings)
 
         with self._lock:
             self.settings = settings
             self.credentials = credentials
-            self.backend_registry = backend_registry
+            self.datadir_registry = datadir_registry
             self.staging = staging
             self.cachelinks = cachelinks
             self.index_db = index_db
@@ -193,31 +237,29 @@ class CacheInfinityService:
             self.indexer = indexer
             self.checksum_catalog = checksum_catalog
             # Initialize authentication manager and generate CLI API key
-            self.auth_manager = AuthConfigManager(index_db)
-            self.auth_manager.create_cli_api_key()
-            _LOGGER.debug("Created CLI API key")
+            self.auth_manager = _build_auth_manager(index_db)
             self._wsgi_app = self._build_wsgi_app()
             _LOGGER.debug("Built WSGI application")
             self._webui_app = WebUIApp(self)
             _LOGGER.debug("Initialized WebUI application")
 
         self.config_service.persist_state_snapshot()
-        _LOGGER.info("Applied configuration from %s", settings.config_path)
+        _LOGGER.debug("Applied configuration from %s", settings.config_path)
         
         # Initialize indexer database tables
-        if self.indexer:
-            self.indexer._ensure_database_tables()
+        if self.index_db:
+            self.index_db.ensure_indexer_tables()
             _LOGGER.debug("Ensured indexer database tables exist")
         
         if getattr(self, "_background_running", False):
-            _LOGGER.info("Background tasks enabled, starting indexer and fetcher tasks")
+            _LOGGER.debug("Background tasks enabled, starting indexer and fetcher tasks")
             self._start_indexer_task()
             self._start_fetcher_task()
 
     def ensure_filesystems(self) -> None:
-        """Ensure backend and staging directories exist."""
+        """Ensure datadir and staging directories exist."""
 
-        for storage in self.backend_registry.storages.values():
+        for storage in self.datadir_registry.storages.values():
             storage.ensure_ready()
         self.staging.ensure_ready()
 
@@ -375,24 +417,24 @@ class CacheInfinityService:
         pass
 
     def start_background_tasks(self) -> None:
-        _LOGGER.info("Starting background tasks")
+        _LOGGER.debug("Starting background tasks")
         self._background_running = True
         # Start session cleanup background task
         self._start_session_cleanup_task()
         # Start TLS automation background task
         self._start_tls_automation_task()
-        _LOGGER.info("Background tasks started successfully")
+        _LOGGER.debug("Background tasks started successfully")
     
     def _start_session_cleanup_task(self) -> None:
         """Start a background thread to periodically clean up expired sessions."""
-        _LOGGER.info("Starting session cleanup task")
+        _LOGGER.debug("Starting session cleanup task")
         def cleanup_loop():
             while getattr(self, "_background_running", False):
                 try:
                     # Clean up sessions older than 24 hours
                     deleted = self.index_db.cleanup_expired_sessions(max_age_hours=24)
                     if deleted > 0:
-                        _LOGGER.info("Cleaned up %d expired WebUI sessions", deleted)
+                        _LOGGER.debug("Cleaned up %d expired WebUI sessions", deleted)
                     else:
                         _LOGGER.debug("No expired sessions to clean up")
                 except Exception as exc:
@@ -408,17 +450,17 @@ class CacheInfinityService:
 
     def _start_indexer_task(self) -> None:
         """Start a background thread for progressive indexing."""
-        _LOGGER.info("Starting indexer task")
+        _LOGGER.debug("Starting indexer task")
         def indexer_loop():
             while getattr(self, "_background_running", False):
                 try:
                     # Check for targets that need reindexing
                     targets = self._get_targets_for_indexing()
                     if targets:
-                        _LOGGER.info("Starting progressive indexing for %d targets", len(targets))
+                        _LOGGER.debug("Starting progressive indexing for %d targets", len(targets))
                         results = self.indexer.index_all_targets(targets)
                         success_count = sum(1 for success in results.values() if success)
-                        _LOGGER.info("Progressive indexing completed: %d/%d successful", success_count, len(targets))
+                        _LOGGER.debug("Progressive indexing completed: %d/%d successful", success_count, len(targets))
                         
                         # Log failed targets
                         failed_targets = [target_id for target_id, success in results.items() if not success]
@@ -442,17 +484,17 @@ class CacheInfinityService:
     
     def _start_fetcher_task(self) -> None:
         """Start a background thread for fetcher operations."""
-        _LOGGER.info("Starting fetcher task")
+        _LOGGER.debug("Starting fetcher task")
         def fetcher_loop():
             while getattr(self, "_background_running", False):
                 try:
                     # Check for pending downloads
                     pending_downloads = self._get_pending_downloads()
                     if pending_downloads:
-                        _LOGGER.info("Processing %d pending downloads", len(pending_downloads))
+                        _LOGGER.debug("Processing %d pending downloads", len(pending_downloads))
                         results = self.fetcher.batch_download(pending_downloads, max_concurrent=3)
                         success_count = sum(1 for result in results.values() if result.success)
-                        _LOGGER.info("Download processing completed: %d/%d successful", success_count, len(pending_downloads))
+                        _LOGGER.debug("Download processing completed: %d/%d successful", success_count, len(pending_downloads))
                         
                         # Log failed downloads
                         failed_downloads = [url for url, result in results.items() if not result.success]
@@ -480,7 +522,7 @@ class CacheInfinityService:
             _LOGGER.warning("TLS automation not available - skipping TLS automation task")
             return
         
-        _LOGGER.info("Starting TLS automation task with mode: %s", self.settings.tls.mode)
+        _LOGGER.debug("Starting TLS automation task with mode: %s", self.settings.tls.mode)
         def tls_loop():
             while getattr(self, "_background_running", False):
                 try:
@@ -492,17 +534,12 @@ class CacheInfinityService:
                         domains = list(self.settings.tls.dns01.domains)
                     
                     if domains:
-                        _LOGGER.debug("Checking certificate validity for domains: %s", ", ".join(domains))
-                        cert = self._tls_automation._get_existing_certificate(domains)
-                        if cert and not self._tls_automation._is_certificate_valid(cert):
-                            _LOGGER.info("Certificate needs renewal for domains: %s", ", ".join(domains))
-                            success = self._tls_automation.renew_certificate()
-                            if success:
-                                _LOGGER.info("Certificate renewed successfully")
-                            else:
-                                _LOGGER.warning("Certificate renewal failed")
+                        _LOGGER.debug("Ensuring TLS certificate for domains: %s", ", ".join(domains))
+                        cert = self._tls_automation.get_certificate()
+                        if cert:
+                            _LOGGER.debug("TLS certificate ready at: %s", cert.cert_path)
                         else:
-                            _LOGGER.debug("Certificate is still valid")
+                            _LOGGER.warning("TLS automation did not provide a certificate")
                     else:
                         _LOGGER.debug("No domains configured for TLS automation")
                 
@@ -519,53 +556,53 @@ class CacheInfinityService:
 
     # Web UI helpers ------------------------------------------------------
     def describe_status(self) -> dict[str, object]:
-        _LOGGER.info("CacheInfinityService.describe_status() called")
-        _LOGGER.info("Service settings: %s", self.settings)
-        _LOGGER.info("Service index_db: %s", self.index_db)
-        _LOGGER.info("Service cachelinks: %s", self.cachelinks)
+        _LOGGER.debug("CacheInfinityService.describe_status() called")
+        _LOGGER.debug("Service settings: %s", self.settings)
+        _LOGGER.debug("Service index_db: %s", self.index_db)
+        _LOGGER.debug("Service cachelinks: %s", self.cachelinks)
 
         try:
             with self._lock:
-                _LOGGER.info("Acquired lock for status generation")
+                _LOGGER.debug("Acquired lock for status generation")
 
                 shares = [
                     {
                         "name": share.name,
                         "frontend": share.frontend_folder.as_posix(),
-                        "backend": share.backend_folder.as_posix(),
+                        "datadir": share.datadir_folder.as_posix(),
                         "users": len(share.users),
                         "overlay": share.cachelink_overlay,
                     }
                     for share in self.settings.shares.values()
                 ]
-                _LOGGER.info("Generated shares list: %d shares", len(shares))
+                _LOGGER.debug("Generated shares list: %d shares", len(shares))
 
                 cachelink_count = len(self.cachelinks.cachelinks)
-                _LOGGER.info("Cachelink count: %d", cachelink_count)
+                _LOGGER.debug("Cachelink count: %d", cachelink_count)
 
-                _LOGGER.info("Calling index_db.stats_summary()")
+                _LOGGER.debug("Calling index_db.stats_summary()")
                 db_stats = self.index_db.stats_summary()
-                _LOGGER.info("DB stats retrieved: %s", db_stats)
+                _LOGGER.debug("DB stats retrieved: %s", db_stats)
 
-                _LOGGER.info("Calling index_db.access_summary()")
+                _LOGGER.debug("Calling index_db.access_summary()")
                 access_stats = self.index_db.access_summary()
-                _LOGGER.info("Access stats retrieved: %s", access_stats)
+                _LOGGER.debug("Access stats retrieved: %s", access_stats)
 
-                _LOGGER.info("Calling _compute_cache_counts()")
+                _LOGGER.debug("Calling _compute_cache_counts()")
                 cache_stats = self._compute_cache_counts()
-                _LOGGER.info("Cache stats computed: %s", cache_stats)
+                _LOGGER.debug("Cache stats computed: %s", cache_stats)
 
-                _LOGGER.info("Calling list_degraded_targets()")
+                _LOGGER.debug("Calling list_degraded_targets()")
                 degraded = self.list_degraded_targets()
-                _LOGGER.info("Degraded targets: %d", len(degraded))
+                _LOGGER.debug("Degraded targets: %d", len(degraded))
 
-                _LOGGER.info("Calling describe_storage()")
+                _LOGGER.debug("Calling describe_storage()")
                 storage = self.describe_storage()
-                _LOGGER.info("Storage info retrieved")
+                _LOGGER.debug("Storage info retrieved")
 
                 status = {
                     "config_dir": str(self.settings.config_dir),
-                    "backend_root": str(self.settings.backend_cache_root),
+                    "datadir_root": str(self.settings.datadir_cache_root),
                     "staging_root": str(self.staging.base_path),
                     "share_count": len(shares),
                     "shares": shares,
@@ -587,14 +624,14 @@ class CacheInfinityService:
                         "targets": cachelink_count,
                         "needing_full": db_stats.get("targets_needing_full", 0),
                     }
-                _LOGGER.info("Status generation completed successfully")
+                _LOGGER.debug("Status generation completed successfully")
                 return status
         except Exception as e:
             _LOGGER.error("Failed to generate status: %s", e, exc_info=True)
             raise
 
     def list_degraded_targets(self) -> list[dict[str, object]]:
-        rows = self.index_db.list_degraded_targets()
+        rows = self.indexer.get_degraded_targets() if self.indexer else []
         degraded: list[dict[str, object]] = []
         for row in rows:
             descriptor = self.cachelinks.cachelinks.get(row["cachelink_id"])
@@ -617,8 +654,9 @@ class CacheInfinityService:
             raise ConfigError(f"Unknown cachelink id {canonical_id}")
         
         # Mark target for immediate reindexing
-        self.index_db.mark_target_for_reindex(descriptor, force=True)
-        _LOGGER.info("Triggered reindex for cachelink: %s", canonical_id)
+        if self.indexer:
+            self.indexer.mark_target_for_reindex(descriptor)
+        _LOGGER.debug("Triggered reindex for cachelink: %s", canonical_id)
         
         # Try to index immediately if background tasks are running
         if getattr(self, "_background_running", False):
@@ -630,7 +668,7 @@ class CacheInfinityService:
                 }
                 results = self.indexer.index_all_targets([target])
                 if results.get(canonical_id, False):
-                    _LOGGER.info("Immediate reindex successful for: %s", canonical_id)
+                    _LOGGER.debug("Immediate reindex successful for: %s", canonical_id)
                 else:
                     _LOGGER.warning("Immediate reindex failed for: %s", canonical_id)
             except Exception as exc:
@@ -689,11 +727,11 @@ class CacheInfinityService:
     
     def download_file_with_staging(self, url: str, destination_path: str,
                                  expected_checksum: Optional[str] = None) -> bool:
-        """Download a file using fetcher with staging and backend integration.
+        """Download a file using fetcher with staging and datadir integration.
         
         Args:
             url: URL to download from
-            destination_path: Path relative to backend where file should be stored
+            destination_path: Path relative to datadir where file should be stored
             expected_checksum: Expected SHA-256 checksum for verification
             
         Returns:
@@ -706,7 +744,7 @@ class CacheInfinityService:
                 staging_path = Path(staging_file.name)
             
             # Download to staging area
-            _LOGGER.info(f"Starting download: {url} -> {destination_path}")
+            _LOGGER.debug(f"Starting download: {url} -> {destination_path}")
             result = self.fetcher.download_file(
                 url=url,
                 destination=staging_path,
@@ -728,15 +766,15 @@ class CacheInfinityService:
                 staging_path.unlink()
                 return False
             
-            # Move from staging to backend
-            backend_path = self.backend_registry.primary.resolve(Path(destination_path))
-            backend_path.parent.mkdir(parents=True, exist_ok=True)
+            # Move from staging to datadir
+            datadir_path = self.datadir_registry.primary.resolve(Path(destination_path))
+            datadir_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Atomic move from staging to backend
+            # Atomic move from staging to datadir
             import shutil
-            shutil.move(str(staging_path), str(backend_path))
+            shutil.move(str(staging_path), str(datadir_path))
             
-            _LOGGER.info(f"Successfully downloaded and cached: {url} -> {backend_path}")
+            _LOGGER.debug(f"Successfully downloaded and cached: {url} -> {datadir_path}")
             return True
             
         except Exception as exc:
@@ -753,7 +791,7 @@ class CacheInfinityService:
         
         Args:
             url: URL to download from
-            destination: Destination path relative to backend
+            destination: Destination path relative to datadir
             expected_checksum: Expected SHA-256 checksum
             priority: Download priority (higher = more important)
             
@@ -772,7 +810,7 @@ class CacheInfinityService:
             """, (url, destination, expected_checksum, priority, 'pending', int(time.time())))
             
             self.index_db.commit()
-            _LOGGER.info(f"Added pending download: {url} -> {destination}")
+            _LOGGER.debug(f"Added pending download: {url} -> {destination}")
             return True
             
         except Exception as exc:
@@ -817,7 +855,7 @@ class CacheInfinityService:
             return []
 
     def regenerate_cookie(self, domain: str) -> None:
-        _LOGGER.info("Regenerating cookies for domain: %s", domain)
+        _LOGGER.debug("Regenerating cookies for domain: %s", domain)
         if domain not in self.settings.cookies:
             _LOGGER.error("Unknown cookie domain: %s", domain)
             raise ConfigError(f"Unknown cookie domain {domain}")
@@ -827,7 +865,7 @@ class CacheInfinityService:
             success = self.fetcher.refresh_cookies(domain)
             if not success:
                 raise Exception("Cookie refresh failed")
-            _LOGGER.info("Successfully regenerated cookies for domain: %s", domain)
+            _LOGGER.debug("Successfully regenerated cookies for domain: %s", domain)
         except Exception as exc:
             _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc, exc_info=True)
             self.index_db.record_cookie_error(domain, str(exc), auth_fail=_looks_like_auth_error(str(exc)))
@@ -851,11 +889,11 @@ class CacheInfinityService:
     
     def download_file_with_staging(self, url: str, destination_path: str,
                                  expected_checksum: Optional[str] = None) -> bool:
-        """Download a file using fetcher with staging and backend integration.
+        """Download a file using fetcher with staging and datadir integration.
         
         Args:
             url: URL to download from
-            destination_path: Path relative to backend where file should be stored
+            destination_path: Path relative to datadir where file should be stored
             expected_checksum: Expected SHA-256 checksum for verification
             
         Returns:
@@ -868,7 +906,7 @@ class CacheInfinityService:
                 staging_path = Path(staging_file.name)
             
             # Download to staging area
-            _LOGGER.info(f"Starting download: {url} -> {destination_path}")
+            _LOGGER.debug(f"Starting download: {url} -> {destination_path}")
             result = self.fetcher.download_file(
                 url=url,
                 destination=staging_path,
@@ -890,15 +928,15 @@ class CacheInfinityService:
                 staging_path.unlink()
                 return False
             
-            # Move from staging to backend
-            backend_path = self.backend_registry.primary.resolve(Path(destination_path))
-            backend_path.parent.mkdir(parents=True, exist_ok=True)
+            # Move from staging to datadir
+            datadir_path = self.datadir_registry.primary.resolve(Path(destination_path))
+            datadir_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Atomic move from staging to backend
+            # Atomic move from staging to datadir
             import shutil
-            shutil.move(str(staging_path), str(backend_path))
+            shutil.move(str(staging_path), str(datadir_path))
             
-            _LOGGER.info(f"Successfully downloaded and cached: {url} -> {backend_path}")
+            _LOGGER.debug(f"Successfully downloaded and cached: {url} -> {datadir_path}")
             return True
             
         except Exception as exc:
@@ -959,7 +997,7 @@ class CacheInfinityService:
         def _path(value) -> str:
             return str(value) if value else ""
 
-        # Always return a complete structure, even when no backends are configured
+        # Always return a complete structure, even when no datadirs are configured
         result = {}
 
         # Always show database settings
@@ -968,21 +1006,21 @@ class CacheInfinityService:
             "postgres_dsn": settings.database.postgres_dsn or "",
         }
 
-        # Always show backends (even if empty), staging, and limits for UI consistency
-        if settings.backends:
+        # Always show datadirs (even if empty), staging, and limits for UI consistency
+        if settings.datadirs:
             paths: list[dict[str, object]] = []
-            for name, backend in settings.backends.items():
+            for name, datadir in settings.datadirs.items():
                 paths.append(
                     {
                         "name": name,
-                        "backend_cache_root": _path(backend.backend_cache_root),
-                        "backend_mounted": backend.backend_mounted,
-                        "backend_mount_root": _path(backend.backend_mount_root),
+                        "datadir_cache_root": _path(datadir.datadir_cache_root),
+                        "datadir_mounted": datadir.datadir_mounted,
+                        "datadir_mount_root": _path(datadir.datadir_mount_root),
                     }
                 )
             result["paths"] = paths
         else:
-            # Return empty backends list when no backends are configured
+            # Return empty datadirs list when no datadirs are configured
             result["paths"] = []
 
         # Always show staging settings
@@ -1016,7 +1054,7 @@ class CacheInfinityService:
             result["shares"] = [
                 {
                     "name": share.name,
-                    "backend_folder": share.backend_folder.as_posix(),
+                    "datadir_folder": share.datadir_folder.as_posix(),
                     "frontend_folder": share.frontend_folder.as_posix(),
                     "writable": share.writable,
                     "cachelink_overlay": share.cachelink_overlay,
@@ -1106,7 +1144,9 @@ class CacheInfinityService:
         self.config_service.update_settings_detail(payload)
 
     def describe_cachelinks(self) -> list[dict[str, object]]:
-        degraded_map = {row["cachelink_id"]: row for row in self.index_db.list_degraded_targets()}
+        degraded_map: dict[str, dict[str, object]] = {}
+        if self.indexer:
+            degraded_map = {row["cachelink_id"]: row for row in self.indexer.get_degraded_targets()}
         descriptions: list[dict[str, object]] = []
         for descriptor in self.cachelinks.cachelinks.values():
             snapshot = self._build_cachelink_snapshot(descriptor, degraded_map.get(descriptor.canonical_id))
@@ -1306,7 +1346,7 @@ class CacheInfinityService:
             and rec.subfolder == new_record.subfolder
             for rec in records
         ):
-            raise ConfigError("Cachelink already exists for this backend path and URL/subfolder combination")
+            raise ConfigError("Cachelink already exists for this datadir path and URL/subfolder combination")
         records.append(new_record)
         document = render_cachelink_records(records)
         cachelinks_text = yaml.safe_dump(document, sort_keys=False)
@@ -1335,29 +1375,29 @@ class CacheInfinityService:
                     info.update({"total": usage.total, "used": usage.used, "free": usage.free})
             return info
 
-        # Check if we have any backends configured
-        if not self.backend_registry.storages:
+        # Check if we have any datadirs configured
+        if not self.datadir_registry.storages:
             return {
-                "backends": [],
+                "datadirs": [],
                 "staging": summarize_path(self.staging.base_path),
-                "missing_backend": True,
-                "message": "No backends configured. Please set up backend_1 in Settings."
+                "missing_datadir": True,
+                "message": "No datadirs configured. Please set up datadir_1 in Settings."
             }
 
-        backends: list[dict[str, object]] = []
-        for name, storage in self.backend_registry.storages.items():
-            summary = summarize_path(storage.definition.backend_cache_root)
+        datadirs: list[dict[str, object]] = []
+        for name, storage in self.datadir_registry.storages.items():
+            summary = summarize_path(storage.definition.datadir_cache_root)
             summary.update(
                 {
                     "name": name,
-                    "mounted": storage.definition.backend_mounted,
-                    "mount_root": str(storage.definition.backend_mount_root)
-                    if storage.definition.backend_mount_root
+                    "mounted": storage.definition.datadir_mounted,
+                    "mount_root": str(storage.definition.datadir_mount_root)
+                    if storage.definition.datadir_mount_root
                     else None,
                 }
             )
-            backends.append(summary)
-        return {"backends": backends, "staging": summarize_path(self.staging.base_path)}
+            datadirs.append(summary)
+        return {"datadirs": datadirs, "staging": summarize_path(self.staging.base_path)}
 
     def describe_storage_entries(self, location: str, relative: str | None) -> dict[str, object]:
         """Alias for list_storage_entries to match frontend expectations."""
@@ -1594,21 +1634,21 @@ class CacheInfinityService:
             handle.write(data)
 
     def _compute_cache_counts(self) -> dict[str, int]:
-        # Check if we have any backends configured
-        if not self.backend_registry.storages:
-            _LOGGER.info("No backends configured - returning zero cache counts")
+        # Check if we have any datadirs configured
+        if not self.datadir_registry.storages:
+            _LOGGER.debug("No datadirs configured - returning zero cache counts")
             return {
                 "files_total": 0,
                 "cached_files": 0,
                 "uncached_files": 0,
             }
 
-        backend = self.backend_registry.primary
+        datadir = self.datadir_registry.primary
         total_files = 0
         cached_files = 0
         for descriptor in self.cachelinks.cachelinks.values():
             entries = self.index_db.list_entries_for_descriptor(descriptor)
-            stats = self._descriptor_counts(descriptor, entries, backend)
+            stats = self._descriptor_counts(descriptor, entries, datadir)
             total_files += stats["files_total"]
             cached_files += stats["cached_files"]
         uncached_files = max(total_files - cached_files, 0)
@@ -1656,9 +1696,9 @@ class CacheInfinityService:
         self,
         descriptor: CachelinkDescriptor,
         entries: list[dict[str, object]],
-        backend,
+        datadir,
     ) -> dict[str, int]:
-        return self.config_service.descriptor_counts(descriptor, entries, backend)
+        return self.config_service.descriptor_counts(descriptor, entries, datadir)
 
     def _persist_state_snapshot(self) -> None:
         settings_path = self.settings.config_path
@@ -1732,9 +1772,11 @@ class CacheInfinityService:
         return resolved_target
 
     def _storage_base(self, location: str) -> Path:
-        loc = (location or "backend").strip().lower()
-        if loc == "backend":
-            return self.backend_registry.primary.definition.backend_cache_root
+        loc = (location or "datadir").strip().lower()
+        if loc == "datadir":
+            if not self.datadir_registry.storages:
+                raise ConfigError("No datadirs configured")
+            return self.datadir_registry.primary.definition.datadir_cache_root
         if loc == "staging":
             return self.staging.base_path
         raise ConfigError("Unknown storage location")

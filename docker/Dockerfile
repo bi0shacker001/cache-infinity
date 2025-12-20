@@ -36,8 +36,8 @@ RUN pip install --no-cache-dir \
         requests>=2.0 \
         beautifulsoup4>=4.0 \
         pycurl>=7.45.7 && \
-    mkdir -p /backend /staging /config && \
-    chown -R cacheinfinity:cacheinfinity /app /backend /staging /config
+    mkdir -p /datadir /staging /config && \
+    chown -R cacheinfinity:cacheinfinity /app /datadir /staging /config
 
 USER cacheinfinity
 EXPOSE 8080

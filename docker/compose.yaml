@@ -22,7 +22,7 @@ services:
     tmpfs:
       - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
     volumes:
-      - ./volumes/backend:/backend            # persistent backend storage mount
+      - ./volumes/backend:/datadir            # persistent datadir storage mount
       - ./volumes/staging:/staging            # staging workspace for downloads
       - ./config:/config                      # configuration directory mounted to $CONFIG (default /config)
     networks:

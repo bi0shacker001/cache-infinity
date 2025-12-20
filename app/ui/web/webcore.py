@@ -22,7 +22,7 @@ class WebUIApp:
     """WSGI application that renders a comprehensive admin dashboard."""
 
     def __init__(self, service: "CacheInfinityService"):
-        _LOGGER.info("Initializing WebUI application")
+        _LOGGER.debug("Initializing WebUI application")
         self.service = service
         self.management = ManagementLayer(service)
         ensure_local_control_server(service)
@@ -37,44 +37,44 @@ class WebUIApp:
     def _load_all_pages(self):
         """Load all page modules using their load_ functions."""
         try:
-            _LOGGER.info("Starting to load all page modules...")
+            _LOGGER.debug("Starting to load all page modules...")
 
             # Load each module directly (they are now inline in this file)
-            _LOGGER.info("Loading storage module...")
+            _LOGGER.debug("Loading storage module...")
             load_storage(self)
-            _LOGGER.info("Storage module loaded successfully")
+            _LOGGER.debug("Storage module loaded successfully")
 
-            _LOGGER.info("Loading cookies module...")
+            _LOGGER.debug("Loading cookies module...")
             load_cookies(self)
-            _LOGGER.info("Cookies module loaded successfully")
+            _LOGGER.debug("Cookies module loaded successfully")
 
-            _LOGGER.info("Loading users module...")
+            _LOGGER.debug("Loading users module...")
             load_users(self)
-            _LOGGER.info("Users module loaded successfully")
+            _LOGGER.debug("Users module loaded successfully")
 
-            _LOGGER.info("Loading cachelinks module...")
+            _LOGGER.debug("Loading cachelinks module...")
             load_cachelinks(self)
-            _LOGGER.info("Cachelinks module loaded successfully")
+            _LOGGER.debug("Cachelinks module loaded successfully")
 
-            _LOGGER.info("Loading settings module...")
+            _LOGGER.debug("Loading settings module...")
             load_settings(self)
-            _LOGGER.info("Settings module loaded successfully")
+            _LOGGER.debug("Settings module loaded successfully")
 
-            _LOGGER.info("Loading maintenance module...")
+            _LOGGER.debug("Loading maintenance module...")
             load_maintenance(self)
-            _LOGGER.info("Maintenance module loaded successfully")
+            _LOGGER.debug("Maintenance module loaded successfully")
 
-            _LOGGER.info("Loading overview module...")
+            _LOGGER.debug("Loading overview module...")
             load_overview(self)
-            _LOGGER.info("Overview module loaded successfully")
+            _LOGGER.debug("Overview module loaded successfully")
 
-            _LOGGER.info("All page modules loaded successfully")
-            _LOGGER.info("Total pages loaded: %d", len(self.pages))
-            _LOGGER.info("Total handlers loaded: %d", len(self.handlers))
+            _LOGGER.debug("All page modules loaded successfully")
+            _LOGGER.debug("Total pages loaded: %d", len(self.pages))
+            _LOGGER.debug("Total handlers loaded: %d", len(self.handlers))
 
             # Debug: Log what was actually loaded
-            _LOGGER.info("Pages registry contents: %s", list(self.pages.keys()))
-            _LOGGER.info("Handlers registry contents: %s", list(self.handlers.keys()))
+            _LOGGER.debug("Pages registry contents: %s", list(self.pages.keys()))
+            _LOGGER.debug("Handlers registry contents: %s", list(self.handlers.keys()))
 
         except Exception as e:
             _LOGGER.error("Failed to load page modules: %s", e, exc_info=True)
@@ -238,7 +238,16 @@ class WebUIApp:
         # Handle the main UI routes
         if path == "/session" and method == "GET":
             _LOGGER.debug("Serving session info")
-            return self._json_response(start_response, {"username": self._get_username_from_session(environ)})
+            level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
+            if not isinstance(level, str):
+                level = "INFO"
+            return self._json_response(
+                start_response,
+                {
+                    "username": self._get_username_from_session(environ),
+                    "log_level": level,
+                },
+            )
         if path == "/status" and method == "GET":
             _LOGGER.debug("Serving system status")
             return self._serve_status(start_response)
@@ -250,7 +259,7 @@ class WebUIApp:
             try:
                 # Call ManagementLayer to get settings detail
                 settings_data = self.management.describe_settings_detail()
-                _LOGGER.info("Settings detail retrieved successfully: %s", settings_data)
+                _LOGGER.debug("Settings detail retrieved successfully: %s", settings_data)
                 return self._json_response(start_response, settings_data)
             except Exception as e:
                 _LOGGER.error("Failed to retrieve settings detail: %s", e, exc_info=True)
@@ -281,7 +290,7 @@ class WebUIApp:
         if path == "/storage/entries" and method == "GET":
             _LOGGER.debug("Serving storage entries")
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             relative = params.get("relative", "/")
             sort_by = params.get("sort_by")
             sort_order = params.get("sort_order")
@@ -589,11 +598,11 @@ class WebUIApp:
     def _load_persistent_sessions(self) -> None:
         """Load sessions from database to restore after restart."""
         try:
-            _LOGGER.info("Loading persistent sessions from database")
+            _LOGGER.debug("Loading persistent sessions from database")
             sessions = self.service.index_db.load_webui_sessions()
             for token, session_data in sessions.items():
                 self.sessions[token] = session_data
-            _LOGGER.info("Loaded %d persistent sessions", len(sessions))
+            _LOGGER.debug("Loaded %d persistent sessions", len(sessions))
         except Exception:
             _LOGGER.exception("Failed to load persistent sessions")
 
@@ -642,7 +651,7 @@ class WebUIApp:
         return [body]
 
     def _handle_login(self, environ, start_response):
-        _LOGGER.info("Handling login request")
+        _LOGGER.debug("Handling login request")
         length = int(environ.get("CONTENT_LENGTH") or 0)
         body = environ["wsgi.input"].read(length) if length > 0 else b""
         params = parse_qs(body.decode("utf-8"))
@@ -663,7 +672,7 @@ class WebUIApp:
         if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
             secure = "; Secure"
 
-        _LOGGER.info("Login successful for user: %s", username)
+        _LOGGER.debug("Login successful for user: %s", username)
         headers = [
             ("Location", "/"),
             ("Set-Cookie", f"ci_session={token}; Path=/; HttpOnly; SameSite=Lax{secure}"),
@@ -671,13 +680,13 @@ class WebUIApp:
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
     def _handle_logout(self, environ, start_response):
-        _LOGGER.info("Handling logout request")
+        _LOGGER.debug("Handling logout request")
         cookies = self._parse_cookies(environ)
         token = cookies.get("ci_session")
         if token:
             session = self.sessions.pop(token, None)
             if session:
-                _LOGGER.info("Logging out user: %s", session.get("username"))
+                _LOGGER.debug("Logging out user: %s", session.get("username"))
             self._save_persistent_sessions()
         secure = ""
         if environ.get("wsgi.url_scheme") == "https" or environ.get("HTTP_X_FORWARDED_PROTO") == "https":
@@ -695,14 +704,14 @@ class WebUIApp:
         return self._respond(start_response, "302 Found", "text/plain", b"", extra_headers=headers)
 
     def _serve_status(self, start_response):
-        _LOGGER.info("Serving system status via _serve_status")
+        _LOGGER.debug("Serving system status via _serve_status")
         try:
-            _LOGGER.info("DEBUG: About to call management.get_system_status()")
+            _LOGGER.debug("DEBUG: About to call management.get_system_status()")
             data = self.management.get_system_status()
-            _LOGGER.info("DEBUG: System status data retrieved successfully: %s", data)
-            _LOGGER.info("DEBUG: Data keys: %s", list(data.keys()) if data else [])
+            _LOGGER.debug("DEBUG: System status data retrieved successfully: %s", data)
+            _LOGGER.debug("DEBUG: Data keys: %s", list(data.keys()) if data else [])
             if 'stats' in data:
-                _LOGGER.info("DEBUG: Stats data: %s", data['stats'])
+                _LOGGER.debug("DEBUG: Stats data: %s", data['stats'])
             return self._json_response(start_response, data)
         except Exception as e:
             _LOGGER.error("DEBUG: Failed to serve system status: %s", e, exc_info=True)
@@ -781,11 +790,11 @@ class OverviewHandlers:
 def load_cachelinks(app: "WebUIApp"):
     """Load cachelinks page functionality into the main app."""
     _LOGGER = __import__('logging').getLogger(__name__)
-    _LOGGER.info("Loading cachelinks module...")
+    _LOGGER.debug("Loading cachelinks module...")
 
     # Register cachelinks API endpoints
     app.handlers['cachelinks'] = CachelinksHandlers(app.service, app.management)
-    _LOGGER.info("Registered cachelinks handlers")
+    _LOGGER.debug("Registered cachelinks handlers")
 
     # Add cachelinks-specific routes to the main app
     pass
@@ -797,12 +806,12 @@ class CachelinksHandlers:
         self.service = service
         self.management = management
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("CachelinksHandlers initialized")
+        _LOGGER.debug("CachelinksHandlers initialized")
 
     def handle_cachelink_create(self, payload: dict[str, object], start_response):
         """Handle cachelink creation."""
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("handle_cachelink_create called with payload keys: %s", list(payload.keys()) if payload else [])
+        _LOGGER.debug("handle_cachelink_create called with payload keys: %s", list(payload.keys()) if payload else [])
 
         try:
             snapshot = self.management.create_cachelink(
@@ -811,7 +820,7 @@ class CachelinksHandlers:
                 url=payload.get("url"),
                 subfolder=payload.get("subfolder", "/"),
             )
-            _LOGGER.info("Cachelink creation successful")
+            _LOGGER.debug("Cachelink creation successful")
             return self._json_response(start_response, snapshot)
         except Exception as exc:
             _LOGGER.error("Cachelink creation failed: %s", exc, exc_info=True)
@@ -881,7 +890,7 @@ class CachelinksHandlers:
         """Parse query string parameters from URL."""
         _LOGGER = __import__('logging').getLogger(__name__)
         query_string = environ.get("QUERY_STRING", "")
-        _LOGGER.info("Parsing query string: %s", query_string)
+        _LOGGER.debug("Parsing query string: %s", query_string)
         params = {}
         if query_string:
             for pair in query_string.split("&"):
@@ -890,7 +899,7 @@ class CachelinksHandlers:
                     params[unquote(key)] = unquote(value)
                 else:
                     params[unquote(pair)] = None
-        _LOGGER.info("Parsed params: %s", params)
+        _LOGGER.debug("Parsed params: %s", params)
         return params
 
     def _json_response(self, start_response, payload: dict[str, object], status: str = "200 OK"):
@@ -1035,11 +1044,11 @@ class CookiesHandlers:
 def load_maintenance(app: "WebUIApp"):
     """Load maintenance page functionality into the main app."""
     _LOGGER = __import__('logging').getLogger(__name__)
-    _LOGGER.info("Loading maintenance module...")
+    _LOGGER.debug("Loading maintenance module...")
 
     # Register maintenance API endpoints
     app.handlers['maintenance'] = MaintenanceHandlers(app.service, app.management)
-    _LOGGER.info("Registered maintenance handlers")
+    _LOGGER.debug("Registered maintenance handlers")
 
     # Add maintenance-specific routes to the main app
     pass
@@ -1051,19 +1060,19 @@ class MaintenanceHandlers:
         self.service = service
         self.management = management
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("MaintenanceHandlers initialized")
+        _LOGGER.debug("MaintenanceHandlers initialized")
 
     def handle_reindex(self, payload: dict[str, object], start_response):
         """Handle reindex trigger."""
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("handle_reindex called with payload keys: %s", list(payload.keys()) if payload else [])
+        _LOGGER.debug("handle_reindex called with payload keys: %s", list(payload.keys()) if payload else [])
 
         canonical_id = payload.get("canonical_id")
         if not isinstance(canonical_id, str):
             return self._json_error(start_response, "canonical_id required", status="400 Bad Request")
         try:
             self.management.trigger_reindex(canonical_id)
-            _LOGGER.info("Reindex trigger successful for: %s", canonical_id)
+            _LOGGER.debug("Reindex trigger successful for: %s", canonical_id)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("Reindex trigger failed: %s", exc, exc_info=True)
@@ -1094,11 +1103,11 @@ class MaintenanceHandlers:
 def load_settings(app: "WebUIApp"):
     """Load settings page functionality into the main app."""
     _LOGGER = __import__('logging').getLogger(__name__)
-    _LOGGER.info("Loading settings module...")
+    _LOGGER.debug("Loading settings module...")
 
     # Register settings API endpoints
     app.handlers['settings'] = SettingsHandlers(app.service, app.management)
-    _LOGGER.info("Registered settings handlers")
+    _LOGGER.debug("Registered settings handlers")
 
     # Add settings-specific routes to the main app
     pass
@@ -1110,19 +1119,19 @@ class SettingsHandlers:
         self.service = service
         self.management = management
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("SettingsHandlers initialized")
+        _LOGGER.debug("SettingsHandlers initialized")
 
     def handle_config_update(self, payload: dict[str, object], start_response):
         """Handle configuration update."""
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("handle_config_update called with payload keys: %s", list(payload.keys()) if payload else [])
+        _LOGGER.debug("handle_config_update called with payload keys: %s", list(payload.keys()) if payload else [])
 
         try:
             self.management.update_config(
                 settings_text=payload.get("settings_text"),
                 cachelinks_text=payload.get("cachelinks_text"),
             )
-            _LOGGER.info("Configuration update successful")
+            _LOGGER.debug("Configuration update successful")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("Configuration update failed: %s", exc, exc_info=True)
@@ -1131,11 +1140,11 @@ class SettingsHandlers:
     def handle_settings_detail_update(self, payload: dict[str, object], start_response):
         """Handle detailed settings update."""
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("handle_settings_detail_update called with payload keys: %s", list(payload.keys()) if payload else [])
+        _LOGGER.debug("handle_settings_detail_update called with payload keys: %s", list(payload.keys()) if payload else [])
 
         try:
             self.management.update_settings_detail(payload)
-            _LOGGER.info("Settings detail update successful")
+            _LOGGER.debug("Settings detail update successful")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("Settings detail update failed: %s", exc, exc_info=True)
@@ -1166,11 +1175,11 @@ class SettingsHandlers:
 def load_users(app: "WebUIApp"):
     """Load users page functionality into the main app."""
     _LOGGER = __import__('logging').getLogger(__name__)
-    _LOGGER.info("Loading users module...")
+    _LOGGER.debug("Loading users module...")
 
     # Register users API endpoints
     app.handlers['users'] = UsersHandlers(app.service, app.management)
-    _LOGGER.info("Registered users handlers")
+    _LOGGER.debug("Registered users handlers")
 
     # Add users-specific routes to the main app
     pass
@@ -1182,12 +1191,12 @@ class UsersHandlers:
         self.service = service
         self.management = management
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("UsersHandlers initialized")
+        _LOGGER.debug("UsersHandlers initialized")
 
     def handle_user_upsert(self, payload: dict[str, object], start_response):
         """Handle user creation or update."""
         _LOGGER = __import__('logging').getLogger(__name__)
-        _LOGGER.info("handle_user_upsert called with payload keys: %s", list(payload.keys()) if payload else [])
+        _LOGGER.debug("handle_user_upsert called with payload keys: %s", list(payload.keys()) if payload else [])
 
         try:
             self.management.upsert_user(
@@ -1197,7 +1206,7 @@ class UsersHandlers:
                 is_admin=bool(payload.get("is_admin", True)),
                 purpose="webui"
             )
-            _LOGGER.info("User upsert successful")
+            _LOGGER.debug("User upsert successful")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("User upsert failed: %s", exc, exc_info=True)
@@ -1216,7 +1225,7 @@ class UsersHandlers:
     def handle_webdav_user_upsert(self, payload: dict[str, object], start_response):
         """Handle WebDAV user creation or update."""
         try:
-            _LOGGER.info("handle_webdav_user_upsert called with payload keys: %s", list(payload.keys()) if payload else [])
+            _LOGGER.debug("handle_webdav_user_upsert called with payload keys: %s", list(payload.keys()) if payload else [])
 
             self.management.upsert_user(
                 username=payload.get("username") or "",
@@ -1230,7 +1239,7 @@ class UsersHandlers:
                 write=bool(payload.get("write", True)),
                 cache=bool(payload.get("cache", True))
             )
-            _LOGGER.info("WebDAV user upsert successful")
+            _LOGGER.debug("WebDAV user upsert successful")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("WebDAV user upsert failed: %s", exc, exc_info=True)
@@ -1246,14 +1255,14 @@ class UsersHandlers:
         share = unquote(parts[0])
         username = unquote(parts[1])
         try:
-            _LOGGER.info("handle_webdav_user_delete called for share: %s, username: %s", share, username)
+            _LOGGER.debug("handle_webdav_user_delete called for share: %s, username: %s", share, username)
 
             self.management.disable_user(
                 username=username,
                 purpose="webdav",
                 share=share
             )
-            _LOGGER.info("WebDAV user deletion successful")
+            _LOGGER.debug("WebDAV user deletion successful")
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             _LOGGER.error("WebDAV user deletion failed: %s", exc, exc_info=True)
@@ -1342,7 +1351,8 @@ class StorageHandlers:
             if not boundary:
                 return self._json_error(start_response, "Boundary missing", status="400 Bad Request")
             marker = f"--{boundary}".encode()
-            location = "backend"
+            
+            location = "datadir"
             relative = "/"
             file_bytes: bytes | None = None
             filename = None
@@ -1359,7 +1369,7 @@ class StorageHandlers:
                     value_end = len(part)
                 payload = part[value_start:value_end]
                 if 'name="location"' in header:
-                    location = payload.decode("utf-8").strip() or "backend"
+                    location = payload.decode("utf-8").strip() or "datadir"
                 elif 'name="relative_path"' in header:
                     relative = payload.decode("utf-8").strip() or "/"
                 elif 'name="file"' in header:
@@ -1376,7 +1386,7 @@ class StorageHandlers:
 
     def handle_folder_create(self, payload: dict[str, object], start_response):
         """Handle folder creation."""
-        location = payload.get("location") or "backend"
+        location = payload.get("location") or "datadir"
         base = payload.get("relative_path") or "/"
         name = payload.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -1390,7 +1400,7 @@ class StorageHandlers:
     def handle_storage_entry_delete(self, environ, start_response):
         """Handle deletion of storage entry."""
         params = self._parse_query_params(environ)
-        location = params.get("location", "backend")
+        location = params.get("location", "datadir")
         relative = params.get("relative", None)
         try:
             if relative is None:
@@ -1403,7 +1413,7 @@ class StorageHandlers:
     def handle_storage_folder_delete(self, environ, start_response):
         """Handle deletion of storage folder."""
         params = self._parse_query_params(environ)
-        location = params.get("location", "backend")
+        location = params.get("location", "datadir")
         relative = params.get("relative", None)
         try:
             if relative is None:
@@ -1416,7 +1426,7 @@ class StorageHandlers:
     def handle_storage_search(self, environ, start_response):
         """Handle file search."""
         params = self._parse_query_params(environ)
-        location = params.get("location", "backend")
+        location = params.get("location", "datadir")
         query = params.get("query", "")
         path_param = params.get("path", "/")
         try:
@@ -1428,7 +1438,7 @@ class StorageHandlers:
     def handle_file_details(self, environ, start_response):
         """Handle file details request."""
         params = self._parse_query_params(environ)
-        location = params.get("location", "backend")
+        location = params.get("location", "datadir")
         file_path = params.get("path", "")
         try:
             details = self.file_browser.get_file_details(location, file_path)

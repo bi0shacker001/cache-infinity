@@ -14,7 +14,7 @@ class RemoteListingFetcher:
     
     def __init__(self):
         """Initialize remote listing fetcher."""
-        _logger.info("Remote listing fetcher initialized")
+        _logger.debug("Remote listing fetcher initialized")
     
     def fetch(self, descriptor, remote_url: str, parse_entries: bool = True):
         """Fetch remote listing.

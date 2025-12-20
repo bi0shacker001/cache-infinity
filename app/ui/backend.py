@@ -45,34 +45,10 @@ class ManagementLayer:
     def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status and statistics."""
         try:
-            logger.info("ManagementLayer.get_system_status() called")
-            logger.info("Service object: %s", self.service)
-            logger.info("Service settings: %s", getattr(self.service, 'settings', 'No settings'))
-            logger.info("Service index_db: %s", getattr(self.service, 'index_db', 'No index_db'))
-
-            # DEBUG: Check if service has required components
-            if not hasattr(self.service, 'index_db') or self.service.index_db is None:
-                logger.error("CRITICAL: Service index_db is None - database not initialized")
-                raise Exception("Database not initialized")
-
-            # DEBUG: Test basic database connectivity
-            try:
-                test_stats = self.service.index_db.stats_summary()
-                logger.info("DEBUG: Database stats_summary() test successful: %s", test_stats)
-            except Exception as db_test_error:
-                logger.error("DEBUG: Database stats_summary() test failed: %s", db_test_error, exc_info=True)
-                raise
-
-            result = self.service.describe_status()
-            logger.info("System status result: %s", result)
-            return result
-        except KeyError as e:
-            if 'backend_1' in str(e):
-                # No backends configured - return minimal status with setup flag
-                logger.warning("No backends configured - returning minimal status")
+            if not self.service.datadir_registry.storages:
                 return {
                     "config_dir": str(self.service.settings.config_dir),
-                    "backend_root": "",
+                    "datadir_root": "",
                     "staging_root": str(self.service.staging.base_path),
                     "share_count": 0,
                     "shares": [],
@@ -94,13 +70,35 @@ class ManagementLayer:
                         "uncached_files": 0,
                     },
                     "storage": {
-                        "backends": [],
+                        "datadirs": [],
                         "staging": {"path": str(self.service.staging.base_path), "exists": False}
                     },
                     "degraded_targets": [],
-                    "missing_backend": True,
-                    "message": "No backends configured. Please set up backend_1 in Settings."
+                    "missing_datadir": True,
+                    "message": "No datadirs configured. Please set up datadir_1 in Settings."
                 }
+            logger.debug("ManagementLayer.get_system_status() called")
+            logger.debug("Service object: %s", self.service)
+            logger.debug("Service settings: %s", getattr(self.service, 'settings', 'No settings'))
+            logger.debug("Service index_db: %s", getattr(self.service, 'index_db', 'No index_db'))
+
+            # DEBUG: Check if service has required components
+            if not hasattr(self.service, 'index_db') or self.service.index_db is None:
+                logger.error("CRITICAL: Service index_db is None - database not initialized")
+                raise Exception("Database not initialized")
+
+            # DEBUG: Test basic database connectivity
+            try:
+                test_stats = self.service.index_db.stats_summary()
+                logger.debug("Database stats_summary() test successful: %s", test_stats)
+            except Exception as db_test_error:
+                logger.error("DEBUG: Database stats_summary() test failed: %s", db_test_error, exc_info=True)
+                raise
+
+            result = self.service.describe_status()
+            logger.debug("System status result: %s", result)
+            return result
+        except KeyError as e:
             logger.error("Failed to get system status: %s", e, exc_info=True)
             raise
         except Exception as e:
@@ -263,7 +261,7 @@ class LocalControlServer:
         if command == "storage":
             if action == "list":
                 return mgmt.list_storage_entries(
-                    location=args.get("location", "backend"),
+                    location=args.get("location", "datadir"),
                     relative_path=args.get("path", "/"),
                     sort_by=args.get("sort_by"),
                     sort_order=args.get("sort_order"),
@@ -275,20 +273,20 @@ class LocalControlServer:
                 data_b64 = args.get("data") or ""
                 file_bytes = base64.b64decode(data_b64.encode("ascii"))
                 return mgmt.upload_storage_file(
-                    location=args.get("location", "backend"),
+                    location=args.get("location", "datadir"),
                     relative_path=args.get("path", "/"),
                     filename=args.get("filename", "upload.bin"),
                     file_data=file_bytes,
                 )
             if action == "mkdir":
                 return mgmt.create_storage_folder(
-                    location=args.get("location", "backend"),
+                    location=args.get("location", "datadir"),
                     relative_path=args.get("path", "/"),
                     folder_name=args.get("name", ""),
                 )
             if action == "delete":
                 return mgmt.delete_storage_entry(
-                    location=args.get("location", "backend"),
+                    location=args.get("location", "datadir"),
                     relative_path=args.get("path", "/"),
                 )
 
@@ -459,10 +457,12 @@ class LocalControlServer:
 
 
 def _runtime_root() -> Path:
-    base = Path("/run")
-    if not base.exists():
-        base = Path("/var/run")
-    return base / "cacheinfinity"
+    candidates = [Path("/run"), Path("/var/run")]
+    for base in candidates:
+        if base.exists() and os.access(base, os.W_OK | os.X_OK):
+            return base / "cacheinfinity"
+    tmp_base = Path(os.getenv("TMPDIR") or "/tmp")
+    return tmp_base / "cacheinfinity"
 
 
 def _runtime_dir(config_dir: Path) -> Path:
@@ -472,7 +472,7 @@ def _runtime_dir(config_dir: Path) -> Path:
     # Storage Management
     def list_storage_entries(
         self,
-        location: str = "backend",
+        location: str = "datadir",
         relative_path: str = "/",
         sort_by: Optional[str] = None,
         sort_order: Optional[str] = None,
@@ -481,6 +481,15 @@ def _runtime_dir(config_dir: Path) -> Path:
         search_query: str = ""
     ) -> Dict[str, Any]:
         """List storage entries with filtering and sorting options."""
+        if location == "datadir" and not self.service.datadir_registry.storages:
+            return {
+                "location": location,
+                "path": relative_path or "/",
+                "entries": [],
+                "breadcrumbs": [{"label": location.upper(), "path": "/"}],
+                "missing_datadir": True,
+                "message": "No datadirs configured. Please set up datadir_1 in Settings → Datadirs."
+            }
         try:
             return self.service.list_storage_entries(
                 location=location,
@@ -492,15 +501,15 @@ def _runtime_dir(config_dir: Path) -> Path:
                 search_query=search_query
             )
         except KeyError as e:
-            if 'backend_1' in str(e):
-                # No backends configured - return empty storage structure
+            if 'datadir_1' in str(e):
+                # No datadirs configured - return empty storage structure
                 return {
                     "location": location,
                     "path": relative_path or "/",
                     "entries": [],
                     "breadcrumbs": [{"label": location.upper(), "path": "/"}],
-                    "missing_backend": True,
-                    "message": "No backends configured. Please set up backend_1 in Settings → Backends."
+                    "missing_datadir": True,
+                    "message": "No datadirs configured. Please set up datadir_1 in Settings → Datadirs."
                 }
             logger.error("Failed to list storage entries: %s", e)
             raise
@@ -891,7 +900,7 @@ def _runtime_dir(config_dir: Path) -> Path:
     def rd_user_webdav(self) -> Dict[str, Any]:
         """Get WebDAV users directly from database and settings."""
         try:
-            logger.info("ManagementLayer.rd_user_webdav() called")
+            logger.debug("ManagementLayer.rd_user_webdav() called")
 
             # Get credentials directly from the database
             credentials = {rec["username"]: rec for rec in self.service.index_db.list_webdav_credentials()}
@@ -919,11 +928,11 @@ def _runtime_dir(config_dir: Path) -> Path:
                     {
                         "name": share.name,
                         "frontend": share.frontend_folder.as_posix(),
-                        "backend": share.backend_folder.as_posix(),
+                        "datadir": share.datadir_folder.as_posix(),
                         "users": users,
                     }
                 )
-            logger.info("Generated WebDAV users data for %d shares", len(shares))
+            logger.debug("Generated WebDAV users data for %d shares", len(shares))
             return {"shares": shares}
         except Exception as e:
             logger.error("Failed to read WebDAV users: %s", e, exc_info=True)

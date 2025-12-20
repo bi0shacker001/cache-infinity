@@ -6,9 +6,9 @@ CacheInfinity exposes a WebDAV filesystem (consumed by Nextcloud and other DAV c
 
 * A browsable folder tree is available immediately, even before data exists locally.
 * Remote content (Archive.org, Myrient, other HTTP(S)/FTP/FTPS sources) appears as virtual files/folders sourced from a progressive index.
-* File bytes are fetched on-demand and cached into backend storage via a staging-first pipeline.
-* Users can also create/modify/delete files; these writes pass through transparently to backend storage.
-* The design prioritizes "no unnecessary downloads": once backend contains data (or there is no CacheInfinity-managed checksum), it is trusted.
+* File bytes are fetched on-demand and cached into datadir storage via a staging-first pipeline.
+* Users can also create/modify/delete files; these writes pass through transparently to datadir storage.
+* The design prioritizes "no unnecessary downloads": once datadir contains data (or there is no CacheInfinity-managed checksum), it is trusted.
 
 The project is inspired by Infinite Mac's **Infinite Drive** and adapts that experience to WebDAV environments with extra controls for staging volumes, cookie management, and Docker/systemd deployment.
 
@@ -16,9 +16,9 @@ The project is inspired by Infinite Mac's **Infinite Drive** and adapts that exp
 
 ## 2. Architecture
 
-* **WebDAV frontend:** WsgiDAV with a custom provider (virtual tree + read-through caching + write-through backend).
-* **Backend storage:** one or more backend roots. Backend is the canonical storage for cached files and all user-authored content.
-* **Local staging:** local volume for downloads/extractions before copying to backend.
+* **WebDAV frontend:** WsgiDAV with a custom provider (virtual tree + read-through caching + write-through datadir).
+* **Datadir storage:** one or more datadir roots. Datadir is the canonical storage for cached files and all user-authored content.
+* **Local staging:** local volume for downloads/extractions before copying to datadir.
 * **Indexer:** refreshes remote listings on a schedule.
 * **Fetcher:** **PycURL-based** downloader for HTTP(S) and FTP transfers.
 * **Interfaces:**
@@ -29,8 +29,8 @@ The project is inspired by Infinite Mac's **Infinite Drive** and adapts that exp
 
 ## 3. Terminology
 
-* **Remote:** listed in index, not present in backend.
-* **Cached:** present in backend at the destination path.
+* **Remote:** listed in index, not present in datadir.
+* **Cached:** present in datadir at the destination path.
 * **Staging:** being downloaded/extracted in local staging.
 * **Local-only:** created via WebDAV writes; not tied to a remote source.
 
@@ -125,7 +125,7 @@ Shares are defined as part of the durable configuration stored in the database (
 
 Each share:
 
-* `backend_folder` (required): relative to backend_1 cache root. Must start with `/`.
+* `datadir_folder` (required): relative to datadir_1 cache root. Must start with `/`.
 * `frontend_folder` (required): exposed path to clients. Must start with `/`.
 * `users` (required): map of username → flags.
 * `writable` (optional, default `true`): share-level switch for write operations.
@@ -142,9 +142,9 @@ Reserved username `anonymous` controls unauthenticated access. If omitted or `lo
 
 ### 5.3 Write-through precedence
 
-* Writes always apply to backend storage.
+* Writes always apply to datadir storage.
 * Remote sources are never modified.
-* If a backend file exists at the same path as a virtual entry, the backend file takes precedence for reads.
+* If a datadir file exists at the same path as a virtual entry, the datadir file takes precedence for reads.
 
 ## 6. Users and authentication
 
@@ -173,7 +173,7 @@ Bootstrap YAML documents that include cachelinks must wrap definitions under a t
 
 ### 7.2 Destination path derivation
 
-Indentation determines folder layout under the share's backend folder.
+Indentation determines folder layout under the share's datadir folder.
 
 Example:
 
@@ -185,7 +185,7 @@ games:
       subfolder: /
 ```
 
-Mount root (relative to backend_1): `/games/psx/`
+Mount root (relative to datadir_1): `/games/psx/`
 
 ### 7.3 Deterministic key naming
 
@@ -254,7 +254,7 @@ Indexing follows a tiered, access-aware policy:
   * Full reindex no less than every 60 days (hard cap) and no more frequently than every 7 days unless `allow_early_full_on_change` and hotness permit.
   * Cheap checks daily (bounded by `max_cheap_checks_per_day`).
   * Idle catch-up rate: one target every 10 minutes. First access can trigger one-per-minute indexing to avoid long warm-ups.
-* Access events (even when served from backend) credit parent/grandparent directories as "hot". Hotness decays over `indexing.hot_window_days`.
+* Access events (even when served from datadir) credit parent/grandparent directories as "hot". Hotness decays over `indexing.hot_window_days`.
 * Budgets (`daily_full_reindex_budget`, `daily_cheap_check_budget`) ensure daily progress without hammering upstreams.
 * Cheap checks prefer conditional requests (ETag / Last-Modified). Without headers, fetch the listing and compare normalized hashes. `ListingNotModified` short-circuits work.
 * Failed cache fetches (remote 404/5xx during user GET) mark the relevant target as `needs_full_reindex` (subject to min interval) to refresh metadata.
@@ -279,24 +279,24 @@ Indexing follows a tiered, access-aware policy:
 
 ### 10.1 General read rules
 
-1. If the requested file exists in backend storage at the destination path, serve from backend.
+1. If the requested file exists in datadir storage at the destination path, serve from datadir.
 
-2. If missing from backend:
+2. If missing from datadir:
 
-   * download to the staging volume first (never straight into backend)
+   * download to the staging volume first (never straight into datadir)
    * stream bytes to the client directly from staging as soon as possible
-   * after successful download, atomically copy from staging into backend if capacity allows
+   * after successful download, atomically copy from staging into datadir if capacity allows
 
-3. If backend is full:
+3. If datadir is full:
 
    * still serve directly (remote/staging)
-   * do not write to backend
+   * do not write to datadir
 
 4. **Only live downloads trigger caching.** Indexing, metadata reads, and other background probes must never fetch file bytes.
 
 ### 10.2 Avoid-download rule
 
-* If a destination file exists in backend and there is no stored checksum entry for it (created by another process), assume correct and do not redownload.
+* If a destination file exists in datadir and there is no stored checksum entry for it (created by another process), assume correct and do not redownload.
 * Checksums are stored only for files CacheInfinity downloaded.
 
 ### 10.3 Cookie-aware downloads
@@ -369,16 +369,16 @@ If `one_zip_cache_at_a_time: true`:
 
 * download ZIP to staging
 * serve the requested file directly from the staging ZIP
-* extract ZIP (or at least the configured prefix) into backend destination
+* extract ZIP (or at least the configured prefix) into datadir destination
 
 ### 11.4 Individual-file mode
 
 * fetch just the requested file's bytes (or extract just that member from a locally staged ZIP)
-* write the single file into backend if capacity allows
+* write the single file into datadir if capacity allows
 
 ## 12. Availability probing
 
-* Per cachelink, periodically select a random index entry that is not cached in backend and attempt to download/cache it.
+* Per cachelink, periodically select a random index entry that is not cached in datadir and attempt to download/cache it.
 * Record probe status for health reporting.
 
 ## 13. Size vs size-on-disk (cache visibility)
@@ -392,7 +392,7 @@ Expose both logical size and cached size:
   * CacheInfinity custom live properties on resources:
 
     * `{urn:cacheinfinity}cache-state`: `remote | staging | cached | local-only`
-    * `{urn:cacheinfinity}size-on-disk`: bytes present in backend for this resource (0 for remote-only)
+    * `{urn:cacheinfinity}size-on-disk`: bytes present in datadir for this resource (0 for remote-only)
 
 Client UIs vary; custom properties remain queryable via PROPFIND.
 
@@ -436,8 +436,8 @@ Top-level:
 * `app/net/`: network operations and data transfer
   * `fetcher.py`: **PycURL-based** download manager for remote file retrieval
   * `indexer.py`: background indexing worker for remote content discovery
-* `app/storage/`: storage management (backend, config dir, staging)
-  * `backend.py`: backend storage manager; handles all reads and writes to backend storage
+* `app/storage/`: storage management (datadir, config dir, staging)
+  * `datadir.py`: datadir storage manager; handles all reads and writes to datadir storage
   * `configuration.py`: configuration directory manager; handles all reads and writes to the config directory
   * `staging.py`: staging storage manager; handles all reads and writes to staging storage
 * `app/ui/`: admin interface and management layer
@@ -513,7 +513,7 @@ tls:
 * Container layout:
 
   * `/app`: application code
-  * `/backend`: canonical cache storage mount
+  * `/datadir`: canonical cache storage mount
   * `/staging`: download/extraction workspace
   * `/config` (mounted config directory):
     * optional `config.yml` (last-resort DB connectivity)
@@ -524,7 +524,7 @@ tls:
 * Compose requirements:
   * Service `cacheinfinity` for the WebDAV server.
   * Optional service `db` running PostgreSQL on a private network with a persistent volume.
-  * Mounts: host backend → `/backend`, host staging → `/staging`, host config dir → `/config`.
+  * Mounts: host datadir → `/datadir`, host staging → `/staging`, host config dir → `/config`.
   * Environment should set `UID`, `GID`, and (when using PostgreSQL) `CACHEINFINITY_DATABASE_URL=postgresql://...@db/cacheinfinity`.
   * Ports: expose WebDAV externally as needed. Prefer plain HTTP behind a reverse proxy; enable built-in TLS only when you need direct HTTPS.
 
@@ -534,7 +534,7 @@ tls:
 * Provide the config directory explicitly (mandatory). Example arguments:
 
   * `--config-dir /var/lib/cacheinfinity/config`
-  * `--backend /var/lib/cacheinfinity/backend`
+  * `--datadir /var/lib/cacheinfinity/datadir`
   * `--staging /var/lib/cacheinfinity/staging`
 * Database connectivity should be provided via systemd environment variables (preferred) or `config.yml` (last resort).
 * The service must be able to write logs and, when using SQLite, write `cacheinfinity.db` inside the config directory.
@@ -566,7 +566,7 @@ tls:
 ## 16. Error handling and observability
 
 * All errors must map to clear log entries including: share, path, cachelink id, remote URL/domain, and exception message.
-* Failures during downloads must not corrupt backend state.
+* Failures during downloads must not corrupt datadir state.
 * Indexing failures must be recorded per-target with last error and next-eligible retry time.
 
 ## 17. Security notes

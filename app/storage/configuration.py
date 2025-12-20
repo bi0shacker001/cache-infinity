@@ -26,7 +26,7 @@ class ConfigurationManager:
         """
         self.config_dir = config_dir
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        _logger.info(f"Configuration manager initialized with directory: {config_dir}")
+        _logger.debug(f"Configuration manager initialized with directory: {config_dir}")
         
     def get_settings_path(self) -> Path:
         """Get the path to the main settings file.
@@ -89,7 +89,7 @@ class ConfigurationManager:
                 with gzip.open(backup_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
                     
-            _logger.info(f"Created backup: {backup_path}")
+            _logger.debug(f"Created backup: {backup_path}")
             return backup_path
             
         except Exception as exc:

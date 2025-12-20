@@ -30,8 +30,8 @@ When running natively the config search order is:
 - Tiered, access-aware indexing: cachelinks are reindexed on a progressive schedule
   (cheap checks daily, full reindexes every 7–60 days) and new deployments learn the
   tree gradually (idle: one folder every 10 min, first-access: one per minute).
-- Read-through caching: backend hits are served instantly; misses stream from remote
-  via staging, then copy into backend if capacity allows. Indexing and metadata
+- Read-through caching: datadir hits are served instantly; misses stream from remote
+  via staging, then copy into datadir if capacity allows. Indexing and metadata
   checks never download payload bytes—only live GET/HEAD requests triggered by users
   populate the cache.
 - Cookie-aware downloads: per-domain cookie jars and Archive.org credential files
@@ -125,15 +125,15 @@ When running natively the config search order is:
 
 ## Runtime behaviour
 
-- **WebDAV provider:** shares expose backend folders at `frontend_folder`. Backend
+- **WebDAV provider:** shares expose datadir folders at `frontend_folder`. Datadir
   files always win when a cachelink overlays the same path. Writes go straight to
-  backend storage.
+  datadir storage.
 - **Cachelinks:** represent remote directory trees (Archive.org, Myrient, HTTP(S)/FTP/FTPS
   listings). Indexed entries include logical size, modified time, protocol, and the
   remote URL used for downloads.
 - **Downloads:** every miss downloads to staging using `curl` with retries, resume,
   cookie support, and per-domain jars. Successful downloads are copied atomically
-  into backend storage; failures log context and trigger a client redirect/proxy so
+  into datadir storage; failures log context and trigger a client redirect/proxy so
   new cookies can be captured for the next attempt. Background indexing never grabs
   file bytes: caching is strictly tied to user-initiated transfers.
 - **Zip mode:** cachelinks that reference `.zip/...` paths obey the size/locking
@@ -158,7 +158,7 @@ When running natively the config search order is:
   backups. This prevents surprise reloads and keeps the database as the single source
   of truth.
 - **Web UI:** a lightweight dashboard (served from a dedicated control port, default
-  `http://<host>:8090/`) shows backend/staging utilization, cache hit/miss counts,
+  `http://<host>:8090/`) shows datadir/staging utilization, cache hit/miss counts,
   indexing hotness, checksum catalog totals, degraded cachelinks, and cookie status.
   It is the preferred way to configure CacheInfinity—administrators can edit live
   config, add/remove cachelinks, inspect gathered metadata, kick off reindexes, or
@@ -178,16 +178,16 @@ When running natively the config search order is:
 ## Deployment & administration
 
 - **Systemd:** use `cacheinfinity.service` as a template (runs as `cache-infinite`).
-  Grant the unit explicit access to backend, staging, state, and `$CONFIG` directories
+  Grant the unit explicit access to datadir, staging, state, and `$CONFIG` directories
   via `ReadWritePaths=` et al. `ExecReload` should send `SIGHUP`.
 - **Docker image:** `docker/Dockerfile` installs CacheInfinity under `/app`, runs as
   a non-root user, and expects mounts:
-  - `/backend`
+  - `/datadir`
   - `/staging`
   - `$CONFIG` (default `/config`)
 - **Docker Compose:** `docker/compose.yaml` launches the published
   `siliconautomaton/cache-infinity` image plus a private PostgreSQL container. It
-  mounts host directories into `/backend`, `/staging`, and `/config`, publishes the
+  mounts host directories into `/datadir`, `/staging`, and `/config`, publishes the
   WebDAV port, mounts a tmpfs at `/run` for runtime artifacts (CLI socket, PID),
   and wires `UID`/`GID` overrides through the `environment:` block.
 - **Environment variables:** besides the config/credential/DB overrides noted above,
@@ -211,7 +211,7 @@ When running natively the config search order is:
   - `fetcher.py`: Download manager using `curl`
   - `config.py`: Configuration loading and validation
   - `index_db.py`: Database interface for metadata storage
-  - `backend.py`: Backend storage management
+  - `datadir.py`: Datadir storage management
   - `staging.py`: Staging area for downloads
   - `cachelinks.py`: Cachelink definition and management
   - `checksum_catalog.py`: Checksum catalog import and lookup
@@ -248,7 +248,7 @@ When running natively the config search order is:
 - ✅ Checksum catalog import
 - ✅ Staging-based download pipeline
 - ✅ TLS manual mode and external proxy mode
-- ✅ Multi-backend support
+- ✅ Multi-datadir support
 - ✅ User management (WebDAV and Web UI)
 
 **Planned/Incomplete:**

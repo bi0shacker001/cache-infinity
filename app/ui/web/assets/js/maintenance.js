@@ -5,7 +5,8 @@
 
 // Initialize maintenance page
 export function initMaintenance() {
-  console.log('Maintenance page initialized - loading maintenance data');
+  const log = window.CILog || console;
+  log.debug('Maintenance page initialized - loading maintenance data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   loadDegraded();

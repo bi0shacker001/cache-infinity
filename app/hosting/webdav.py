@@ -15,7 +15,7 @@ class WebDAVProvider(DAVProvider):
     """Custom WebDAV provider for CacheInfinity.
     
     This provider implements the virtual tree structure with cachelink overlay,
-    on-demand caching, and write-through backend functionality.
+    on-demand caching, and write-through datadir functionality.
     """
     
     def __init__(self, service):
@@ -39,17 +39,17 @@ class WebDAVProvider(DAVProvider):
             Resource instance or None if not found
         """
         try:
-            # Check if path exists in backend storage
-            backend_resource = self._get_backend_resource(path)
-            if backend_resource:
-                return backend_resource
+            # Check if path exists in datadir storage
+            datadir_resource = self._get_datadir_resource(path)
+            if datadir_resource:
+                return datadir_resource
                 
             # Check if path corresponds to a cachelink
             cachelink_resource = self._get_cachelink_resource(path)
             if cachelink_resource:
                 return cachelink_resource
                 
-            # Check if path is a directory that exists in either backend or cachelinks
+            # Check if path is a directory that exists in either datadir or cachelinks
             if self._is_directory(path):
                 return self._create_directory_resource(path)
                 
@@ -59,8 +59,8 @@ class WebDAVProvider(DAVProvider):
             _logger.error(f"Failed to get resource for {path}: {exc}")
             return None
     
-    def _get_backend_resource(self, path: str) -> Optional[Any]:
-        """Get resource from backend storage.
+    def _get_datadir_resource(self, path: str) -> Optional[Any]:
+        """Get resource from datadir storage.
         
         Args:
             path: Path to the resource
@@ -69,9 +69,9 @@ class WebDAVProvider(DAVProvider):
             Resource instance or None
         """
         try:
-            # Check if file exists in backend
-            if self.service.storage_registry.primary.exists(path):
-                return self._create_file_resource(path, source='backend')
+            # Check if file exists in datadir
+            if self.service.datadir_registry.primary.exists(path):
+                return self._create_file_resource(path, source='datadir')
             return None
         except Exception:
             return None
@@ -103,8 +103,8 @@ class WebDAVProvider(DAVProvider):
         Returns:
             True if path is a directory, False otherwise
         """
-        # Check if path exists as directory in backend
-        if self.service.storage_registry.primary.exists(path) and self.service.storage_registry.primary.resolve(path).is_dir():
+        # Check if path exists as directory in datadir
+        if self.service.datadir_registry.primary.exists(path) and self.service.datadir_registry.primary.resolve(path).is_dir():
             return True
             
         # Check if path is a parent of any cachelink
@@ -118,7 +118,7 @@ class WebDAVProvider(DAVProvider):
         
         Args:
             path: Path to the file
-            source: Source of the file ('backend' or 'cachelink')
+            source: Source of the file ('datadir' or 'cachelink')
             cachelink: Cachelink object if source is 'cachelink'
             
         Returns:
@@ -128,8 +128,8 @@ class WebDAVProvider(DAVProvider):
         # that implements the DAVResource interface
         from wsgidav.dav_provider import FileResource
         
-        if source == 'backend':
-            return BackendFileResource(path, self.service)
+        if source == 'datadir':
+            return DatadirFileResource(path, self.service)
         else:
             return CachelinkFileResource(path, self.service, cachelink)
     
@@ -331,9 +331,9 @@ class WebDAVProvider(DAVProvider):
         try:
             members = []
             
-            # Get members from backend storage
-            backend_members = self._get_backend_members(path)
-            members.extend(backend_members)
+            # Get members from datadir storage
+            datadir_members = self._get_datadir_members(path)
+            members.extend(datadir_members)
             
             # Get members from cachelinks
             cachelink_members = self._get_cachelink_members(path)
@@ -346,14 +346,14 @@ class WebDAVProvider(DAVProvider):
             _logger.error(f"Failed to get member list for {path}: {exc}")
             return []
     
-    def _get_backend_members(self, path: str) -> List[str]:
-        """Get members from backend storage."""
+    def _get_datadir_members(self, path: str) -> List[str]:
+        """Get members from datadir storage."""
         try:
-            # Get directory contents from backend
-            backend_path = self.service.storage_registry.primary.resolve(path)
-            if backend_path.exists() and backend_path.is_dir():
+            # Get directory contents from datadir
+            datadir_path = self.service.datadir_registry.primary.resolve(path)
+            if datadir_path.exists() and datadir_path.is_dir():
                 members = []
-                for item in backend_path.iterdir():
+                for item in datadir_path.iterdir():
                     member_path = f"{path.rstrip('/')}/{item.name}"
                     members.append(member_path)
                 return members
@@ -379,8 +379,8 @@ class WebDAVProvider(DAVProvider):
         except Exception:
             return []
             
-    def _get_backend_resource(self, path: str) -> Optional[Any]:
-        """Get resource from backend storage.
+    def _get_datadir_resource(self, path: str) -> Optional[Any]:
+        """Get resource from datadir storage.
         
         Args:
             path: Path to the resource
@@ -388,12 +388,12 @@ class WebDAVProvider(DAVProvider):
         Returns:
             Resource instance or None
         """
-        # This would implement the logic to check if a file exists in backend storage
+        # This would implement the logic to check if a file exists in datadir storage
         # and return an appropriate resource object
         try:
-            # Check if file exists in backend
-            if self.service.storage_registry.primary.exists(path):
-                return self._create_file_resource(path, source='backend')
+            # Check if file exists in datadir
+            if self.service.datadir_registry.primary.exists(path):
+                return self._create_file_resource(path, source='datadir')
             return None
         except Exception:
             return None
@@ -427,8 +427,8 @@ class WebDAVProvider(DAVProvider):
         Returns:
             True if path is a directory, False otherwise
         """
-        # Check if path exists as directory in backend
-        if self.service.storage_registry.primary.exists(path) and self.service.storage_registry.primary.resolve(path).is_dir():
+        # Check if path exists as directory in datadir
+        if self.service.datadir_registry.primary.exists(path) and self.service.datadir_registry.primary.resolve(path).is_dir():
             return True
             
         # Check if path is a parent of any cachelink
@@ -442,7 +442,7 @@ class WebDAVProvider(DAVProvider):
         
         Args:
             path: Path to the file
-            source: Source of the file ('backend' or 'cachelink')
+            source: Source of the file ('datadir' or 'cachelink')
             cachelink: Cachelink object if source is 'cachelink'
             
         Returns:
@@ -452,8 +452,8 @@ class WebDAVProvider(DAVProvider):
         # that implements the DAVResource interface
         from wsgidav.dav_provider import FileResource
         
-        if source == 'backend':
-            return BackendFileResource(path, self.service)
+        if source == 'datadir':
+            return DatadirFileResource(path, self.service)
         else:
             return CachelinkFileResource(path, self.service, cachelink)
             
@@ -655,9 +655,9 @@ class WebDAVProvider(DAVProvider):
         try:
             members = []
             
-            # Get members from backend storage
-            backend_members = self._get_backend_members(path)
-            members.extend(backend_members)
+            # Get members from datadir storage
+            datadir_members = self._get_datadir_members(path)
+            members.extend(datadir_members)
             
             # Get members from cachelinks
             cachelink_members = self._get_cachelink_members(path)
@@ -670,14 +670,14 @@ class WebDAVProvider(DAVProvider):
             _logger.error(f"Failed to get member list for {path}: {exc}")
             return []
     
-    def _get_backend_members(self, path: str) -> List[str]:
-        """Get members from backend storage."""
+    def _get_datadir_members(self, path: str) -> List[str]:
+        """Get members from datadir storage."""
         try:
-            # Get directory contents from backend
-            backend_path = self.service.storage_registry.primary.resolve(path)
-            if backend_path.exists() and backend_path.is_dir():
+            # Get directory contents from datadir
+            datadir_path = self.service.datadir_registry.primary.resolve(path)
+            if datadir_path.exists() and datadir_path.is_dir():
                 members = []
-                for item in backend_path.iterdir():
+                for item in datadir_path.iterdir():
                     member_path = f"{path.rstrip('/')}/{item.name}"
                     members.append(member_path)
                 return members
@@ -704,8 +704,8 @@ class WebDAVProvider(DAVProvider):
             return []
 
 
-class BackendFileResource:
-    """File resource backed by backend storage."""
+class DatadirFileResource:
+    """File resource backed by datadir storage."""
     
     def __init__(self, path: str, service):
         self.path = path
@@ -714,7 +714,7 @@ class BackendFileResource:
     def get_content_length(self) -> int:
         """Get file size."""
         try:
-            file_path = self.service.storage_registry.primary.resolve(self.path)
+            file_path = self.service.datadir_registry.primary.resolve(self.path)
             return file_path.stat().st_size
         except Exception:
             return 0
@@ -722,7 +722,7 @@ class BackendFileResource:
     def get_last_modified(self) -> int:
         """Get last modified time."""
         try:
-            file_path = self.service.storage_registry.primary.resolve(self.path)
+            file_path = self.service.datadir_registry.primary.resolve(self.path)
             return int(file_path.stat().st_mtime)
         except Exception:
             return 0
@@ -735,7 +735,7 @@ class BackendFileResource:
     def get_content(self):
         """Get file content for serving."""
         try:
-            file_path = self.service.storage_registry.primary.resolve(self.path)
+            file_path = self.service.datadir_registry.primary.resolve(self.path)
             return open(file_path, 'rb')
         except Exception as exc:
             _logger.error(f"Failed to get content for {self.path}: {exc}")
@@ -775,12 +775,12 @@ class CachelinkFileResource:
     def get_content(self):
         """Get file content with on-demand fetching and caching."""
         try:
-            # First check if file exists in backend storage
-            backend_path = self.service.storage_registry.primary.resolve(self.path)
-            if backend_path.exists():
-                return open(backend_path, 'rb')
+            # First check if file exists in datadir storage
+            datadir_path = self.service.datadir_registry.primary.resolve(self.path)
+            if datadir_path.exists():
+                return open(datadir_path, 'rb')
             
-            # File not in backend, need to fetch from remote
+            # File not in datadir, need to fetch from remote
             _logger.info(f"Fetching file on-demand: {self.path}")
             
             # Get the cachelink descriptor for this file
@@ -805,11 +805,11 @@ class CachelinkFileResource:
                 _logger.error(f"Failed to download {self.path}: {result.error_message}")
                 return None
             
-            # Move from staging to backend
-            final_path = self.service.storage_registry.primary.resolve(self.path)
+            # Move from staging to datadir
+            final_path = self.service.datadir_registry.primary.resolve(self.path)
             final_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Atomic move from staging to backend
+            # Atomic move from staging to datadir
             import shutil
             shutil.move(str(staging_path), str(final_path))
             
@@ -830,9 +830,9 @@ class CachelinkFileResource:
         try:
             # Find the cachelink that contains this path
             for descriptor in self.service.cachelinks.cachelinks.values():
-                # Check if this path is under this cachelink's backend folder
-                backend_folder = descriptor.backend_relative_folder
-                if self.path.startswith(str(backend_folder)):
+                # Check if this path is under this cachelink's datadir folder
+                datadir_folder = descriptor.backend_relative_folder
+                if self.path.startswith(str(datadir_folder)):
                     return descriptor
             return None
         except Exception:
@@ -842,9 +842,9 @@ class CachelinkFileResource:
         """Build remote URL for the given file path."""
         try:
             # Calculate relative path within the cachelink
-            backend_folder = str(descriptor.backend_relative_folder)
-            if self.path.startswith(backend_folder):
-                relative_path = self.path[len(backend_folder):].lstrip('/')
+            datadir_folder = str(descriptor.backend_relative_folder)
+            if self.path.startswith(datadir_folder):
+                relative_path = self.path[len(datadir_folder):].lstrip('/')
             else:
                 relative_path = self.path.lstrip('/')
             

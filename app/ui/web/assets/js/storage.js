@@ -15,7 +15,8 @@ let storageListenersBound = false;
 
 // Storage page initialization
 export function initStorage() {
-  console.log('Storage page initialized - loading storage data');
+  const log = window.CILog || console;
+  log.debug('Storage page initialized - loading storage data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   bindStorageEventListeners();
@@ -148,22 +149,22 @@ async function loadStorageOverview() {
   try {
     const data = await fetchJSON('storage');
 
-    if (data.missing_backend) {
-      document.getElementById('storage-backends').innerHTML = `
+    if (data.missing_datadir) {
+      document.getElementById('storage-datadirs').innerHTML = `
         <div class="empty-state">
-          <h3>No Backends Configured</h3>
-          <p>${escapeHtml(data.message || 'Please configure backend_1 in Settings → Backends to access storage functionality.')}</p>
+          <h3>No Datadirs Configured</h3>
+          <p>${escapeHtml(data.message || 'Please configure datadir_1 in Settings → Datadirs to access storage functionality.')}</p>
           <button class="btn btn-primary" type="button" data-action="storage-go-settings">Go to Settings</button>
         </div>
       `;
       const fileContainer = document.getElementById('enhanced-file-container');
       if (fileContainer) {
-        fileContainer.innerHTML = '<div class="empty">No backends configured.</div>';
+        fileContainer.innerHTML = '<div class="empty">No datadirs configured.</div>';
       }
       return;
     }
 
-    const backends = (data.backends || []).map((b) => {
+    const datadirs = (data.datadirs || []).map((b) => {
       const used = b.used ? `${(b.used / 1024 / 1024 / 1024).toFixed(2)} GB used` : 'Unknown';
       return `
         <div class="card">
@@ -176,10 +177,10 @@ async function loadStorageOverview() {
       `;
     }).join('');
 
-    document.getElementById('storage-backends').innerHTML = backends || '<p class="empty">No backends configured</p>';
+    document.getElementById('storage-datadirs').innerHTML = datadirs || '<p class="empty">No datadirs configured</p>';
     loadFileBrowser('/');
   } catch (err) {
-    document.getElementById('storage-backends').textContent = err.message;
+    document.getElementById('storage-datadirs').textContent = err.message;
   }
 }
 
@@ -192,7 +193,7 @@ function triggerUpload() {
 
 async function uploadFileToStorage(file) {
   const formData = new FormData();
-  formData.append('location', 'backend');
+  formData.append('location', 'datadir');
   formData.append('relative_path', currentStoragePath || '/');
   formData.append('file', file, file.name);
   try {
@@ -211,7 +212,7 @@ function promptNewFolder() {
 
 async function createFolder(name) {
   const payload = {
-    location: 'backend',
+    location: 'datadir',
     relative_path: currentStoragePath || '/',
     name,
   };
@@ -224,9 +225,9 @@ async function createFolder(name) {
 }
 
 async function deleteFile(path) {
-  if (!confirm('Delete this file from backend storage?')) return;
+  if (!confirm('Delete this file from datadir storage?')) return;
   try {
-    await fetchWithAuth(`storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    await fetchWithAuth(`storage/entries?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
     loadFileBrowser(currentStoragePath, { resetSelection: true });
   } catch (err) {
     alert('Delete failed: ' + err.message);
@@ -236,7 +237,7 @@ async function deleteFile(path) {
 async function deleteFolder(path) {
   if (!confirm('Delete this folder? It must be empty.')) return;
   try {
-    await fetchWithAuth(`storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    await fetchWithAuth(`storage/folder?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
     loadFileBrowser(currentStoragePath, { resetSelection: true });
   } catch (err) {
     alert('Folder deletion failed: ' + err.message);
@@ -251,9 +252,9 @@ async function deleteSelectedEntries() {
     const entry = storageEntries.find((item) => item.path === path);
     try {
       if (entry?.is_dir) {
-        await fetchWithAuth(`storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+        await fetchWithAuth(`storage/folder?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
       } else {
-        await fetchWithAuth(`storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+        await fetchWithAuth(`storage/entries?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
       }
     } catch (err) {
       alert(`Delete failed for ${path}: ${err.message}`);
@@ -296,7 +297,7 @@ async function loadFileBrowser(path = '/', options = {}) {
   const { resetSelection = false } = options;
   try {
     const query = new URLSearchParams({
-      location: 'backend',
+      location: 'datadir',
       relative: path,
       sort_by: storageSortBy,
       sort_order: storageSortOrder,
@@ -305,11 +306,11 @@ async function loadFileBrowser(path = '/', options = {}) {
     });
     const data = await fetchJSON(`storage/entries?${query.toString()}`);
 
-    if (data.missing_backend) {
+    if (data.missing_datadir) {
       document.getElementById('enhanced-file-container').innerHTML = `
         <div class="empty-state">
-          <h3>No Backends Configured</h3>
-          <p>${escapeHtml(data.message || 'Please configure backend_1 in Settings → Backends.')}</p>
+          <h3>No Datadirs Configured</h3>
+          <p>${escapeHtml(data.message || 'Please configure datadir_1 in Settings → Datadirs.')}</p>
         </div>
       `;
       return;

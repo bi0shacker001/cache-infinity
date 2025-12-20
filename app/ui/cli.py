@@ -48,6 +48,15 @@ class LocalControlClient:
         return response.get("result", {})
 
 
+def _runtime_root() -> Path:
+    candidates = [Path("/run"), Path("/var/run")]
+    for base in candidates:
+        if base.exists() and os.access(base, os.W_OK | os.X_OK):
+            return base / "cacheinfinity"
+    tmp_base = Path(os.getenv("TMPDIR") or "/tmp")
+    return tmp_base / "cacheinfinity"
+
+
 def _handle_status(client: LocalControlClient, args) -> int:
     _print_json(client.request({"command": "status"}))
     return 0
@@ -463,7 +472,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     storage = subparsers.add_parser("storage", help="Manage storage")
     storage_sub = storage.add_subparsers(dest="action", required=True)
     storage_list = storage_sub.add_parser("list", help="List storage entries")
-    storage_list.add_argument("--location", default="backend")
+    storage_list.add_argument("--location", default="datadir")
     storage_list.add_argument("--path", default="/")
     storage_list.add_argument("--sort-by")
     storage_list.add_argument("--sort-order", default="asc")
@@ -472,17 +481,17 @@ def create_argument_parser() -> argparse.ArgumentParser:
     storage_list.add_argument("--search-query")
 
     storage_upload = storage_sub.add_parser("upload", help="Upload file")
-    storage_upload.add_argument("--location", default="backend")
+    storage_upload.add_argument("--location", default="datadir")
     storage_upload.add_argument("--path", required=True)
     storage_upload.add_argument("--file", required=True)
 
     storage_mkdir = storage_sub.add_parser("mkdir", help="Create folder")
-    storage_mkdir.add_argument("--location", default="backend")
+    storage_mkdir.add_argument("--location", default="datadir")
     storage_mkdir.add_argument("--path", required=True)
     storage_mkdir.add_argument("--name", required=True)
 
     storage_delete = storage_sub.add_parser("delete", help="Delete entry")
-    storage_delete.add_argument("--location", default="backend")
+    storage_delete.add_argument("--location", default="datadir")
     storage_delete.add_argument("--path", required=True)
 
     cachelinks = subparsers.add_parser("cachelinks", help="Manage cachelinks")
@@ -598,12 +607,9 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    runtime_root = Path("/run")
-    if not runtime_root.exists():
-        runtime_root = Path("/var/run")
-    runtime_path = runtime_root / "cacheinfinity" / "runtime.json"
+    runtime_path = _runtime_root() / "runtime.json"
     if not runtime_path.exists():
-        raise RuntimeError("No running server found (missing /run/cacheinfinity/runtime.json)")
+        raise RuntimeError(f"No running server found (missing {runtime_path})")
     payload = json.loads(runtime_path.read_text(encoding="utf-8"))
     pid = payload.get("pid")
     if isinstance(pid, int) and pid > 0:

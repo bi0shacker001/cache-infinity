@@ -10,7 +10,8 @@ let usersDelegatedBound = false;
 
 // Initialize users page
 function initUsers() {
-  console.log('Users page initialized - loading users data');
+  const log = window.CILog || console;
+  log.debug('Users page initialized - loading users data');
   renderUserTopbar();
   setActiveUserTab(currentUserTab);
   setupUsersEventListeners();

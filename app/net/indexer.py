@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 
 from auth.credentials import CookieJarDefinition
 from core.config import IndexingSettings
-from cache.cachelinks import CachelinkDescriptor
+from cache.cachelinks import CachelinkDescriptor, CachelinkIndex
+from db.dbmanage import DatabaseManager
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ class RemoteListingFetcher:
     def __init__(self):
         """Initialize remote listing fetcher."""
         self._pycurl = _import_pycurl()
-        _logger.info("RemoteListingFetcher initialized")
+        _logger.debug("RemoteListingFetcher initialized")
 
     def _fetch_bytes(
         self,
@@ -134,7 +135,14 @@ class RemoteListingFetcher:
         }
         return buffer.getvalue(), metadata
     
-    def fetch(self, url: str, parse_entries: bool = True) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def fetch(
+        self,
+        url: str,
+        parse_entries: bool = True,
+        *,
+        cached_etag: str | None = None,
+        cached_modified: str | None = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch remote directory listing.
         
         Args:
@@ -147,7 +155,12 @@ class RemoteListingFetcher:
         try:
             # Determine protocol and fetch accordingly
             if url.startswith('http'):
-                return self._fetch_http_listing(url, parse_entries)
+                return self._fetch_http_listing(
+                    url,
+                    parse_entries,
+                    cached_etag=cached_etag,
+                    cached_modified=cached_modified,
+                )
             elif url.startswith('ftp'):
                 return self._fetch_ftp_listing(url, parse_entries)
             else:
@@ -157,20 +170,16 @@ class RemoteListingFetcher:
             _logger.error(f"Failed to fetch listing from {url}: {exc}")
             return [], {'error': str(exc), 'url': url}
     
-    def _fetch_http_listing(self, url: str, parse_entries: bool, target_id: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def _fetch_http_listing(
+        self,
+        url: str,
+        parse_entries: bool,
+        *,
+        cached_etag: str | None = None,
+        cached_modified: str | None = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch HTTP directory listing with conditional requests."""
         try:
-            # Check for cached ETag/Last-Modified
-            cached_etag = None
-            cached_modified = None
-            if target_id and hasattr(self, 'db_adapter') and self.db_adapter:
-                result = self.db_adapter.fetchone("""
-                    SELECT etag, last_modified FROM indexing_cache WHERE target_id = ?
-                """, (target_id,))
-                if result:
-                    cached_etag = result.get('etag')
-                    cached_modified = result.get('last_modified')
-            
             # Make request with conditional headers if available
             headers: dict[str, str] = {}
             
@@ -184,19 +193,11 @@ class RemoteListingFetcher:
 
             # Handle 304 Not Modified
             if metadata.get("status_code") == 304:
-                _logger.info(f"Target {target_id}: Listing unchanged (304 Not Modified)")
+                _logger.debug(f"Target {target_id}: Listing unchanged (304 Not Modified)")
                 return [], {"status": "not_modified", "url": url}
 
             if int(metadata.get("status_code") or 0) >= 400:
                 return [], {"error": f"HTTP {metadata.get('status_code')}", "url": url}
-            
-            # Cache the new ETag/Last-Modified
-            if target_id and hasattr(self, 'db_adapter') and self.db_adapter:
-                self.db_adapter.execute("""
-                    INSERT OR REPLACE INTO indexing_cache (target_id, etag, last_modified, cached_at)
-                    VALUES (?, ?, ?, ?)
-                """, (target_id, metadata.get("etag", ""), metadata.get("last_modified", ""), int(time.time())))
-                self.db_adapter.commit()
             
             if not parse_entries:
                 return [], metadata
@@ -282,23 +283,28 @@ class RemoteListingFetcher:
 class Indexer:
     """Manages indexing of remote sources and listing updates."""
     
-    def __init__(self, settings: IndexingSettings, cookie_jars: Dict[str, CookieJarDefinition],
-                 db_adapter: Any | None = None):
+    def __init__(
+        self,
+        settings: IndexingSettings,
+        cookie_jars: Dict[str, CookieJarDefinition],
+        db_manager: DatabaseManager | None = None,
+        cachelinks: CachelinkIndex | None = None,
+    ):
         """Initialize indexer.
         
         Args:
             settings: Indexing configuration settings
             cookie_jars: Cookie jar definitions for authenticated domains
-            db_adapter: Database adapter for persistence
+            db_manager: Database manager for persistence
+            cachelinks: Cachelink index for descriptor lookups
         """
         self.settings = settings
         self.cookie_jars = cookie_jars
-        # CacheInfinityService passes IndexDatabase here; Indexer currently expects a DBAdapter-like surface.
-        self.db_adapter = getattr(db_adapter, "_db", db_adapter)
+        self.db_manager = db_manager
+        self.cachelinks = cachelinks
         self._last_index_times: Dict[str, int] = {}
         self._fetcher = RemoteListingFetcher()
-        self._fetcher.db_adapter = self.db_adapter  # Make db_adapter available to fetcher
-        _logger.info("Indexer initialized")
+        _logger.debug("Indexer initialized")
         
     def should_reindex(self, target_id: str) -> bool:
         """Determine if a target should be reindexed.
@@ -342,39 +348,27 @@ class Indexer:
         current_time = int(time.time())
         
         # Count successful reindexes performed today
-        if self.db_adapter:
+        if self.db_manager:
             try:
-                reindex_count = self.db_adapter.fetchone("""
-                    SELECT COUNT(*) as count
-                    FROM indexing_log
-                    WHERE date(timestamp, 'unixepoch') = date(?, 'unixepoch')
-                    AND success = 1
-                """, (current_time,))
-                
-                if reindex_count and reindex_count['count'] >= self.settings.daily_full_reindex_budget:
+                reindex_count = self.db_manager.count_successful_indexing_today(current_time)
+                if reindex_count >= self.settings.daily_full_reindex_budget:
                     _logger.debug(f"Daily reindex budget exceeded for {target_id}")
                     return False
-                
+
                 # Check 14-day budget
                 fourteen_days_ago = current_time - (14 * 24 * 3600)
-                reindex_count_14d = self.db_adapter.fetchone("""
-                    SELECT COUNT(*) as count
-                    FROM indexing_log
-                    WHERE timestamp >= ?
-                    AND success = 1
-                """, (fourteen_days_ago,))
-                
-                if reindex_count_14d and reindex_count_14d['count'] >= self.settings.max_full_reindex_per_14d:
+                reindex_count_14d = self.db_manager.count_successful_indexing_since(fourteen_days_ago)
+                if reindex_count_14d >= self.settings.max_full_reindex_per_14d:
                     _logger.debug(f"14-day reindex budget exceeded for {target_id}")
                     return False
-                
+
                 # Check if target has hot files and should be prioritized
                 if self.settings.early_full_requires_hot:
                     hot_files = self.get_hot_files(limit=10)
                     if not hot_files:
                         _logger.debug(f"Target {target_id}: Skipping early reindex due to no hot files")
                         return False
-                
+
             except Exception as exc:
                 _logger.error(f"Failed to check reindex budget for {target_id}: {exc}")
                 return False
@@ -399,30 +393,48 @@ class Indexer:
             # Build full URL with subfolder
             full_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
             
+            cache_state = None
+            if self.db_manager:
+                cache_state = self.db_manager.get_indexing_cache(target_id)
+
             # Fetch remote listing with conditional requests
-            entries, metadata = self._fetcher.fetch(full_url, parse_entries=True)
+            cached_etag = None
+            cached_modified = None
+            if cache_state:
+                cached_etag = cache_state.get("etag") or None
+                cached_modified = cache_state.get("last_modified") or None
+            entries, metadata = self._fetcher.fetch(
+                full_url,
+                parse_entries=True,
+                cached_etag=cached_etag,
+                cached_modified=cached_modified,
+            )
+
+            if self.db_manager and ("etag" in metadata or "last_modified" in metadata):
+                self.db_manager.set_indexing_cache(
+                    target_id,
+                    metadata.get("etag"),
+                    metadata.get("last_modified"),
+                    int(time.time()),
+                )
             
             # Handle 304 Not Modified
             if metadata.get('status') == 'not_modified':
-                _logger.info(f"Target {target_id}: No changes since last index")
-                if self.db_adapter:
-                    self.db_adapter.execute("""
-                        INSERT OR REPLACE INTO indexing_log (
-                            target_id, timestamp, success, entries_processed, error_message
-                        ) VALUES (?, ?, ?, ?, ?)
-                    """, (target_id, int(time.time()), True, 0, None))
-                    self.db_adapter.commit()
+                _logger.debug(f"Target {target_id}: No changes since last index")
+                if self.db_manager:
+                    self.db_manager.record_indexing_log(target_id, int(time.time()), True, 0, None)
                 return True
             
             if not entries:
                 _logger.warning(f"No entries found for {target_id}: {full_url}")
-                if self.db_adapter:
-                    self.db_adapter.execute("""
-                        INSERT OR REPLACE INTO indexing_log (
-                            target_id, timestamp, success, entries_processed, error_message
-                        ) VALUES (?, ?, ?, ?, ?)
-                    """, (target_id, int(time.time()), True, 0, "No entries found"))
-                    self.db_adapter.commit()
+                if self.db_manager:
+                    self.db_manager.record_indexing_log(
+                        target_id,
+                        int(time.time()),
+                        True,
+                        0,
+                        "No entries found",
+                    )
                 return True
             
             # Process entries and update database
@@ -434,7 +446,7 @@ class Indexer:
                         continue
                     
                     # Update database with entry
-                    if self.db_adapter:
+                    if self.db_manager:
                         self._update_entry_in_database(target_id, entry)
                     
                     indexed_count += 1
@@ -444,32 +456,22 @@ class Indexer:
                     continue
             
             # Log indexing result
-            if self.db_adapter:
-                self.db_adapter.execute("""
-                    INSERT OR REPLACE INTO indexing_log (
-                        target_id, timestamp, success, entries_processed, error_message
-                    ) VALUES (?, ?, ?, ?, ?)
-                """, (target_id, int(time.time()), True, indexed_count, None))
-                self.db_adapter.commit()
+            if self.db_manager:
+                self.db_manager.record_indexing_log(target_id, int(time.time()), True, indexed_count, None)
             
-            _logger.info(f"Indexed target {target_id}: {url}/{subfolder} - {indexed_count} entries")
+            _logger.debug(f"Indexed target {target_id}: {url}/{subfolder} - {indexed_count} entries")
             return True
             
         except Exception as exc:
             _logger.error(f"Failed to index target {target_id}: {exc}")
-            if self.db_adapter:
-                self.db_adapter.execute("""
-                    INSERT OR REPLACE INTO indexing_log (
-                        target_id, timestamp, success, entries_processed, error_message
-                    ) VALUES (?, ?, ?, ?, ?)
-                """, (target_id, int(time.time()), False, 0, str(exc)))
-                self.db_adapter.commit()
+            if self.db_manager:
+                self.db_manager.record_indexing_log(target_id, int(time.time()), False, 0, str(exc))
             return False
     
     def _update_entry_in_database(self, target_id: str, entry: Dict[str, Any]) -> None:
         """Update a single entry in the database."""
         try:
-            # Get the cachelink descriptor to determine backend path
+            # Get the cachelink descriptor to determine datadir path
             descriptor = self._get_cachelink_descriptor(target_id)
             if not descriptor:
                 _logger.warning(f"Unknown cachelink descriptor for target {target_id}")
@@ -492,24 +494,25 @@ class Indexer:
             checksum = entry.get('checksum')
             
             # Insert or update the indexed entry
-            self.db_adapter.execute("""
-                INSERT OR REPLACE INTO indexed_entries (
-                    cachelink_id, relative_path, is_dir, size, checksum, 
-                    last_modified, url, accessed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                target_id, relative_path, entry['is_dir'], size, checksum,
-                entry.get('modified'), entry.get('url'), int(time.time())
-            ))
+            self.db_manager.upsert_indexed_entry(
+                target_id,
+                relative_path,
+                entry['is_dir'],
+                size,
+                checksum,
+                entry.get('modified'),
+                entry.get('url'),
+                int(time.time()),
+            )
             
         except Exception as exc:
             _logger.error(f"Failed to update entry in database: {exc}")
     
     def _get_cachelink_descriptor(self, target_id: str) -> Optional[CachelinkDescriptor]:
         """Get cachelink descriptor for a target ID."""
-        # This would need to be implemented to retrieve from the service
-        # For now, return None - this should be implemented in the service layer
-        return None
+        if not self.cachelinks:
+            return None
+        return self.cachelinks.cachelinks.get(target_id)
     
     def index_all_targets(self, targets: List[Dict[str, str]]) -> Dict[str, bool]:
         """Index multiple targets.
@@ -608,81 +611,12 @@ class Indexer:
             for target_id in old_targets:
                 del self._last_index_times[target_id]
                 
-            _logger.info(f"Cleaned up {len(old_targets)} old index entries")
+            _logger.debug(f"Cleaned up {len(old_targets)} old index entries")
             return True
             
         except Exception as exc:
             _logger.error(f"Failed to cleanup old indexes: {exc}")
             return False
-    
-    def _ensure_database_tables(self) -> None:
-        """Ensure required database tables exist."""
-        if not self.db_adapter:
-            return
-        
-        try:
-            # Create file_access table for access tracking
-            self.db_adapter._db.execute("""
-                CREATE TABLE IF NOT EXISTS file_access (
-                    file_path TEXT NOT NULL,
-                    user TEXT NOT NULL,
-                    last_accessed INTEGER NOT NULL,
-                    access_count INTEGER DEFAULT 1,
-                    PRIMARY KEY (file_path, user)
-                )
-            """)
-            
-            # Create indexing_log table for indexing history
-            self.db_adapter._db.execute("""
-                CREATE TABLE IF NOT EXISTS indexing_log (
-                    target_id TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    success BOOLEAN NOT NULL,
-                    entries_processed INTEGER DEFAULT 0,
-                    error_message TEXT
-                )
-            """)
-            
-            # Create indexing_cache table for conditional requests
-            self.db_adapter._db.execute("""
-                CREATE TABLE IF NOT EXISTS indexing_cache (
-                    target_id TEXT NOT NULL PRIMARY KEY,
-                    etag TEXT,
-                    last_modified TEXT,
-                    cached_at INTEGER NOT NULL
-                )
-            """)
-            
-            # Create indexed_entries table for indexed file entries
-            self.db_adapter._db.execute("""
-                CREATE TABLE IF NOT EXISTS indexed_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    cachelink_id TEXT NOT NULL,
-                    relative_path TEXT NOT NULL,
-                    is_dir BOOLEAN NOT NULL,
-                    size INTEGER DEFAULT 0,
-                    checksum TEXT,
-                    last_modified TEXT,
-                    url TEXT,
-                    accessed_at INTEGER NOT NULL,
-                    UNIQUE(cachelink_id, relative_path)
-                )
-            """)
-            
-            # Create indexes for better performance
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_file_access_path ON file_access(file_path)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_time ON indexing_log(timestamp)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_cachelink ON indexed_entries(cachelink_id)")
-            self.db_adapter._db.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_path ON indexed_entries(relative_path)")
-            
-            self.db_adapter._db.commit()
-            _logger.info("Database tables initialized for indexer")
-            
-        except Exception as exc:
-            _logger.error(f"Failed to initialize database tables: {exc}")
     
     def record_file_access(self, file_path: str, user: str) -> bool:
         """Record file access for hotness tracking.
@@ -695,21 +629,12 @@ class Indexer:
             True if access was recorded successfully
         """
         try:
-            if not self.db_adapter:
+            if not self.db_manager:
                 return False
             
             current_time = int(time.time())
             
-            # Insert or update access record
-            self.db_adapter.execute("""
-                INSERT OR REPLACE INTO file_access (
-                    file_path, user, last_accessed, access_count
-                ) VALUES (?, ?, ?,
-                    COALESCE((SELECT access_count FROM file_access WHERE file_path = ? AND user = ?), 0) + 1
-                )
-            """, (file_path, user, current_time, file_path, user))
-            
-            self.db_adapter.commit()
+            self.db_manager.record_file_access(file_path, user, current_time)
             return True
             
         except Exception as exc:
@@ -726,20 +651,14 @@ class Indexer:
             Hotness score (higher = more popular)
         """
         try:
-            if not self.db_adapter:
+            if not self.db_manager:
                 return 0.0
             
             current_time = int(time.time())
             window_start = current_time - (self.settings.hot_window_days * 24 * 3600)
             
             # Get access count within hot window
-            result = self.db_adapter.fetchone("""
-                SELECT access_count, last_accessed
-                FROM file_access
-                WHERE file_path = ? AND last_accessed >= ?
-                ORDER BY last_accessed DESC
-                LIMIT 1
-            """, (file_path, window_start))
+            result = self.db_manager.get_file_access(file_path, window_start)
             
             if not result:
                 return 0.0
@@ -773,19 +692,13 @@ class Indexer:
             List of hot files with their scores
         """
         try:
-            if not self.db_adapter:
+            if not self.db_manager:
                 return []
             
             current_time = int(time.time())
             window_start = current_time - (self.settings.hot_window_days * 24 * 3600)
             
-            results = self.db_adapter.fetchall("""
-                SELECT file_path, access_count, last_accessed
-                FROM file_access
-                WHERE last_accessed >= ?
-                ORDER BY access_count DESC, last_accessed DESC
-                LIMIT ?
-            """, (window_start, limit))
+            results = self.db_manager.list_recent_file_access(window_start, limit)
             
             hot_files = []
             for row in results:
@@ -825,26 +738,34 @@ class Indexer:
             True if reindex was triggered successfully
         """
         try:
+            descriptor = self._get_cachelink_descriptor(canonical_id)
+            if descriptor:
+                self.mark_target_for_reindex(descriptor)
+
             # Mark target for immediate reindexing
-            if self.db_adapter:
-                self.db_adapter.execute("""
-                    UPDATE indexed_entries 
-                    SET accessed_at = ? 
-                    WHERE cachelink_id = ?
-                """, (int(time.time()) - 3600, canonical_id))  # Set to 1 hour ago to force reindex
-                self.db_adapter.commit()
+            if self.db_manager:
+                self.db_manager.mark_indexed_entries_accessed_at(
+                    canonical_id,
+                    int(time.time()) - 3600,
+                )
             
             # Clear last index time to force reindex
             if canonical_id in self._last_index_times:
                 del self._last_index_times[canonical_id]
             
-            _logger.info(f"Triggered reindex for cachelink: {canonical_id}")
+            _logger.debug(f"Triggered reindex for cachelink: {canonical_id}")
             return True
             
         except Exception as exc:
             _logger.error(f"Failed to trigger reindex for {canonical_id}: {exc}")
             return False
     
+    def mark_target_for_reindex(self, descriptor: CachelinkDescriptor) -> None:
+        if not self.db_manager:
+            return
+        state = self.db_manager.ensure_target(descriptor, descriptor.remote_listing_url)
+        self.db_manager.mark_needs_full(state.id)
+
     def get_degraded_targets(self) -> List[Dict[str, Any]]:
         """Get list of degraded targets that need attention.
         
@@ -852,18 +773,14 @@ class Indexer:
             List of degraded targets
         """
         try:
-            if not self.db_adapter:
+            if not self.db_manager:
                 return []
-            
-            # Get targets with recent errors
-            results = self.db_adapter.fetchall("""
-                SELECT target_id, error_message, timestamp as last_error_at
-                FROM indexing_log
-                WHERE success = 0
-                AND timestamp >= ?
-                GROUP BY target_id
-                ORDER BY last_error_at DESC
-            """, (int(time.time()) - 7 * 24 * 3600,))  # Last 7 days
+
+            if hasattr(self.db_manager, "list_degraded_targets"):
+                return self.db_manager.list_degraded_targets()
+
+            # Fallback to indexing log if target table entries are unavailable
+            results = self.db_manager.list_degraded_indexing(int(time.time()) - 7 * 24 * 3600)
             
             degraded = []
             for row in results:

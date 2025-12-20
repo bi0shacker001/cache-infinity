@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Sequence
 import yaml
 from wsgidav.dav_provider import DAVProvider
 
-from storage.backend import BackendDefinition
+from storage.datadir import DatadirDefinition
 from cache.cachelinks import CachelinkIndex, load_cachelinks
 from auth.credentials import CredentialStore, load_credentials, CookieJarDefinition
 from storage.staging import StagingDefinition
@@ -216,12 +216,12 @@ class ConfigService:
         state = self._service.index_db.ensure_target(descriptor, descriptor.remote_listing_url)
         entries = self._service.index_db.list_entries_for_descriptor(descriptor)
 
-        # Check if we have backends before trying to access primary
-        if self._service.backend_registry.storages:
-            backend = self._service.backend_registry.primary
-            counts = self.descriptor_counts(descriptor, entries, backend)
+        # Check if we have datadirs before trying to access primary
+        if self._service.datadir_registry.storages:
+            datadir = self._service.datadir_registry.primary
+            counts = self.descriptor_counts(descriptor, entries, datadir)
         else:
-            self._logger.info("No backends configured - using zero counts for cachelink snapshot")
+            self._logger.info("No datadirs configured - using zero counts for cachelink snapshot")
             counts = {
                 "entries_total": len(entries),
                 "files_total": 0,
@@ -252,7 +252,7 @@ class ConfigService:
             snapshot["last_error_at"] = degraded.get("last_error_at")
         return snapshot
 
-    def descriptor_counts(self, descriptor, entries: list, backend) -> dict[str, int]:
+    def descriptor_counts(self, descriptor, entries: list, datadir) -> dict[str, int]:
         """Calculate counts for descriptor entries."""
         files_total = 0
         dirs_total = 0
@@ -266,9 +266,9 @@ class ConfigService:
             if not entry_path:
                 continue
             entry_rel = PurePosixPath(entry_path)
-            backend_rel = descriptor.backend_relative_folder / entry_rel
-            backend_path = backend.resolve(backend_rel)
-            if backend_path.exists():
+            datadir_rel = descriptor.backend_relative_folder / entry_rel
+            datadir_path = datadir.resolve(datadir_rel)
+            if datadir_path.exists():
                 cached_files += 1
         uncached = max(files_total - cached_files, 0)
         return {
@@ -369,12 +369,12 @@ class ConfigMigration:
     def _migrate_configuration(self, bootstrap_data: dict) -> None:
         """Migrate all configuration sections to database."""
         
-        # Migrate backends
+        # Migrate datadirs
         paths = bootstrap_data.get("paths", {})
-        for name, backend_raw in paths.items():
-            if name.startswith("backend_"):
-                backend = self._parse_backend_for_migration(name, backend_raw)
-                self.index_db.save_backend(backend)
+        for name, datadir_raw in paths.items():
+            if name.startswith("datadir_") or name.startswith("backend_"):
+                datadir = self._parse_datadir_for_migration(name, datadir_raw)
+                self.index_db.save_backend(datadir)
         
         # Migrate staging
         staging_raw = paths.get("staging", {})
@@ -446,13 +446,14 @@ class ConfigMigration:
         webdav_raw = bootstrap_data.get("webdav", {})
         for name, share_raw in webdav_raw.items():
             users_config = json.dumps(share_raw.get("users", {}))
+            datadir_folder = share_raw.get("datadir_folder", share_raw.get("backend_folder", ""))
             share = {
                 "name": name,
-                "backend_folder": str(share_raw.get("backend_folder", "")),
+                "backend_folder": str(datadir_folder),
                 "frontend_folder": str(share_raw.get("frontend_folder", "")),
                 "writable": bool(share_raw.get("writable", True)),
                 "cachelink_overlay": bool(share_raw.get("cachelink_overlay", True)),
-                "users_config": users_config
+                "users_config": users_config,
             }
             self.index_db.save_share(share)
         
@@ -495,13 +496,15 @@ class ConfigMigration:
         if cachelinks:
             self.index_db.save_cachelinks(cachelinks)
     
-    def _parse_backend_for_migration(self, name: str, backend_raw: dict) -> dict:
-        """Parse backend configuration for migration."""
+    def _parse_datadir_for_migration(self, name: str, datadir_raw: dict) -> dict:
+        """Parse datadir configuration for migration."""
         return {
             "name": name,
-            "backend_mounted": bool(backend_raw.get("backend_mounted", False)),
-            "backend_cache_root": str(backend_raw.get("backend_cache_root", "")),
-            "backend_mount_root": str(backend_raw.get("backend_mount_root")) if backend_raw.get("backend_mount_root") else None
+            "backend_mounted": bool(datadir_raw.get("datadir_mounted", datadir_raw.get("backend_mounted", False))),
+            "backend_cache_root": str(datadir_raw.get("datadir_cache_root", datadir_raw.get("backend_cache_root", ""))),
+            "backend_mount_root": str(datadir_raw.get("datadir_mount_root", datadir_raw.get("backend_mount_root")))
+            if datadir_raw.get("datadir_mount_root") or datadir_raw.get("backend_mount_root")
+            else None,
         }
     
     def _parse_cachelinks_for_migration(self, cachelinks_raw: dict, bootstrap_path: Optional[Path] = None) -> list[dict]:
@@ -636,15 +639,15 @@ class ShareDefinition:
     """Definition of a WebDAV share."""
 
     name: str
-    backend_folder: Path
+    datadir_folder: Path
     frontend_folder: Path
     users: dict[str, ShareUserPolicy]
     writable: bool = True
     cachelink_overlay: bool = True
 
     def validate(self) -> None:
-        if not self.backend_folder.is_absolute():
-            raise ConfigError(f"Share {self.name}: backend_folder must be absolute")
+        if not self.datadir_folder.is_absolute():
+            raise ConfigError(f"Share {self.name}: datadir_folder must be absolute")
         if not self.frontend_folder.is_absolute():
             raise ConfigError(f"Share {self.name}: frontend_folder must be absolute")
         if not self.users:
@@ -780,8 +783,8 @@ class Settings:
 
     config_dir: Path
     settings_path: Path
-    primary_backend: BackendDefinition
-    backends: dict[str, BackendDefinition]
+    primary_datadir: DatadirDefinition
+    datadirs: dict[str, DatadirDefinition]
     staging: StagingDefinition
     cookies: dict[str, CookieJarDefinition]
     shares: dict[str, ShareDefinition]
@@ -794,14 +797,14 @@ class Settings:
     mount_tree_paths: list[Path] = field(default_factory=list)
 
     @property
-    def backend_cache_root(self) -> Path:
-        """Convenience accessor for the canonical backend cache root."""
-        return self.primary_backend.backend_cache_root
+    def datadir_cache_root(self) -> Path:
+        """Convenience accessor for the canonical datadir cache root."""
+        return self.primary_datadir.datadir_cache_root
 
     def validate(self) -> None:
         """Validate the complete configuration."""
-        for backend in self.backends.values():
-            backend.validate()
+        for datadir in self.datadirs.values():
+            datadir.validate()
         for share in self.shares.values():
             share.validate()
         self.tls.validate()
@@ -1021,10 +1024,10 @@ def validate_settings(settings: TwoFileSettings) -> list[str]:
             errors.append("PostgreSQL requires db_password")
     
     
-    # Validate backend configurations
-    for name, backend in settings.backends.items():
-        if not backend.backend_cache_root.exists():
-            errors.append(f"Backend cache root does not exist: {backend.backend_cache_root}")
+    # Validate datadir configurations
+    for name, datadir in settings.datadirs.items():
+        if not datadir.datadir_cache_root.exists():
+            errors.append(f"Datadir cache root does not exist: {datadir.datadir_cache_root}")
     
     # Validate staging configuration
     if settings.staging.staging_mounted and settings.staging.staging_mount_root:
@@ -1040,8 +1043,8 @@ def validate_settings(settings: TwoFileSettings) -> list[str]:
     
     # Validate share configurations
     for name, share in settings.shares.items():
-        if not share.backend_folder.exists():
-            errors.append(f"Share backend folder does not exist: {share.backend_folder}")
+        if not share.datadir_folder.exists():
+            errors.append(f"Share datadir folder does not exist: {share.datadir_folder}")
     
     return errors
 
@@ -1071,10 +1074,10 @@ def load_two_file_settings(config_dir: Path, args, env, bootstrap_path: Optional
     tls_settings = _parse_tls(merged_config.get("tls", {}), config_dir)
     indexing_settings = _parse_indexing(merged_config.get("indexing", {}))
     limits_settings = _parse_limits(merged_config.get("limits", {}))
-    backends = _parse_backends(merged_config.get("paths", {}), config_dir)
+    datadirs = _parse_datadirs(merged_config.get("paths", {}), config_dir)
     staging = _parse_staging(merged_config.get("paths", {}), config_dir)
     cookies = _parse_cookies(merged_config.get("cookies", {}), config_dir)
-    shares = _parse_shares(merged_config.get("webdav", {}), backends)
+    shares = _parse_shares(merged_config.get("webdav", {}), datadirs)
     
     # Handle cachelinks
     mount_tree_paths = []
@@ -1102,7 +1105,7 @@ def load_two_file_settings(config_dir: Path, args, env, bootstrap_path: Optional
         tls=tls_settings,
         indexing=indexing_settings,
         limits=limits_settings,
-        backends=backends,
+        datadirs=datadirs,
         staging=staging,
         cookies=cookies,
         shares=shares,
@@ -1187,34 +1190,19 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
     Returns:
         TwoFileSettings populated from database
     """
-    # Load backends from database
-    backends = {}
-    backend_data = index_db.get_all_backends()
-    for backend_raw in backend_data:
-        backend = BackendDefinition(
-            name=backend_raw["name"],
-            backend_mounted=backend_raw["backend_mounted"],
-            backend_cache_root=Path(backend_raw["backend_cache_root"]),
-            backend_mount_root=Path(backend_raw["backend_mount_root"]) if backend_raw["backend_mount_root"] else None
+    # Load datadirs from database
+    datadirs = {}
+    datadir_data = index_db.get_all_backends()
+    for datadir_raw in datadir_data:
+        datadir = DatadirDefinition(
+            name=datadir_raw["name"],
+            datadir_mounted=datadir_raw["backend_mounted"],
+            datadir_cache_root=Path(datadir_raw["backend_cache_root"]),
+            datadir_mount_root=Path(datadir_raw["backend_mount_root"]) if datadir_raw["backend_mount_root"] else None,
         )
-        backends[backend.name] = backend
+        datadirs[datadir.name] = datadir
 
-    # If no backends are defined in database, create a minimal default backend
-    if not backends:
-        _LOGGER.info("No backends configured in database - creating default backend_1 at /backend")
-        default_backend_path = Path("/backend")
-        default_backend_path.mkdir(parents=True, exist_ok=True)
-        backends["backend_1"] = BackendDefinition(
-            name="backend_1",
-            backend_mounted=False,
-            backend_cache_root=default_backend_path,
-            backend_mount_root=None
-        )
-    elif "backend_1" not in backends:
-        # If backends exist but no backend_1, use the first one as backend_1
-        first_backend_name = next(iter(backends.keys()))
-        _LOGGER.info("No backend_1 found in database - using %s as backend_1", first_backend_name)
-        backends["backend_1"] = backends[first_backend_name]
+    # Datadirs may be intentionally empty; no defaults are created here.
     
     # Load staging from database
     staging_raw = index_db.get_staging()
@@ -1295,7 +1283,7 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         
         share = ShareDefinition(
             name=share_raw["name"],
-            backend_folder=Path(share_raw["backend_folder"]),
+            datadir_folder=Path(share_raw["backend_folder"]),
             frontend_folder=Path(share_raw["frontend_folder"]),
             users=users,
             writable=share_raw["writable"],
@@ -1399,7 +1387,7 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         tls=tls,
         indexing=indexing,
         limits=limits,
-        backends=backends,
+        datadirs=datadirs,
         staging=staging,
         cookies=cookies,
         shares=shares,
@@ -1434,46 +1422,31 @@ def _build_cachelinks_yaml(cachelinks_data: list[dict]) -> str:
 
 
 
-def _parse_backends(paths: dict, config_dir: Path) -> dict[str, BackendDefinition]:
-    """Parse backend definitions."""
-    backends = {}
-    for name, backend_raw in paths.items():
-        if name.startswith("backend_"):
-            backend = _parse_backend(name, backend_raw, config_dir)
-            backends[name] = backend
+def _parse_datadirs(paths: dict, config_dir: Path) -> dict[str, DatadirDefinition]:
+    """Parse datadir definitions."""
+    datadirs = {}
+    for name, datadir_raw in paths.items():
+        if name.startswith("datadir_"):
+            datadir = _parse_datadir(name, datadir_raw, config_dir)
+            datadirs[name] = datadir
     
-    # If no backends are defined, create a minimal default backend
-    if not backends:
-        default_backend_path = config_dir / "backend"
-        default_backend_path.mkdir(parents=True, exist_ok=True)
-        backends["backend_1"] = BackendDefinition(
-            name="backend_1",
-            backend_mounted=False,
-            backend_cache_root=default_backend_path,
-            backend_mount_root=None
-        )
-    elif "backend_1" not in backends:
-        # If backends exist but no backend_1, use the first one as backend_1
-        first_backend_name = next(iter(backends.keys()))
-        backends["backend_1"] = backends[first_backend_name]
-    
-    return backends
+    return datadirs
 
 
-def _parse_backend(name: str, raw: dict, config_dir: Path) -> BackendDefinition:
-    """Parse a single backend definition."""
-    backend_cache_root = _require_path(raw, "backend_cache_root", config_dir)
-    backend_mounted = bool(raw.get("backend_mounted", False))
-    backend_mount_root = _optional_path(raw.get("backend_mount_root"), config_dir)
+def _parse_datadir(name: str, raw: dict, config_dir: Path) -> DatadirDefinition:
+    """Parse a single datadir definition."""
+    datadir_cache_root = _require_path(raw, "datadir_cache_root", config_dir)
+    datadir_mounted = bool(raw.get("datadir_mounted", False))
+    datadir_mount_root = _optional_path(raw.get("datadir_mount_root"), config_dir)
 
-    backend = BackendDefinition(
+    datadir = DatadirDefinition(
         name=name,
-        backend_mounted=backend_mounted,
-        backend_cache_root=backend_cache_root,
-        backend_mount_root=backend_mount_root,
+        datadir_mounted=datadir_mounted,
+        datadir_cache_root=datadir_cache_root,
+        datadir_mount_root=datadir_mount_root,
     )
-    backend.validate()
-    return backend
+    datadir.validate()
+    return datadir
 
 
 def _parse_staging(paths: dict, config_dir: Path) -> StagingDefinition:
@@ -1504,11 +1477,11 @@ def _parse_cookies(cookies_raw: dict, config_dir: Path) -> dict[str, CookieJarDe
     return cookies
 
 
-def _parse_shares(webdav_raw: dict, backends: dict[str, BackendDefinition]) -> dict[str, ShareDefinition]:
+def _parse_shares(webdav_raw: dict, datadirs: dict[str, DatadirDefinition]) -> dict[str, ShareDefinition]:
     """Parse share definitions."""
     shares = {}
     for name, share_raw in webdav_raw.items():
-        backend_folder = _require_path(share_raw, "backend_folder")
+        datadir_folder = _require_path(share_raw, "datadir_folder")
         frontend_folder = _require_path(share_raw, "frontend_folder")
         users_raw = share_raw.get("users", {})
         users = {}
@@ -1524,7 +1497,7 @@ def _parse_shares(webdav_raw: dict, backends: dict[str, BackendDefinition]) -> d
 
         share = ShareDefinition(
             name=name,
-            backend_folder=backend_folder,
+            datadir_folder=datadir_folder,
             frontend_folder=frontend_folder,
             users=users,
             writable=writable,
@@ -1713,7 +1686,7 @@ class TwoFileSettings:
     tls: TLSSettings
     indexing: IndexingSettings
     limits: LimitsDefinition
-    backends: dict[str, BackendDefinition]
+    datadirs: dict[str, DatadirDefinition]
     staging: StagingDefinition
     cookies: dict[str, CookieJarDefinition]
     shares: dict[str, ShareDefinition]
@@ -1723,19 +1696,19 @@ class TwoFileSettings:
     bootstrap_config: BootstrapSettings = field(default_factory=BootstrapSettings)
     
     @property
-    def backend_cache_root(self) -> Path:
-        """Convenience accessor for the canonical backend cache root."""
-        return self.backends.get("backend_1", BackendDefinition(
-            name="backend_1",
-            backend_mounted=False,
-            backend_cache_root=Path(""),
-            backend_mount_root=None
-        )).backend_cache_root
+    def datadir_cache_root(self) -> Path:
+        """Convenience accessor for the canonical datadir cache root."""
+        datadir = self.datadirs.get("datadir_1")
+        if datadir is None and self.datadirs:
+            datadir = next(iter(self.datadirs.values()))
+        if datadir is None:
+            return Path("")
+        return datadir.datadir_cache_root
     
     def validate(self) -> None:
         """Validate the complete configuration."""
-        for backend in self.backends.values():
-            backend.validate()
+        for datadir in self.datadirs.values():
+            datadir.validate()
         for share in self.shares.values():
             share.validate()
         self.tls.validate()
@@ -2061,11 +2034,11 @@ class ConfigPersistence:
         
         # Paths configuration
         paths = {}
-        for name, backend in settings.backends.items():
+        for name, datadir in settings.datadirs.items():
             paths[name] = {
-                "backend_mounted": backend.backend_mounted,
-                "backend_cache_root": str(backend.backend_cache_root),
-                "backend_mount_root": str(backend.backend_mount_root) if backend.backend_mount_root else None
+                "datadir_mounted": datadir.datadir_mounted,
+                "datadir_cache_root": str(datadir.datadir_cache_root),
+                "datadir_mount_root": str(datadir.datadir_mount_root) if datadir.datadir_mount_root else None,
             }
         
         paths["staging"] = {
@@ -2163,7 +2136,7 @@ class ConfigPersistence:
         webdav = {}
         for name, share in settings.shares.items():
             webdav[name] = {
-                "backend_folder": str(share.backend_folder),
+                "datadir_folder": str(share.datadir_folder),
                 "frontend_folder": str(share.frontend_folder),
                 "writable": share.writable,
                 "cachelink_overlay": share.cachelink_overlay,

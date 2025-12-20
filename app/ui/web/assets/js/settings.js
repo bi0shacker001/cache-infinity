@@ -11,7 +11,8 @@ let settingsDelegatedBound = false;
 
 // Initialize settings page
 function initSettings() {
-  console.log('Settings page initialized - loading settings data');
+  const log = window.CILog || console;
+  log.debug('Settings page initialized - loading settings data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   loadSettingsDetail();
@@ -58,18 +59,18 @@ function bindSettingsDelegatedEvents() {
     if (!target) return;
     const action = target.dataset.action;
 
-    if (action === 'settings-backend-add') {
+    if (action === 'settings-datadir-add') {
       event.preventDefault();
-      addBackendBlock();
+      addDatadirBlock();
     } else if (action === 'settings-cookie-add') {
       event.preventDefault();
       addCookieConfig();
     } else if (action === 'settings-share-add') {
       event.preventDefault();
       addShareBlock();
-    } else if (action === 'settings-backend-remove') {
+    } else if (action === 'settings-datadir-remove') {
       event.preventDefault();
-      removeBackendBlock(target);
+      removeDatadirBlock(target);
     } else if (action === 'settings-cookie-remove') {
       event.preventDefault();
       removeCookieConfig(target);
@@ -113,9 +114,9 @@ function renderSettingsDetail() {
 
   container.innerHTML = `
     <div class="settings-block">
-      <h4>Backends</h4>
-      <div id="backend-blocks"></div>
-      <button class="btn btn-secondary btn-small" type="button" data-action="settings-backend-add">Add Backend</button>
+      <h4>Datadirs</h4>
+      <div id="datadir-blocks"></div>
+      <button class="btn btn-secondary btn-small" type="button" data-action="settings-datadir-add">Add Datadir</button>
     </div>
     <div class="settings-block">
       <h4>Staging</h4>
@@ -329,45 +330,48 @@ function renderSettingsDetail() {
     </div>
   `;
 
-  populateBackendList(detail.paths || []);
+  populateDatadirList(detail.paths || []);
   populateCookieConfigs(detail.cookies || []);
   populateShareBlocks(detail.shares || []);
   document.getElementById('settings-status').textContent = '';
 }
 
-function backendBlockTemplate(data = {}) {
+function datadirBlockTemplate(data = {}) {
   const esc = escapeHtml;
   const name = data.name || '';
-  const removable = name && name !== 'backend_1';
+  const isPrimary = name === 'backend_1' || name === 'datadir_1';
+  const displayName = name === 'backend_1' ? 'datadir_1' : name;
+  const removable = name && !isPrimary;
 
-  return `<div class="backend-block">
+  return `<div class="datadir-block">
     <div class="form-grid">
-      <label>Name<input type="text" class="backend-name" value="${esc(name)}" ${name === 'backend_1' ? 'readonly' : ''}></label>
-      <label>Cache Root<input type="text" class="backend-cache" value="${esc(data.backend_cache_root || '')}" placeholder="/backend/cache"></label>
-      <label>Mounted?<input type="checkbox" class="backend-mounted" ${data.backend_mounted ? 'checked' : ''}></label>
-      <label>Mount Root<input type="text" class="backend-mount" value="${esc(data.backend_mount_root || '')}" placeholder="/mnt/backend"></label>
+      <label>Name<input type="text" class="datadir-name" value="${esc(displayName)}" ${isPrimary ? 'readonly' : ''}></label>
+      <label>Cache Root<input type="text" class="datadir-cache" value="${esc(data.datadir_cache_root || '')}" placeholder="/datadir"></label>
+      <label>Mounted?<input type="checkbox" class="datadir-mounted" ${data.datadir_mounted ? 'checked' : ''}></label>
+      <label>Mount Root<input type="text" class="datadir-mount" value="${esc(data.datadir_mount_root || '')}" placeholder="/mnt/datadir"></label>
     </div>
-    ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-backend-remove">Remove</button></div>' : ''}
+    ${isPrimary ? '<p class="empty">For Docker, the default compose mounts to /datadir.</p>' : ''}
+    ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-datadir-remove">Remove</button></div>' : ''}
   </div>`;
 }
 
-function populateBackendList(list) {
-  const container = document.getElementById('backend-blocks');
+function populateDatadirList(list) {
+  const container = document.getElementById('datadir-blocks');
   if (!container) return;
-  container.innerHTML = list.length ? list.map((item) => backendBlockTemplate(item)).join('') : '<p class="empty">No backends configured.</p>';
+  container.innerHTML = list.length ? list.map((item) => datadirBlockTemplate(item)).join('') : '<p class="empty">No datadirs configured.</p>';
 }
 
-function addBackendBlock() {
-  const container = document.getElementById('backend-blocks');
+function addDatadirBlock() {
+  const container = document.getElementById('datadir-blocks');
   if (!container) return;
-  container.insertAdjacentHTML('beforeend', backendBlockTemplate({}));
+  container.insertAdjacentHTML('beforeend', datadirBlockTemplate({}));
 }
 
-function removeBackendBlock(btn) {
-  const block = btn.closest('.backend-block');
+function removeDatadirBlock(btn) {
+  const block = btn.closest('.datadir-block');
   if (block) block.remove();
-  if (!document.querySelector('.backend-block')) {
-    document.getElementById('backend-blocks').innerHTML = '<p class="empty">No backends configured.</p>';
+  if (!document.querySelector('.datadir-block')) {
+    document.getElementById('datadir-blocks').innerHTML = '<p class="empty">No datadirs configured.</p>';
   }
 }
 
@@ -408,7 +412,7 @@ function shareBlockTemplate(data = {}) {
   return `<div class="share-config-block">
     <div class="form-grid">
       <label>Name<input type="text" class="share-name" value="${esc(data.name || '')}" placeholder="share_games"></label>
-      <label>Backend Folder<input type="text" class="share-backend" value="${esc(data.backend_folder || '')}" placeholder="/games"></label>
+      <label>Datadir Folder<input type="text" class="share-datadir" value="${esc(data.datadir_folder || '')}" placeholder="/games"></label>
       <label>Frontend Folder<input type="text" class="share-frontend" value="${esc(data.frontend_folder || '')}" placeholder="/games"></label>
       <label>Writable<input type="checkbox" class="share-writable" ${data.writable ? 'checked' : ''}></label>
       <label>Cache Overlay<input type="checkbox" class="share-overlay" ${data.cachelink_overlay ? 'checked' : ''}></label>
@@ -439,7 +443,7 @@ function removeShareBlock(btn) {
 
 function collectSettingsDetail() {
   return {
-    paths: collectBackends(),
+    paths: collectDatadirs(),
     staging: {
       staging_mounted: document.getElementById('staging-mounted').checked,
       staging_mount_root: document.getElementById('staging-root').value.trim(),
@@ -458,17 +462,17 @@ function collectSettingsDetail() {
   };
 }
 
-function collectBackends() {
-  const blocks = document.querySelectorAll('.backend-block');
+function collectDatadirs() {
+  const blocks = document.querySelectorAll('.datadir-block');
   const list = [];
   blocks.forEach((block) => {
-    const name = block.querySelector('.backend-name')?.value.trim();
+    const name = block.querySelector('.datadir-name')?.value.trim();
     if (!name) return;
     list.push({
       name,
-      backend_cache_root: block.querySelector('.backend-cache')?.value.trim(),
-      backend_mounted: block.querySelector('.backend-mounted')?.checked ?? false,
-      backend_mount_root: block.querySelector('.backend-mount')?.value.trim(),
+      datadir_cache_root: block.querySelector('.datadir-cache')?.value.trim(),
+      datadir_mounted: block.querySelector('.datadir-mounted')?.checked ?? false,
+      datadir_mount_root: block.querySelector('.datadir-mount')?.value.trim(),
     });
   });
   return list;
@@ -497,7 +501,7 @@ function collectShareConfigs() {
     if (!name) return;
     list.push({
       name,
-      backend_folder: block.querySelector('.share-backend')?.value.trim(),
+      datadir_folder: block.querySelector('.share-datadir')?.value.trim(),
       frontend_folder: block.querySelector('.share-frontend')?.value.trim(),
       writable: block.querySelector('.share-writable')?.checked ?? true,
       cachelink_overlay: block.querySelector('.share-overlay')?.checked ?? true,

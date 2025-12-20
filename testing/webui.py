@@ -91,7 +91,7 @@ class WebUIApp:
             return self._json_response(start_response, self.management.get_storage_utilization())
         if path == "/api/storage/entries" and method == "GET":
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             relative = params.get("relative", "/")
             sort_by = params.get("sort_by")
             sort_order = params.get("sort_order")
@@ -113,7 +113,7 @@ class WebUIApp:
                 return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/storage/entries" and method == "DELETE":
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             relative = params.get("relative", None)
             try:
                 if relative is None:
@@ -128,7 +128,7 @@ class WebUIApp:
             return self._handle_json_request(environ, start_response, self._handle_folder_create)
         if path == "/api/storage/folder" and method == "DELETE":
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             relative = params.get("relative", None)
             try:
                 if relative is None:
@@ -141,7 +141,7 @@ class WebUIApp:
         # Enhanced file browser API endpoints
         if path == "/api/storage/search" and method == "GET":
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             query = params.get("query", "")
             path_param = params.get("path", "/")
             try:
@@ -152,7 +152,7 @@ class WebUIApp:
         
         if path == "/api/storage/file-details" and method == "GET":
             params = self._parse_query_params(environ)
-            location = params.get("location", "backend")
+            location = params.get("location", "datadir")
             file_path = params.get("path", "")
             try:
                 details = self.file_browser.get_file_details(location, file_path)
@@ -332,7 +332,7 @@ class WebUIApp:
             if not boundary:
                 return self._json_error(start_response, "Boundary missing", status="400 Bad Request")
             marker = f"--{boundary}".encode()
-            location = "backend"
+            location = "datadir"
             relative = "/"
             file_bytes: bytes | None = None
             filename = None
@@ -349,7 +349,7 @@ class WebUIApp:
                     value_end = len(part)
                 payload = part[value_start:value_end]
                 if 'name="location"' in header:
-                    location = payload.decode("utf-8").strip() or "backend"
+                    location = payload.decode("utf-8").strip() or "datadir"
                 elif 'name="relative_path"' in header:
                     relative = payload.decode("utf-8").strip() or "/"
                 elif 'name="file"' in header:
@@ -365,7 +365,7 @@ class WebUIApp:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
     def _handle_folder_create(self, payload: dict[str, object], start_response):
-        location = payload.get("location") or "backend"
+        location = payload.get("location") or "datadir"
         base = payload.get("relative_path") or "/"
         name = payload.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -865,7 +865,7 @@ _INDEX_HTML = """<!DOCTYPE html>
         <section id="section-storage" class="section">
           <div class="panel">
             <h3>Backend Storage</h3>
-            <div id="storage-backends">Loading…</div>
+            <div id="storage-datadirs">Loading…</div>
           </div>
           <div class="panel">
             <h3>Enhanced File Browser</h3>
@@ -1215,13 +1215,13 @@ _INDEX_HTML = """<!DOCTYPE html>
       try {
         const data = await fetchJSON('api/status');
         
-        // Check if backend is missing
-        if (data.missing_backend) {
+        // Check if datadir is missing
+        if (data.missing_datadir) {
           document.getElementById('status-stats').innerHTML = `
             <div class="alert alert-warning">
               <h4>Setup Required</h4>
               <p>${data.message}</p>
-              <p>Please go to Settings → Backends to configure your first backend (backend_1).</p>
+              <p>Please go to Settings → Datadirs to configure your first datadir (datadir_1).</p>
               <button class="btn btn-primary" onclick="setActiveSection('settings'); setTimeout(() => setActiveSection('settings'), 100)">Go to Settings</button>
             </div>
           `;
@@ -1229,7 +1229,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           document.getElementById('metric-cache-miss').textContent = '0';
           document.getElementById('metric-targets-indexed').textContent = '0';
           document.getElementById('metric-access-total').textContent = '0';
-          document.getElementById('status-storage').innerHTML = '<p class="empty">No backends configured</p>';
+          document.getElementById('status-storage').innerHTML = '<p class="empty">No datadirs configured</p>';
           document.getElementById('status-shares').innerHTML = '<li class="empty">No shares configured</li>';
           return;
         }
@@ -1247,15 +1247,15 @@ _INDEX_HTML = """<!DOCTYPE html>
           <p><strong>Last Access:</strong> ${stats.last_access || '—'}</p>
         `;
         const storage = data.storage || {};
-        const backend = (storage.backends || []).map((b) => {
+        const datadirs = (storage.datadirs || []).map((b) => {
           const total = b.total ? (b.total / (1024 ** 3)).toFixed(1) : '—';
           const used = b.used ? (b.used / (1024 ** 3)).toFixed(1) : '—';
           const free = b.free ? (b.free / (1024 ** 3)).toFixed(1) : '—';
           return `<div><strong>${b.name}</strong><br/>${b.path}<br/>${used} / ${total} GB used (${free} GB free)</div>`;
         }).join('');
-        document.getElementById('status-storage').innerHTML = backend || '<p class="empty">No storage info</p>';
+        document.getElementById('status-storage').innerHTML = datadirs || '<p class="empty">No storage info</p>';
         document.getElementById('status-shares').innerHTML = (data.shares || []).map((s) =>
-          `<li><strong>${s.frontend}</strong> → ${s.backend} <span class="badge">${s.users} users</span></li>`
+          `<li><strong>${s.frontend}</strong> → ${s.datadir} <span class="badge">${s.users} users</span></li>`
         ).join('') || '<li class="empty">No shares configured</li>';
       } catch (err) {
         document.getElementById('status-stats').textContent = err.message;
@@ -1266,12 +1266,12 @@ _INDEX_HTML = """<!DOCTYPE html>
       try {
         const data = await fetchJSON('api/storage');
         
-        // Check if backend is missing
-        if (data.missing_backend) {
-          document.getElementById('storage-backends').innerHTML = `
+        // Check if datadir is missing
+        if (data.missing_datadir) {
+          document.getElementById('storage-datadirs').innerHTML = `
             <div class="empty-state">
-              <h3>No Backends Configured</h3>
-              <p>Please configure backend_1 in Settings → Backends to access storage functionality.</p>
+              <h3>No Datadirs Configured</h3>
+              <p>Please configure datadir_1 in Settings → Datadirs to access storage functionality.</p>
               <button class="btn btn-primary" onclick="setActiveSection('settings'); setTimeout(() => setActiveSection('settings'), 100)">Go to Settings</button>
             </div>
           `;
@@ -1280,7 +1280,7 @@ _INDEX_HTML = """<!DOCTYPE html>
           return;
         }
         
-        const backends = (data.backends || []).map((b) => `
+        const datadirs = (data.datadirs || []).map((b) => `
           <div class="card">
             <span>${b.name}</span>
             <strong>${b.path}</strong>
@@ -1290,10 +1290,10 @@ _INDEX_HTML = """<!DOCTYPE html>
             </div>
           </div>
         `).join('');
-        document.getElementById('storage-backends').innerHTML = backends || '<p class="empty">No backends configured</p>';
+        document.getElementById('storage-datadirs').innerHTML = datadirs || '<p class="empty">No datadirs configured</p>';
         loadFileBrowser();
       } catch (err) {
-        document.getElementById('storage-backends').textContent = err.message;
+        document.getElementById('storage-datadirs').textContent = err.message;
       }
     }
 
@@ -1310,7 +1310,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     async function uploadFileToStorage(file) {
       const formData = new FormData();
-      formData.append('location', 'backend');
+      formData.append('location', 'datadir');
       formData.append('relative_path', currentStoragePath || '/');
       formData.append('file', file, file.name);
       try {
@@ -1330,7 +1330,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     async function createFolder(name) {
       const payload = {
-        location: 'backend',
+        location: 'datadir',
         relative_path: currentStoragePath || '/',
         name,
       };
@@ -1343,9 +1343,9 @@ _INDEX_HTML = """<!DOCTYPE html>
     }
 
     async function deleteFile(path) {
-      if (!confirm('Delete this file from backend storage?')) return;
+      if (!confirm('Delete this file from datadir storage?')) return;
       try {
-        await fetchWithAuth(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+        await fetchWithAuth(`api/storage/entries?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Delete failed: ' + err.message);
@@ -1355,7 +1355,7 @@ _INDEX_HTML = """<!DOCTYPE html>
     async function deleteFolder(path) {
       if (!confirm('Delete this folder? It must be empty.')) return;
       try {
-        await fetchWithAuth(`api/storage/folder?location=backend&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
+        await fetchWithAuth(`api/storage/folder?location=datadir&relative=${encodeURIComponent(path)}`, { method: 'DELETE' });
         loadFileBrowser(currentStoragePath);
       } catch (err) {
         alert('Folder deletion failed: ' + err.message);
@@ -1364,7 +1364,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     async function loadFileBrowser(path = '/') {
       try {
-        const data = await fetchJSON(`api/storage/entries?location=backend&relative=${encodeURIComponent(path)}`);
+        const data = await fetchJSON(`api/storage/entries?location=datadir&relative=${encodeURIComponent(path)}`);
         const breadcrumbs = data.breadcrumbs.map((b, i) => {
           const active = i === data.breadcrumbs.length - 1 ? 'active' : '';
           return `<button type="button" class="file-breadcrumb-item ${active}" data-action="storage-open" data-path="${escapeHtml(b.path)}">${escapeHtml(b.label)}</button>`;
@@ -1516,9 +1516,9 @@ _INDEX_HTML = """<!DOCTYPE html>
       const proxy = auth.proxy_header || {};
       container.innerHTML = `
         <div class="settings-block">
-          <h4>Backends</h4>
-          <div id="backend-blocks"></div>
-          <button class="btn btn-secondary btn-small" type="button" data-action="settings-backend-add">Add Backend</button>
+          <h4>Datadirs</h4>
+          <div id="datadir-blocks"></div>
+          <button class="btn btn-secondary btn-small" type="button" data-action="settings-datadir-add">Add Datadir</button>
         </div>
         <div class="settings-block">
           <h4>Staging</h4>
@@ -1737,38 +1737,38 @@ _INDEX_HTML = """<!DOCTYPE html>
       document.getElementById('settings-status').textContent = '';
     }
 
-    function backendBlockTemplate(data = {}) {
+    function datadirBlockTemplate(data = {}) {
       const esc = escapeHtml;
       const name = data.name || '';
-      const removable = name && name !== 'backend_1';
-      return `<div class="backend-block">
+      const removable = name && name !== 'datadir_1';
+      return `<div class="datadir-block">
         <div class="form-grid">
-          <label>Name<input type="text" class="backend-name" value="${esc(name)}" ${name === 'backend_1' ? 'readonly' : ''}></label>
-          <label>Cache Root<input type="text" class="backend-cache" value="${esc(data.backend_cache_root || '')}" placeholder="/backend/cache"></label>
-          <label>Mounted?<input type="checkbox" class="backend-mounted" ${data.backend_mounted ? 'checked' : ''}></label>
-          <label>Mount Root<input type="text" class="backend-mount" value="${esc(data.backend_mount_root || '')}" placeholder="/mnt/backend"></label>
+          <label>Name<input type="text" class="datadir-name" value="${esc(name)}" ${name === 'datadir_1' ? 'readonly' : ''}></label>
+          <label>Cache Root<input type="text" class="datadir-cache" value="${esc(data.datadir_cache_root || '')}" placeholder="/datadir"></label>
+          <label>Mounted?<input type="checkbox" class="datadir-mounted" ${data.datadir_mounted ? 'checked' : ''}></label>
+          <label>Mount Root<input type="text" class="datadir-mount" value="${esc(data.datadir_mount_root || '')}" placeholder="/mnt/datadir"></label>
         </div>
-        ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-backend-remove">Remove</button></div>' : ''}
+        ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-datadir-remove">Remove</button></div>' : ''}
       </div>`;
     }
 
     function populateBackendList(list) {
-      const container = document.getElementById('backend-blocks');
+      const container = document.getElementById('datadir-blocks');
       if (!container) return;
-      container.innerHTML = list.length ? list.map((item) => backendBlockTemplate(item)).join('') : '<p class="empty">No backends configured.</p>';
+      container.innerHTML = list.length ? list.map((item) => datadirBlockTemplate(item)).join('') : '<p class="empty">No datadirs configured.</p>';
     }
 
     function addBackendBlock() {
-      const container = document.getElementById('backend-blocks');
+      const container = document.getElementById('datadir-blocks');
       if (!container) return;
-      container.insertAdjacentHTML('beforeend', backendBlockTemplate({}));
+      container.insertAdjacentHTML('beforeend', datadirBlockTemplate({}));
     }
 
     function removeBackendBlock(btn) {
-      const block = btn.closest('.backend-block');
+      const block = btn.closest('.datadir-block');
       if (block) block.remove();
-      if (!document.querySelector('.backend-block')) {
-        document.getElementById('backend-blocks').innerHTML = '<p class="empty">No backends configured.</p>';
+      if (!document.querySelector('.datadir-block')) {
+        document.getElementById('datadir-blocks').innerHTML = '<p class="empty">No datadirs configured.</p>';
       }
     }
 
@@ -1809,7 +1809,7 @@ _INDEX_HTML = """<!DOCTYPE html>
       return `<div class="share-config-block">
         <div class="form-grid">
           <label>Name<input type="text" class="share-name" value="${esc(data.name || '')}" placeholder="share_games"></label>
-          <label>Backend Folder<input type="text" class="share-backend" value="${esc(data.backend_folder || '')}" placeholder="/games"></label>
+          <label>Datadir Folder<input type="text" class="share-datadir" value="${esc(data.datadir_folder || '')}" placeholder="/games"></label>
           <label>Frontend Folder<input type="text" class="share-frontend" value="${esc(data.frontend_folder || '')}" placeholder="/games"></label>
           <label>Writable<input type="checkbox" class="share-writable" ${data.writable ? 'checked' : ''}></label>
           <label>Cache Overlay<input type="checkbox" class="share-overlay" ${data.cachelink_overlay ? 'checked' : ''}></label>
@@ -1840,7 +1840,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     function collectSettingsDetail() {
       return {
-        paths: collectBackends(),
+        paths: collectDatadirs(),
         staging: {
           staging_mounted: document.getElementById('staging-mounted').checked,
           staging_mount_root: document.getElementById('staging-root').value.trim(),
@@ -1859,17 +1859,17 @@ _INDEX_HTML = """<!DOCTYPE html>
       };
     }
 
-    function collectBackends() {
-      const blocks = document.querySelectorAll('.backend-block');
+    function collectDatadirs() {
+      const blocks = document.querySelectorAll('.datadir-block');
       const list = [];
       blocks.forEach((block) => {
-        const name = block.querySelector('.backend-name')?.value.trim();
+        const name = block.querySelector('.datadir-name')?.value.trim();
         if (!name) return;
         list.push({
           name,
-          backend_cache_root: block.querySelector('.backend-cache')?.value.trim(),
-          backend_mounted: block.querySelector('.backend-mounted')?.checked ?? false,
-          backend_mount_root: block.querySelector('.backend-mount')?.value.trim(),
+          datadir_cache_root: block.querySelector('.datadir-cache')?.value.trim(),
+          datadir_mounted: block.querySelector('.datadir-mounted')?.checked ?? false,
+          datadir_mount_root: block.querySelector('.datadir-mount')?.value.trim(),
         });
       });
       return list;
@@ -1898,7 +1898,7 @@ _INDEX_HTML = """<!DOCTYPE html>
         if (!name) return;
         list.push({
           name,
-          backend_folder: block.querySelector('.share-backend')?.value.trim(),
+          datadir_folder: block.querySelector('.share-datadir')?.value.trim(),
           frontend_folder: block.querySelector('.share-frontend')?.value.trim(),
           writable: block.querySelector('.share-writable')?.checked ?? true,
           cachelink_overlay: block.querySelector('.share-overlay')?.checked ?? true,
@@ -2480,10 +2480,10 @@ _INDEX_HTML = """<!DOCTYPE html>
         if (action === 'cookie-credentials' && domain) return void showCredentialDialog(domain);
         if (action === 'ui-user-disable' && username) return void deleteUiUser(username);
         if (action === 'webdav-user-remove' && share && user) return void deleteWebdavUser(share, user);
-        if (action === 'settings-backend-add') return void addBackendBlock();
+        if (action === 'settings-datadir-add') return void addBackendBlock();
         if (action === 'settings-cookie-add') return void addCookieConfig();
         if (action === 'settings-share-add') return void addShareBlock();
-        if (action === 'settings-backend-remove') return void removeBackendBlock(target);
+        if (action === 'settings-datadir-remove') return void removeBackendBlock(target);
         if (action === 'settings-cookie-remove') return void removeCookieConfig(target);
         if (action === 'settings-share-remove') return void removeShareBlock(target);
         if (action === 'cachelinks-folder-select' && path !== undefined) return void selectCachelinkFolder(path);
@@ -2507,7 +2507,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
     // Enhanced File Browser JavaScript
     let enhancedFileBrowser = {
-      currentLocation: 'backend',
+      currentLocation: 'datadir',
       currentPath: '/',
       sortOptions: {
         sortBy: 'name',

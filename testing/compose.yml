@@ -24,7 +24,7 @@ services:
     tmpfs:
       - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
     volumes:
-      - ${HOME}/.dev/docker-test/cache-infinity/backend:/backend            # persistent backend storage mount
+      - ${HOME}/.dev/docker-test/cache-infinity/backend:/datadir            # persistent datadir storage mount
       - ${HOME}/.dev/docker-test/cache-infinity/staging:/staging            # staging workspace for downloads
       - ${HOME}/.dev/docker-test/cache-infinity/config:/config              # configuration directory mounted to $CONFIG (default /config)
     networks:

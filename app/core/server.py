@@ -27,10 +27,12 @@ _CONF_DIR_ENV = "CONFIG_DIR"
 _DEFAULT_UI_PORT = 9090
 _PID_FILENAME = "cacheinfinity.pid"
 def _runtime_root() -> Path:
-    base = Path("/run")
-    if not base.exists():
-        base = Path("/var/run")
-    return base / "cacheinfinity"
+    candidates = [Path("/run"), Path("/var/run")]
+    for base in candidates:
+        if base.exists() and os.access(base, os.W_OK | os.X_OK):
+            return base / "cacheinfinity"
+    tmp_base = Path(os.getenv("TMPDIR") or "/tmp")
+    return tmp_base / "cacheinfinity"
 
 
 def build_parser() -> argparse.ArgumentParser:

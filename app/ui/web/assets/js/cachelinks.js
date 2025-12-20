@@ -12,7 +12,8 @@ let originalEntry = null;
 
 // Initialize cachelinks page
 export function initCachelinks() {
-  console.log('Cachelinks page initialized - loading cachelinks data');
+  const log = window.CILog || console;
+  log.debug('Cachelinks page initialized - loading cachelinks data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   loadCachelinks();

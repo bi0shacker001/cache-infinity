@@ -5,7 +5,8 @@
 
 // Initialize cookies page
 export function initCookies() {
-  console.log('Cookies page initialized - loading cookies data');
+  const log = window.CILog || console;
+  log.debug('Cookies page initialized - loading cookies data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   loadCookies();

@@ -1,11 +1,11 @@
-"""Backend storage helpers."""
+"""Datadir storage helpers."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, List, Optional
 
 import logging
 from core.errors import ConfigError
@@ -14,46 +14,46 @@ _logger = logging.getLogger(__name__)
 
 
 @dataclass
-class BackendDefinition:
-    """Definition of a backend cache root."""
+class DatadirDefinition:
+    """Definition of a datadir cache root."""
 
     name: str
-    backend_mounted: bool
-    backend_cache_root: Path
-    backend_mount_root: Optional[Path] = None
+    datadir_mounted: bool
+    datadir_cache_root: Path
+    datadir_mount_root: Optional[Path] = None
 
     def validate(self) -> None:
-        if self.backend_mounted and not self.backend_mount_root:
+        if self.datadir_mounted and not self.datadir_mount_root:
             raise ConfigError(
-                f"Backend '{self.name}' is marked mounted but missing backend_mount_root"
+                f"Datadir '{self.name}' is marked mounted but missing datadir_mount_root"
             )
 
 
 @dataclass
-class BackendStorage:
-    """Represents a mounted backend cache root."""
+class DatadirStorage:
+    """Represents a mounted datadir cache root."""
 
-    definition: BackendDefinition
+    definition: DatadirDefinition
 
     def ensure_ready(self) -> None:
-        if not self.definition.backend_cache_root.exists():
+        if not self.definition.datadir_cache_root.exists():
             raise FileNotFoundError(
-                f"Backend cache root missing: {self.definition.backend_cache_root}"
+                f"Datadir cache root missing: {self.definition.datadir_cache_root}"
             )
-        if self.definition.backend_mounted:
-            mount_root = self.definition.backend_mount_root
+        if self.definition.datadir_mounted:
+            mount_root = self.definition.datadir_mount_root
             if not mount_root or not mount_root.exists():
                 raise FileNotFoundError(
-                    f"Backend mount root missing: {self.definition.backend_mount_root}"
+                    f"Datadir mount root missing: {self.definition.datadir_mount_root}"
                 )
 
     def resolve(self, relative_path: PurePosixPath | str) -> Path:
-        """Resolve a resource relative to the backend cache root."""
+        """Resolve a resource relative to the datadir cache root."""
 
         segments = _normalize_relative(relative_path)
         if not segments:
-            return self.definition.backend_cache_root
-        return self.definition.backend_cache_root.joinpath(*segments)
+            return self.definition.datadir_cache_root
+        return self.definition.datadir_cache_root.joinpath(*segments)
 
     def exists(self, relative_path: PurePosixPath | str) -> bool:
         return self.resolve(relative_path).exists()
@@ -77,7 +77,7 @@ class BackendStorage:
         import shutil
         
         try:
-            total, used, free = shutil.disk_usage(self.definition.backend_cache_root)
+            total, used, free = shutil.disk_usage(self.definition.datadir_cache_root)
             
             return {
                 'total_bytes': total,
@@ -101,7 +101,7 @@ class BackendStorage:
             }
     
     def atomic_move(self, src: Path, dst_relative: PurePosixPath | str) -> bool:
-        """Perform atomic file move to backend storage.
+        """Perform atomic file move to datadir storage.
         
         Args:
             src: Source file path
@@ -126,7 +126,7 @@ class BackendStorage:
         """Perform atomic file write using temporary file.
         
         Args:
-            relative_path: Relative path in backend
+            relative_path: Relative path in datadir
             data: Data to write
             
         Returns:
@@ -136,7 +136,7 @@ class BackendStorage:
         
         try:
             # Write to temporary file first
-            temp_path = self.definition.backend_cache_root / f".tmp_{id(data)}_{int(time.time())}"
+            temp_path = self.definition.datadir_cache_root / f".tmp_{id(data)}_{int(time.time())}"
             
             with open(temp_path, 'wb') as f:
                 f.write(data)
@@ -208,7 +208,7 @@ class BackendStorage:
             if recursive:
                 for item in path.rglob('*'):
                     if item.is_file() or item.is_dir():
-                        rel_path = item.relative_to(self.definition.backend_cache_root)
+                        rel_path = item.relative_to(self.definition.datadir_cache_root)
                         items.append({
                             'path': str(item),
                             'relative_path': str(rel_path),
@@ -220,7 +220,7 @@ class BackendStorage:
                         })
             else:
                 for item in path.iterdir():
-                    rel_path = item.relative_to(self.definition.backend_cache_root)
+                    rel_path = item.relative_to(self.definition.datadir_cache_root)
                     items.append({
                         'path': str(item),
                         'relative_path': str(rel_path),
@@ -238,7 +238,7 @@ class BackendStorage:
             return []
     
     def delete_file(self, relative_path: PurePosixPath | str) -> bool:
-        """Delete a file from backend storage.
+        """Delete a file from datadir storage.
         
         Args:
             relative_path: Relative path to the file
@@ -258,7 +258,7 @@ class BackendStorage:
             return False
     
     def delete_directory(self, relative_path: PurePosixPath | str, recursive: bool = False) -> bool:
-        """Delete a directory from backend storage.
+        """Delete a directory from datadir storage.
         
         Args:
             relative_path: Relative path to the directory
@@ -288,19 +288,21 @@ class BackendStorage:
 
 
 @dataclass
-class BackendRegistry:
-    """Registry for all configured backends."""
+class DatadirRegistry:
+    """Registry for all configured datadirs."""
 
-    storages: dict[str, BackendStorage]
-    primary_name: str
+    storages: dict[str, DatadirStorage]
+    primary_name: str | None
 
     @classmethod
-    def from_settings(cls, backends: dict[str, BackendDefinition], primary: str) -> "BackendRegistry":
-        storages = {name: BackendStorage(defn) for name, defn in backends.items()}
+    def from_settings(cls, datadirs: dict[str, DatadirDefinition], primary: str | None) -> "DatadirRegistry":
+        storages = {name: DatadirStorage(defn) for name, defn in datadirs.items()}
         return cls(storages=storages, primary_name=primary)
 
     @property
-    def primary(self) -> BackendStorage:
+    def primary(self) -> DatadirStorage:
+        if not self.primary_name or self.primary_name not in self.storages:
+            raise KeyError("No primary datadir configured")
         return self.storages[self.primary_name]
 
 

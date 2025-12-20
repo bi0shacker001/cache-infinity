@@ -1,4 +1,37 @@
 // Common API helpers
+const CI_LOG_LEVELS = {
+  DEBUG: 10,
+  INFO: 20,
+  WARNING: 30,
+  WARN: 30,
+  ERROR: 40,
+  CRITICAL: 50
+};
+
+let ciLogLevel = CI_LOG_LEVELS.INFO;
+
+function normalizeLogLevel(level) {
+  if (typeof level === 'number') return level;
+  if (typeof level !== 'string') return CI_LOG_LEVELS.INFO;
+  const key = level.trim().toUpperCase();
+  return CI_LOG_LEVELS[key] ?? CI_LOG_LEVELS.INFO;
+}
+
+function setClientLogLevel(level) {
+  ciLogLevel = normalizeLogLevel(level);
+}
+
+function shouldLog(level) {
+  return normalizeLogLevel(level) >= ciLogLevel;
+}
+
+window.CILog = {
+  setLevel: setClientLogLevel,
+  debug: (...args) => { if (shouldLog('DEBUG')) console.debug(...args); },
+  info: (...args) => { if (shouldLog('INFO')) console.info(...args); },
+  warn: (...args) => { if (shouldLog('WARNING')) console.warn(...args); },
+  error: (...args) => { if (shouldLog('ERROR')) console.error(...args); }
+};
 const apiUrl = (path) => path.startsWith('/') ? path : `/${path}`;
 
 async function fetchWithAuth(path, opts = {}) {
@@ -65,7 +98,8 @@ async function refreshSession() {
     const username = data.username || '';
     const box = document.getElementById('session-user');
     if (box) box.textContent = username ? `Signed in as ${username}` : '';
+    if (data.log_level) window.CILog.setLevel(data.log_level);
   } catch (err) {
-    console.error('Session refresh failed:', err);
+    window.CILog.error('Session refresh failed:', err);
   }
 }

@@ -53,6 +53,8 @@
     <script src="/assets/js/common.js"></script>
     
     <script>
+        const log = window.CILog || console;
+
         // Dynamic page loading mechanism
         async function loadPage(pageName) {
             try {
@@ -80,11 +82,11 @@
                     if (typeof window[initFunctionName] === 'function') {
                         window[initFunctionName]();
                     } else {
-                        console.warn(`Initialization function ${initFunctionName} not found for ${pageName}`);
+                        log.debug(`Initialization function ${initFunctionName} not found for ${pageName}`);
                     }
                 };
                 script.onerror = function() {
-                    console.warn(`Page-specific JS not found for ${pageName}`);
+                    log.debug(`Page-specific JS not found for ${pageName}`);
                 };
                 document.body.appendChild(script);
                 
@@ -101,7 +103,7 @@
                 document.getElementById('page-title').textContent = titles[pageName] || pageName;
                 
             } catch (error) {
-                console.error('Error loading page:', error);
+                log.error('Error loading page:', error);
                 const pageContainer = document.getElementById('page-container');
                 pageContainer.innerHTML = `<div class="error">Error loading page: ${error.message}</div>`;
             }

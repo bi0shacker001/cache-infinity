@@ -4,10 +4,10 @@
 
 # Paths Configuration
 paths:
-  backend_1:
-    backend_mounted: false
-    backend_cache_root: /backend
-    backend_mount_root: null
+  datadir_1:
+    datadir_mounted: false
+    datadir_cache_root: /datadir
+    datadir_mount_root: null
   
   staging:
     staging_mounted: false
@@ -95,7 +95,7 @@ cookies:
 # WebDAV Shares Configuration
 webdav:
   games:
-    backend_folder: /games
+    datadir_folder: /games
     frontend_folder: /games
     writable: true
     cachelink_overlay: true

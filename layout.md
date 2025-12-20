@@ -28,7 +28,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - fetcher.py #File. Download manager (primarily using curl) for remote file retrieval
     - indexer.py #File. Background indexing worker for remote content discovery
   storage: #Folder. Storage management and staging area handling
-    - backend.py #File. Backend storage management for cached content. Handles ALL reads and writes to backend storage
+    - datadir.py #File. Datadir storage management for cached content. Handles ALL reads and writes to datadir storage
     - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory 
     - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
   ui: #Folder. Admin interface components and management layer

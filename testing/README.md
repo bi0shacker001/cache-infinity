@@ -70,7 +70,7 @@ Once running:
 ### Volumes
 
 The test compose file uses volumes in `$HOME/.dev/docker-test/cache-infinity/`:
-- `backend/` - Backend storage
+- `datadir/` - Datadir storage
 - `staging/` - Staging area for downloads
 - `config/` - Configuration directory
 - `db/` - PostgreSQL data

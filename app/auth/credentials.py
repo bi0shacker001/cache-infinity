@@ -212,7 +212,7 @@ class AuthConfigManager:
             
             if success:
                 self._cli_api_key = api_key
-                logging.getLogger(__name__).info("CLI API key created and stored")
+                logging.getLogger(__name__).debug("CLI API key created and stored")
                 return api_key
             else:
                 logging.getLogger(__name__).error("Failed to store CLI API key")
@@ -457,7 +457,7 @@ class AuthConfigManager:
                     # Clean up database sessions older than 24 hours
                     cleaned = self.db_adapter.cleanup_expired_sessions(max_age_hours=24)
                     if cleaned > 0:
-                        logging.getLogger(__name__).info(f"Cleaned up {cleaned} expired sessions")
+                        logging.getLogger(__name__).debug(f"Cleaned up {cleaned} expired sessions")
                 except Exception as exc:
                     logging.getLogger(__name__).warning("Session cleanup error: %s", exc)
                 

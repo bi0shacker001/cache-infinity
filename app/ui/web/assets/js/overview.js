@@ -5,7 +5,8 @@
 
 // Initialize overview page
 export function initOverview() {
-  console.log('Overview page initialized - loading status data');
+  const log = window.CILog || console;
+  log.debug('Overview page initialized - loading status data');
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   refreshStatus();
@@ -23,6 +24,7 @@ function setupOverviewEventListeners() {
 }
 
 async function refreshStatus() {
+  const log = window.CILog || console;
   try {
     // Wait for DOM to be fully loaded
     if (!document.getElementById('status-stats')) {
@@ -38,20 +40,20 @@ async function refreshStatus() {
       });
     }
 
-    console.log('Overview: About to call fetchJSON for status');
+    log.debug('Overview: About to call fetchJSON for status');
     const data = await fetchJSON('status');
-    console.log('Overview: Received status data:', data);
+    log.debug('Overview: Received status data:', data);
 
-    // Check if backend is missing
-    if (data.missing_backend) {
-      console.log('Overview: Backend missing, showing setup message');
+    // Check if datadir is missing
+    if (data.missing_datadir) {
+      log.debug('Overview: Backend missing, showing setup message');
       const statusStats = document.getElementById('status-stats');
       if (statusStats) {
         statusStats.innerHTML = `
           <div class="alert alert-warning">
             <h4>Setup Required</h4>
             <p>${data.message}</p>
-            <p>Please go to Settings → Backends to configure your first backend (backend_1).</p>
+            <p>Please go to Settings → Datadirs to configure your first datadir (datadir_1).</p>
             <button class="btn btn-primary" onclick="setActiveSection('settings'); setTimeout(() => setActiveSection('settings'), 100)">Go to Settings</button>
           </div>
         `;
@@ -68,7 +70,7 @@ async function refreshStatus() {
       setMetric('metric-access-total', '0');
 
       const statusStorage = document.getElementById('status-storage');
-      if (statusStorage) statusStorage.innerHTML = '<p class="empty">No backends configured</p>';
+      if (statusStorage) statusStorage.innerHTML = '<p class="empty">No datadirs configured</p>';
 
       const statusShares = document.getElementById('status-shares');
       if (statusShares) statusShares.innerHTML = '<li class="empty">No shares configured</li>';
@@ -76,7 +78,7 @@ async function refreshStatus() {
       return;
     }
 
-    console.log('Overview: Populating status UI with data');
+    log.debug('Overview: Populating status UI with data');
     const stats = data.stats || {};
 
     const setMetric = (id, value) => {
@@ -101,7 +103,7 @@ async function refreshStatus() {
     }
 
     const storage = data.storage || {};
-    const backend = (storage.backends || []).map((b) => {
+    const datadirs = (storage.datadirs || []).map((b) => {
       const total = b.total ? (b.total / (1024 ** 3)).toFixed(1) : '—';
       const used = b.used ? (b.used / (1024 ** 3)).toFixed(1) : '—';
       const free = b.free ? (b.free / (1024 ** 3)).toFixed(1) : '—';
@@ -110,18 +112,18 @@ async function refreshStatus() {
 
     const statusStorage = document.getElementById('status-storage');
     if (statusStorage) {
-      statusStorage.innerHTML = backend || '<p class="empty">No storage info</p>';
+      statusStorage.innerHTML = datadirs || '<p class="empty">No storage info</p>';
     }
 
     const statusShares = document.getElementById('status-shares');
     if (statusShares) {
       statusShares.innerHTML = (data.shares || []).map((s) =>
-        `<li><strong>${s.frontend}</strong> → ${s.backend} <span class="badge">${s.users} users</span></li>`
+        `<li><strong>${s.frontend}</strong> → ${s.datadir} <span class="badge">${s.users} users</span></li>`
       ).join('') || '<li class="empty">No shares configured</li>';
     }
 
   } catch (err) {
-    console.error('Overview: Error in refreshStatus:', err);
+    log.error('Overview: Error in refreshStatus:', err);
     const statusStats = document.getElementById('status-stats');
     if (statusStats) statusStats.textContent = 'Error: ' + err.message;
   }
