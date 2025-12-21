@@ -20,7 +20,6 @@ import os
 import secrets
 import signal
 import socket
-import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -1059,13 +1058,9 @@ class LocalControlServer:
     def get_config_payload(self) -> Dict[str, Any]:
         """Get current configuration payload."""
         try:
-            config_dir = self.service.settings.config_dir
             index_db = self.service.index_db.index_db
-            manager = DatabaseBackupManager(index_db, config_dir)
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tmp_path = Path(tmp_dir) / "bootstrap.yml"
-                manager.export_config_to_yaml(tmp_path)
-                settings_text = tmp_path.read_text(encoding="utf-8")
+            manager = DatabaseBackupManager(index_db, self.service.settings.config_dir)
+            settings_text = manager.export_config_to_text()
             return {"settings_text": settings_text}
         except Exception as e:
             logger.error("Failed to get config payload: %s", e)
@@ -1078,19 +1073,12 @@ class LocalControlServer:
     ) -> Dict[str, Any]:
         """Update configuration from text."""
         try:
-            config_dir = self.service.settings.config_dir
             index_db = self.service.index_db.index_db
-            manager = DatabaseBackupManager(index_db, config_dir)
+            manager = DatabaseBackupManager(index_db, self.service.settings.config_dir)
             if settings_text:
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    tmp_path = Path(tmp_dir) / "bootstrap.yml"
-                    tmp_path.write_text(settings_text, encoding="utf-8")
-                    manager.import_config_from_yaml(tmp_path)
+                manager.import_config_from_text(settings_text)
             if cachelinks_text:
-                with tempfile.TemporaryDirectory() as tmp_dir:
-                    tmp_path = Path(tmp_dir) / "cachelinks.yml"
-                    tmp_path.write_text(cachelinks_text, encoding="utf-8")
-                    self.service.config_service.import_cachelinks_from_file(tmp_path)
+                self.service.config_service.import_cachelinks_from_text(cachelinks_text)
             self.service.config_service.reload_settings()
             return {"status": "success", "message": "Configuration updated"}
         except Exception as e:

@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from storage.configuration import ConfigurationManager
+
 from core.errors import ConfigError
 
 from .adapter import DBAdapter
@@ -130,7 +132,8 @@ class DatabaseSettings:
 
 def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
     """Load database settings with priority: args > env > database.yml."""
-    config_payload = validate_database_yml(config_dir / "database.yml")
+    config_manager = ConfigurationManager(config_dir)
+    config_payload = validate_database_yml(config_manager)
     config_db = config_payload.get("database", {}) if config_payload else {}
 
     db_type = None
@@ -194,14 +197,14 @@ def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
     )
 
 
-def validate_database_yml(database_path: Path) -> dict:
+def validate_database_yml(config_manager: ConfigurationManager) -> dict:
     """Validate that database.yml only contains database configuration."""
+    database_path = config_manager.get_database_path()
     if not database_path.exists():
         return {}
 
     try:
-        with database_path.open("r", encoding="utf-8") as handle:
-            config_data = yaml.safe_load(handle) or {}
+        config_data = config_manager.read_yaml(database_path) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"Invalid YAML in database.yml: {exc}") from exc
 
@@ -215,6 +218,14 @@ def validate_database_yml(database_path: Path) -> dict:
         )
 
     return config_data
+
+
+def load_bootstrap_data(config_dir: Path, bootstrap_path: Path | None) -> dict:
+    """Load bootstrap YAML data using configuration manager."""
+    if not bootstrap_path:
+        return {}
+    config_manager = ConfigurationManager(config_dir)
+    return config_manager.read_yaml(bootstrap_path)
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_time ON indexing_log(timestamp)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_cachelink ON indexed_entries(cachelink_id)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_path ON indexed_entries(relative_path)")

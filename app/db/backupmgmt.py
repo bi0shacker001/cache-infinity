@@ -50,15 +50,9 @@ class DatabaseBackupManager:
             ConfigExportError: If export fails completely
         """
         try:
-            # Collect all configuration from database
-            bootstrap_data = self._collect_all_configuration()
-
-            # Validate no database configuration is present
-            self._validate_no_database_config(bootstrap_data)
-
-            # Save to bootstrap.yml
+            text = self.export_config_to_text()
             with output_path.open('w', encoding='utf-8') as f:
-                yaml.safe_dump(bootstrap_data, f, default_flow_style=False, indent=2)
+                f.write(text)
 
             self._logger.info(f"Configuration exported to {output_path}")
             return output_path
@@ -80,101 +74,113 @@ class DatabaseBackupManager:
         Raises:
             ConfigImportError: If no valid data was found or critical errors occurred
         """
-        warnings = []
-        valid_data_found = False
-
         try:
-            # Parse YAML file
             with bootstrap_path.open('r', encoding='utf-8') as f:
-                bootstrap_data = yaml.safe_load(f) or {}
-
-            # Validate no database configuration is present
-            db_warnings = self._validate_no_database_config(bootstrap_data, log_only=True)
-            warnings.extend(db_warnings)
-
-            # Process each configuration section
-            if 'paths' in bootstrap_data:
-                paths_valid, paths_warnings = self._process_paths(bootstrap_data['paths'])
-                if paths_valid:
-                    valid_data_found = True
-                warnings.extend(paths_warnings)
-
-            if 'limits' in bootstrap_data:
-                limits_valid, limits_warnings = self._process_limits(bootstrap_data['limits'])
-                if limits_valid:
-                    valid_data_found = True
-                warnings.extend(limits_warnings)
-
-            if 'indexing' in bootstrap_data:
-                indexing_valid, indexing_warnings = self._process_indexing(bootstrap_data['indexing'])
-                if indexing_valid:
-                    valid_data_found = True
-                warnings.extend(indexing_warnings)
-
-            if 'auth' in bootstrap_data:
-                auth_valid, auth_warnings = self._process_auth(bootstrap_data['auth'])
-                if auth_valid:
-                    valid_data_found = True
-                warnings.extend(auth_warnings)
-
-            if 'tls' in bootstrap_data:
-                tls_valid, tls_warnings = self._process_tls(bootstrap_data['tls'])
-                if tls_valid:
-                    valid_data_found = True
-                warnings.extend(tls_warnings)
-
-            if 'rclone' in bootstrap_data:
-                rclone_valid, rclone_warnings = self._process_rclone(bootstrap_data['rclone'])
-                if rclone_valid:
-                    valid_data_found = True
-                warnings.extend(rclone_warnings)
-
-            if 'cookies' in bootstrap_data:
-                cookies_valid, cookies_warnings = self._process_cookies(bootstrap_data['cookies'])
-                if cookies_valid:
-                    valid_data_found = True
-                warnings.extend(cookies_warnings)
-
-            if 'webdav' in bootstrap_data:
-                webdav_valid, webdav_warnings = self._process_webdav(bootstrap_data['webdav'])
-                if webdav_valid:
-                    valid_data_found = True
-                warnings.extend(webdav_warnings)
-
-            if 'users' in bootstrap_data:
-                users_valid, users_warnings = self._process_users(bootstrap_data['users'])
-                if users_valid:
-                    valid_data_found = True
-                warnings.extend(users_warnings)
-
-            if 'cachelinks' in bootstrap_data:
-                cachelinks_valid, cachelinks_warnings = self._process_cachelinks(bootstrap_data['cachelinks'])
-                if cachelinks_valid:
-                    valid_data_found = True
-                warnings.extend(cachelinks_warnings)
-
-            # Check if we processed any valid data
-            if not valid_data_found:
-                error_msg = "No valid configuration data found in bootstrap.yml"
-                self._logger.error(error_msg)
-                raise ConfigImportError(error_msg)
-
-            # Log summary
-            if warnings:
-                self._logger.warning(f"Import completed with {len(warnings)} warnings")
-            else:
-                self._logger.info("Import completed successfully")
-
-            return True, warnings
-
-        except yaml.YAMLError as exc:
-            error_msg = f"Invalid YAML syntax: {exc}"
-            self._logger.error(error_msg)
-            raise ConfigImportError(error_msg)
+                text = f.read()
+            return self.import_config_from_text(text)
         except Exception as exc:
             error_msg = f"Configuration import failed: {exc}"
             self._logger.error(error_msg)
             raise ConfigImportError(error_msg)
+
+    def export_config_data(self) -> dict:
+        """Collect configuration from the database as a dictionary."""
+        bootstrap_data = self._collect_all_configuration()
+        self._validate_no_database_config(bootstrap_data)
+        return bootstrap_data
+
+    def export_config_to_text(self) -> str:
+        """Export configuration as a YAML string."""
+        bootstrap_data = self.export_config_data()
+        return yaml.safe_dump(bootstrap_data, default_flow_style=False, indent=2)
+
+    def import_config_from_text(self, text: str) -> Tuple[bool, List[str]]:
+        """Import configuration from YAML text."""
+        try:
+            bootstrap_data = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigImportError(f"Invalid YAML in bootstrap data: {exc}") from exc
+        return self.import_config_from_data(bootstrap_data)
+
+    def import_config_from_data(self, bootstrap_data: dict) -> Tuple[bool, List[str]]:
+        """Import configuration from parsed bootstrap data."""
+        warnings: list[str] = []
+        valid_data_found = False
+
+        db_warnings = self._validate_no_database_config(bootstrap_data, log_only=True)
+        warnings.extend(db_warnings)
+
+        if 'paths' in bootstrap_data:
+            paths_valid, paths_warnings = self._process_paths(bootstrap_data['paths'])
+            if paths_valid:
+                valid_data_found = True
+            warnings.extend(paths_warnings)
+
+        if 'limits' in bootstrap_data:
+            limits_valid, limits_warnings = self._process_limits(bootstrap_data['limits'])
+            if limits_valid:
+                valid_data_found = True
+            warnings.extend(limits_warnings)
+
+        if 'indexing' in bootstrap_data:
+            indexing_valid, indexing_warnings = self._process_indexing(bootstrap_data['indexing'])
+            if indexing_valid:
+                valid_data_found = True
+            warnings.extend(indexing_warnings)
+
+        if 'auth' in bootstrap_data:
+            auth_valid, auth_warnings = self._process_auth(bootstrap_data['auth'])
+            if auth_valid:
+                valid_data_found = True
+            warnings.extend(auth_warnings)
+
+        if 'tls' in bootstrap_data:
+            tls_valid, tls_warnings = self._process_tls(bootstrap_data['tls'])
+            if tls_valid:
+                valid_data_found = True
+            warnings.extend(tls_warnings)
+
+        if 'rclone' in bootstrap_data:
+            rclone_valid, rclone_warnings = self._process_rclone(bootstrap_data['rclone'])
+            if rclone_valid:
+                valid_data_found = True
+            warnings.extend(rclone_warnings)
+
+        if 'cookies' in bootstrap_data:
+            cookies_valid, cookies_warnings = self._process_cookies(bootstrap_data['cookies'])
+            if cookies_valid:
+                valid_data_found = True
+            warnings.extend(cookies_warnings)
+
+        if 'webdav' in bootstrap_data:
+            webdav_valid, webdav_warnings = self._process_webdav(bootstrap_data['webdav'])
+            if webdav_valid:
+                valid_data_found = True
+            warnings.extend(webdav_warnings)
+
+        if 'users' in bootstrap_data:
+            users_valid, users_warnings = self._process_users(bootstrap_data['users'])
+            if users_valid:
+                valid_data_found = True
+            warnings.extend(users_warnings)
+
+        if 'cachelinks' in bootstrap_data:
+            cachelinks_valid, cachelinks_warnings = self._process_cachelinks(bootstrap_data['cachelinks'])
+            if cachelinks_valid:
+                valid_data_found = True
+            warnings.extend(cachelinks_warnings)
+
+        if not valid_data_found:
+            error_msg = "No valid configuration data found in bootstrap data"
+            self._logger.error(error_msg)
+            raise ConfigImportError(error_msg)
+
+        if warnings:
+            self._logger.warning(f"Import completed with {len(warnings)} warnings")
+        else:
+            self._logger.info("Import completed successfully")
+
+        return True, warnings
 
     def _validate_no_database_config(self, data: dict, log_only: bool = False) -> List[str]:
         """Validate that no database configuration is present.

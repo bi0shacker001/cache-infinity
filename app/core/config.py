@@ -134,13 +134,7 @@ class ConfigService:
                 cookie_jar_value = (item.get("cookie_jar") or "").strip()
                 cookie_content = ""
                 if cookie_jar_value:
-                    cookie_path = Path(cookie_jar_value)
-                    if not cookie_path.is_absolute():
-                        cookie_path = config_dir / cookie_path
-                    if cookie_path.exists():
-                        cookie_content = cookie_path.read_text(encoding="utf-8")
-                    else:
-                        cookie_content = cookie_jar_value
+                    cookie_content = cookie_jar_value
                 elif domain in existing:
                     cookie_content = existing[domain].get("cookie_content", "")
                 index_db.save_cookie(
@@ -196,16 +190,15 @@ class ConfigService:
         adapter.commit()
         self._reload_settings()
 
-    def import_cachelinks_from_file(self, cachelinks_file: Path) -> None:
-        cachelinks_text = cachelinks_file.read_text(encoding="utf-8")
+    def import_cachelinks_from_text(self, cachelinks_text: str) -> None:
         self._import_cachelinks_yaml_text(cachelinks_text)
         self._reload_settings()
 
-    def import_users_from_file(self, users_file: Path) -> None:
+    def import_users_from_text(self, users_text: str) -> None:
         index_db = self._resolve_index_db()
         if not index_db:
             raise ConfigError("Database not initialized")
-        doc = yaml.safe_load(users_file.read_text(encoding="utf-8")) or {}
+        doc = yaml.safe_load(users_text) or {}
         users = doc.get("users") if isinstance(doc, dict) else doc
         if not isinstance(users, dict):
             raise ConfigError("Users file must contain a mapping of users")
@@ -364,11 +357,6 @@ class ConfigService:
             entry_path = (entry.path or "").lstrip("/")
             if not entry_path:
                 continue
-            entry_rel = PurePosixPath(entry_path)
-            datadir_rel = descriptor.backend_relative_folder / entry_rel
-            datadir_path = datadir.resolve(datadir_rel)
-            if datadir_path.exists():
-                cached_files += 1
         uncached = max(files_total - cached_files, 0)
         return {
             "entries_total": len(entries),
@@ -643,11 +631,12 @@ class ConfigMigration:
             self._logger.error("Failed to check migration status: %s", exc)
             return False
     
-    def migrate_from_bootstrap(self, bootstrap_path: Path) -> bool:
-        """Migrate configuration from bootstrap.yml to database.
+    def migrate_from_bootstrap(self, bootstrap_data: dict, source_file: str | None = None) -> bool:
+        """Migrate configuration from bootstrap data to database.
         
         Args:
-            bootstrap_path: Path to bootstrap.yml file
+            bootstrap_data: Parsed bootstrap YAML data
+            source_file: Optional source file description
             
         Returns:
             True if migration was successful
@@ -655,36 +644,32 @@ class ConfigMigration:
         Raises:
             ConfigMigrationError: If migration fails
         """
-        if not bootstrap_path.exists():
-            self._logger.info("No bootstrap.yml file found, skipping migration")
+        if not bootstrap_data:
+            self._logger.info("No bootstrap data provided, skipping migration")
             return True
-        
+
         try:
-            # Load and validate bootstrap configuration
-            with bootstrap_path.open("r", encoding="utf-8") as f:
-                bootstrap_data = yaml.safe_load(f) or {}
-            
             # Check for forbidden database configuration
             if "database" in bootstrap_data:
                 raise ConfigMigrationError(
                     "bootstrap.yml must not contain database configuration. "
                     "Database settings should be in database.yml only."
                 )
-            
+
             # Migrate configuration to database
-            self._migrate_configuration(bootstrap_data, bootstrap_path)
-            
+            self._migrate_configuration(bootstrap_data, source_file)
+
             # Save snapshot to database
-            self._save_snapshot(bootstrap_data, bootstrap_path)
-            
-            self._logger.info("Configuration migrated from bootstrap.yml to database")
+            self._save_snapshot(bootstrap_data, source_file)
+
+            self._logger.info("Configuration migrated from bootstrap data to database")
             return True
-            
+
         except Exception as exc:
-            self._logger.error("Failed to migrate from bootstrap.yml: %s", exc)
+            self._logger.error("Failed to migrate from bootstrap data: %s", exc)
             raise ConfigMigrationError(f"Migration failed: {exc}")
     
-    def _migrate_configuration(self, bootstrap_data: dict, bootstrap_path: Optional[Path] = None) -> None:
+    def _migrate_configuration(self, bootstrap_data: dict, source_file: Optional[str] = None) -> None:
         """Migrate all configuration sections to database."""
         
         # Migrate datadirs
@@ -748,17 +733,7 @@ class ConfigMigration:
                 # If cookie_jar is a path, read the content
                 cookie_jar_value = cookie_raw["cookie_jar"]
                 if isinstance(cookie_jar_value, str):
-                    # Check if it looks like a file path (contains / or .txt)
-                    if "/" in cookie_jar_value or cookie_jar_value.endswith(".txt"):
-                        # Try to read from file
-                        cookie_path = Path(cookie_jar_value)
-                        if not cookie_path.is_absolute():
-                            cookie_path = self.config_dir / cookie_path
-                        if cookie_path.exists():
-                            cookie_content = cookie_path.read_text(encoding="utf-8")
-                    else:
-                        # Treat as direct cookie content string
-                        cookie_content = cookie_jar_value
+                    cookie_content = cookie_jar_value
             if isinstance(cookie_content, str):
                 cookie_content = cookie_content.replace("\r\n", "\n")
             
@@ -831,7 +806,7 @@ class ConfigMigration:
         
         # Migrate cachelinks
         cachelinks_raw = bootstrap_data.get("cachelinks", {})
-        cachelinks = self._parse_cachelinks_for_migration(cachelinks_raw, bootstrap_path)
+        cachelinks = self._parse_cachelinks_for_migration(cachelinks_raw, source_file)
         if cachelinks:
             self.index_db.save_cachelinks(cachelinks)
     
@@ -847,7 +822,7 @@ class ConfigMigration:
         }
     
     def _parse_cachelinks_for_migration(
-        self, cachelinks_raw: object, bootstrap_path: Optional[Path] = None
+        self, cachelinks_raw: object, source_file: Optional[str] = None
     ) -> list[dict]:
         """Parse cachelink configuration for migration."""
         if isinstance(cachelinks_raw, list):
@@ -860,7 +835,8 @@ class ConfigMigration:
                     "mode": item.get("mode", "directory"),
                     "url_handler": item.get("url_handler") or item.get("handler"),
                     "source_file": item.get("source_file")
-                    or str(bootstrap_path or (self.config_dir / "bootstrap.yml")),
+                    or source_file
+                    or str(self.config_dir / "bootstrap.yml"),
                 }
                 for item in cachelinks_raw
                 if isinstance(item, dict)
@@ -889,11 +865,11 @@ class ConfigMigration:
                 elif isinstance(value, dict):
                     _parse_node(value, current_path, source_file)
 
-        source_file = str(bootstrap_path) if bootstrap_path else str(self.config_dir / "bootstrap.yml")
-        _parse_node(cachelinks_raw, [], source_file)
+        fallback_source = source_file or str(self.config_dir / "bootstrap.yml")
+        _parse_node(cachelinks_raw, [], fallback_source)
         return cachelinks
     
-    def _save_snapshot(self, bootstrap_data: dict, bootstrap_path: Optional[Path] = None) -> None:
+    def _save_snapshot(self, bootstrap_data: dict, source_file: Optional[str] = None) -> None:
         """Save configuration snapshot to database."""
         settings_text = ""
 
@@ -902,36 +878,26 @@ class ConfigMigration:
         # Save to database
         self.index_db.save_full_settings_snapshot(settings_text, bootstrap_text)
     
-    def validate_bootstrap_file(self, bootstrap_path: Path) -> list[str]:
-        """Validate bootstrap.yml file for migration.
+    def validate_bootstrap_data(self, bootstrap_data: dict) -> list[str]:
+        """Validate bootstrap data for migration.
         
         Args:
-            bootstrap_path: Path to bootstrap.yml file
+            bootstrap_data: Parsed bootstrap data
             
         Returns:
             List of validation errors (empty if valid)
         """
         errors = []
-        
-        if not bootstrap_path.exists():
+
+        if not bootstrap_data:
             return errors
-        
+
         try:
-            with bootstrap_path.open("r", encoding="utf-8") as f:
-                bootstrap_data = yaml.safe_load(f) or {}
-            
-            # Check for forbidden database configuration
             if "database" in bootstrap_data:
                 errors.append("bootstrap.yml must not contain database configuration")
-            
-            # Validate other sections if present
-            # (Add more validation as needed)
-            
-        except yaml.YAMLError as exc:
-            errors.append(f"Invalid YAML in bootstrap.yml: {exc}")
         except Exception as exc:
-            errors.append(f"Error reading bootstrap.yml: {exc}")
-        
+            errors.append(f"Error validating bootstrap data: {exc}")
+
         return errors
 
 
@@ -1163,33 +1129,7 @@ def load_database_backed_settings(
 def validate_settings(settings: Settings) -> list[str]:
     """Validate all required fields and configuration consistency."""
     errors = []
-    
-    # Validate config directory exists
-    if not settings.config_dir.exists():
-        errors.append(f"Config directory does not exist: {settings.config_dir}")
-    
-    # Validate datadir configurations
-    for name, datadir in settings.datadirs.items():
-        if not datadir.datadir_cache_root.exists():
-            errors.append(f"Datadir cache root does not exist: {datadir.datadir_cache_root}")
-    
-    # Validate staging configuration
-    if settings.staging.staging_mounted and settings.staging.staging_mount_root:
-        if not settings.staging.staging_mount_root.exists():
-            errors.append(f"Staging mount root does not exist: {settings.staging.staging_mount_root}")
-    
-    # Validate cookie configurations
-    for domain, cookie in settings.cookies.items():
-        if cookie.cookie_jar and not cookie.cookie_jar.exists():
-            errors.append(f"Cookie jar file does not exist: {cookie.cookie_jar}")
-        if cookie.credfile and not cookie.credfile.exists():
-            errors.append(f"Credentials file does not exist: {cookie.credfile}")
-    
-    # Validate share configurations
-    for name, share in settings.shares.items():
-        if not share.datadir_folder.exists():
-            errors.append(f"Share datadir folder does not exist: {share.datadir_folder}")
-    
+
     return errors
 
 
@@ -1205,19 +1145,6 @@ def load_database_backed_settings_from_manager(
     but reuses the provided database connection.
     """
     index_db = _resolve_index_db(database_manager)
-    migration = ConfigMigration(config_dir, index_db)
-    needs_migration = migration.needs_migration()
-    bootstrap_requested = bootstrap_path is not None
-
-    if needs_migration or bootstrap_requested:
-        if bootstrap_path is None:
-            bootstrap_path = config_dir / "bootstrap.yml"
-        if bootstrap_path.exists():
-            validation_errors = migration.validate_bootstrap_file(bootstrap_path)
-            if validation_errors:
-                raise ConfigError(f"Bootstrap file validation failed: {'; '.join(validation_errors)}")
-        migration.migrate_from_bootstrap(bootstrap_path)
-
     return _load_settings_from_database(config_dir, database_settings, index_db)
 
 
@@ -1304,13 +1231,11 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
     cookies = {}
     cookie_data = index_db.get_all_cookies()
     for cookie_raw in cookie_data:
-        credfile_path = config_dir / "credentials" / f"{cookie_raw['domain']}.txt"
-        credfile = credfile_path if credfile_path.exists() else None
         cookies[cookie_raw["domain"]] = CookieJarDefinition(
             domain=cookie_raw["domain"],
             cookie_content=cookie_raw.get("cookie_content") or "",
             cookie_jar=None,
-            credfile=credfile,
+            credfile=None,
         )
     
     # Load shares from database
@@ -1520,13 +1445,7 @@ def _parse_cookies(cookies_raw: dict, config_dir: Path) -> dict[str, CookieJarDe
         cookie_content = ""
         cookie_jar = None
         if isinstance(cookie_jar_value, str) and cookie_jar_value:
-            cookie_path = Path(cookie_jar_value)
-            if not cookie_path.is_absolute():
-                cookie_path = config_dir / cookie_path
-            if cookie_path.exists():
-                cookie_content = cookie_path.read_text(encoding="utf-8")
-            else:
-                cookie_content = cookie_jar_value
+            cookie_content = cookie_jar_value
         credfile = _optional_path(cookie_raw.get("credfile"), config_dir)
         cookies[domain] = CookieJarDefinition(
             domain=domain,

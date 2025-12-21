@@ -22,6 +22,10 @@ This document defines the intended initialization flow and service boundaries fo
 - `DatabaseManager` must not rely on `core.config` for database settings
 - Database settings are supplied at startup; `db.dbmanage` may load `database.yml` itself
 - `core.config` handles configuration stored in the database only
+- The runtime directory must not live under the config directory (use `/run` or `/var/run` with temp fallback)
+- At runtime, config dir usage is limited to logging, TLS cert files, and user-initiated bootstrap import/export
+- All config-dir filesystem access must go through `storage.configuration`
+- `core.config` must not perform filesystem IO; `db.dbmanage` owns reading `database.yml` and bootstrap content via `storage.configuration`
 - Credentials are stored hashed and salted; session authentication uses tokenized sessions (CLI is exempt)
 - Cachelinks may specify a `url_handler` (auto/http/ftp/rclone); indexer/fetcher select handlers without mutating URLs
 - Rclone settings are database-backed and exposed via admin interfaces (UI/CLI) through `ui.backend`
@@ -145,67 +149,75 @@ class BaseService(ABC):
 
 This order integrates the initialization refactor with the remaining SPEC-defined work so each component is completed in dependency order.
 
+### Phase 0: Layout and Config-Directory Compliance
+1. Move service wiring out of `core.server` so it no longer imports `ui.web.webcore` or `hosting.webdav` (shift that to `core.services`).
+2. Remove the `sqlite3` import from `db/schema.py` (SQLite access must stay in `db/backends/sqlite.py`).
+3. Route all config-dir filesystem access through `storage.configuration`.
+4. Enforce runtime-dir placement under `/run` or `/var/run` (with temp fallback), never under the config directory.
+5. Remove filesystem access from `core.config` entirely.
+6. Have `db.dbmanage` read/write `database.yml` and bootstrap content via `storage.configuration`, and pass bootstrap data to `db.backupmgmt`.
+
 ### Phase 1: Foundation and Service Orchestration
-1. Define the `BaseService` interface and standard lifecycle (`initialize`, `start`, `stop`) in `core.services`.
-2. Build a `ServiceManager` in `core.services` for dependency ordering, context passing, and lifecycle coordination.
-3. Standardize error flow through `core.errors` so service failures propagate consistently.
+7. Define the `BaseService` interface and standard lifecycle (`initialize`, `start`, `stop`) in `core.services`.
+8. Build a `ServiceManager` in `core.services` for dependency ordering, context passing, and lifecycle coordination.
+9. Standardize error flow through `core.errors` so service failures propagate consistently.
 
 ### Phase 2: Startup Inputs and Config Directory Contract
-4. Implement CLI and environment parsing in `core.server` to gather startup inputs, including `--config-dir`, database settings, and bootstrap flags.
-5. Apply database connectivity precedence: CLI flags → environment variables → `database.yml` (last resort).
-6. Establish the fixed log directory `<config-dir>/logs/` and log level precedence (CLI → env → default `INFO`).
+10. Implement CLI and environment parsing in `core.server` to gather startup inputs, including `--config-dir`, database settings, and bootstrap flags.
+11. Apply database connectivity precedence: CLI flags → environment variables → `database.yml` (last resort).
+12. Establish the fixed log directory `<config-dir>/logs/` and log level precedence (CLI → env → default `INFO`).
 
 ### Phase 3: Database Layer (Foundational Service)
-7. Implement `db.dbmanage` initialization using startup-provided database settings, with `database.yml` only for DB access.
-8. Enforce SQLite fixed path `<config-dir>/cacheinfinity.db` and PostgreSQL support via `CACHEINFINITY_DATABASE_URL`.
-9. Auto-create/upgrade database tables (targets, files, events, access logs) and wire optional Redis metadata cache.
+13. Implement `db.dbmanage` initialization using startup-provided database settings, with `database.yml` only for DB access.
+14. Enforce SQLite fixed path `<config-dir>/cacheinfinity.db` and PostgreSQL support via `CACHEINFINITY_DATABASE_URL`.
+15. Auto-create/upgrade database tables (targets, files, events, access logs) and wire optional Redis metadata cache.
 
 ### Phase 4: Configuration and Bootstrap
-10. Implement `core.config` to load non-database configuration from the database only.
-11. Add bootstrap YAML import (`--bootstrap`) with validation, best-effort merge, and unknown-key logging.
-12. Implement backup/export to durable YAML using the same schema as bootstrap (reverse flow).
-13. Persist rclone settings in the database and include them in bootstrap import/export.
+16. Implement `core.config` to load non-database configuration from the database only.
+17. Add bootstrap YAML import (`--bootstrap`) with validation, best-effort merge, and unknown-key logging.
+18. Implement backup/export to durable YAML using the same schema as bootstrap (reverse flow).
+19. Persist rclone settings in the database and include them in bootstrap import/export.
    - Include rclone rc endpoint and credentials for `ui.backend` control.
 
 ### Phase 5: Logging, Auth, and TLS
-14. Configure `core.logging` from non-database config and provide logger instances to services.
-15. Initialize `auth.credentials` for users, credentials, and authorization policies stored in the database.
-16. Enforce salted+hashed credentials at rest and tokenized session auth for UI/API (CLI continues to use API key auth).
-17. Initialize `auth.tls` with TLS modes: manual, http-01, dns-01, external; support reverse-proxy deployments.
+20. Configure `core.logging` from non-database config and provide logger instances to services.
+21. Initialize `auth.credentials` for users, credentials, and authorization policies stored in the database.
+22. Enforce salted+hashed credentials at rest and tokenized session auth for UI/API (CLI continues to use API key auth).
+23. Initialize `auth.tls` with TLS modes: manual, http-01, dns-01, external; support reverse-proxy deployments.
 
 ### Phase 6: Storage and Datadir Contracts
-17. Initialize storage managers in `storage.configuration`, `storage.datadir`, and `storage.staging` from database-backed settings.
-18. Enforce datadir precedence rules and staging-first download requirements at the storage boundary.
+24. Initialize storage managers in `storage.configuration`, `storage.datadir`, and `storage.staging` from database-backed settings.
+25. Enforce datadir precedence rules and staging-first download requirements at the storage boundary.
 
 ### Phase 7: Fetcher and Cookie Handling
-20. Implement `net.fetcher` as a unified PycURL pipeline with resume, retries, timeouts, and minimum speed.
-21. Add handler selection (`url_handler`) to route downloads to HTTP/FTP/rclone without URL rewriting.
-22. Wire rclone settings (`enabled`, `config_path`) into fetcher runtime, using `RCLONE_CONFIG` when enabled.
-23. Store per-domain cookies in the database as Base64 Netscape payloads; supply cookies to downloads without on-disk jars.
-24. Add admin actions (WebUI/CLI) to set/list/delete cookies and capture refreshes.
+26. Implement `net.fetcher` as a unified PycURL pipeline with resume, retries, timeouts, and minimum speed.
+27. Add handler selection (`url_handler`) to route downloads to HTTP/FTP/rclone without URL rewriting.
+28. Wire rclone settings (`enabled`, `config_path`) into fetcher runtime, using `RCLONE_CONFIG` when enabled.
+29. Store per-domain cookies in the database as Base64 Netscape payloads; supply cookies to downloads without on-disk jars.
+30. Add admin actions (WebUI/CLI) to set/list/delete cookies and capture refreshes.
 
 ### Phase 8: Indexing and Availability
-25. Implement `net.indexer` scheduler constraints, budgets, and hotness tracking with decay.
-26. Persist listing metadata (path, URL, size, mtime, protocol, checksum when available) and support conditional checks.
-27. Add handler selection (`url_handler`) for listings and wire rclone config into listing fetches.
-28. Mark targets `needs_full_reindex` on 404/5xx during live GET and add availability probing.
+31. Implement `net.indexer` scheduler constraints, budgets, and hotness tracking with decay.
+32. Persist listing metadata (path, URL, size, mtime, protocol, checksum when available) and support conditional checks.
+33. Add handler selection (`url_handler`) for listings and wire rclone config into listing fetches.
+34. Mark targets `needs_full_reindex` on 404/5xx during live GET and add availability probing.
 
 ### Phase 9: Cachelinks, WebDAV, and Read-Through Caching
-29. Implement cachelink parsing and deterministic IDs in `cache.cachelinks` with database-backed persistence.
-30. Extend cachelinks with `url_handler` and persist it through bootstrap/import/export.
-31. Build WebDAV overlays in `hosting.webdav` with share schema enforcement and per-user flags.
-32. Implement staging-first read-through caching, avoid-download rule, and datadir override precedence.
-33. Add ZIP caching policy (`max_zip_total_gb`, `one_zip_cache_at_a_time`) with whole-zip and per-file flows.
-34. Expose cache state and size-on-disk via DAV live properties (`{urn:cacheinfinity}cache-state`, `{urn:cacheinfinity}size-on-disk`).
+35. Implement cachelink parsing and deterministic IDs in `cache.cachelinks` with database-backed persistence.
+36. Extend cachelinks with `url_handler` and persist it through bootstrap/import/export.
+37. Build WebDAV overlays in `hosting.webdav` with share schema enforcement and per-user flags.
+38. Implement staging-first read-through caching, avoid-download rule, and datadir override precedence.
+39. Add ZIP caching policy (`max_zip_total_gb`, `one_zip_cache_at_a_time`) with whole-zip and per-file flows.
+40. Expose cache state and size-on-disk via DAV live properties (`{urn:cacheinfinity}cache-state`, `{urn:cacheinfinity}size-on-disk`).
 
 ### Phase 10: Admin Interfaces and Operations
-35. Implement admin WebUI in `ui.web.webcore` and management layer in `ui.backend`.
-36. Add rclone settings to the Settings UI and cachelink `url_handler` controls to the Cachelinks UI.
-37. Route rclone control through `ui.backend` using rclone's API (rc); do not expose rclone operations via `ui.api`.
-38. Implement read-only admin API in `ui.api` authenticated via the admin user model.
-39. Implement admin CLI in `ui.cli` (users, cachelinks, bootstrap import, backups, cookies, rclone settings).
+41. Implement admin WebUI in `ui.web.webcore` and management layer in `ui.backend`.
+42. Add rclone settings to the Settings UI and cachelink `url_handler` controls to the Cachelinks UI.
+43. Route rclone control through `ui.backend` using rclone's API (rc); do not expose rclone operations via `ui.api`.
+44. Implement read-only admin API in `ui.api` authenticated via the admin user model.
+45. Implement admin CLI in `ui.cli` (users, cachelinks, bootstrap import, backups, cookies, rclone settings).
 
 ### Phase 11: Integration and Deployment Hardening
-40. Refactor `core.server` to use `core.services` for initialization and lifecycle control.
-41. Validate Docker and systemd layouts: `/config`, `/datadir`, `/staging`, TLS files, and logging.
-42. Verify initialization order, error handling propagation, and startup performance targets.
+46. Refactor `core.server` to use `core.services` for initialization and lifecycle control.
+47. Validate Docker and systemd layouts: `/config`, `/datadir`, `/staging`, TLS files, and logging.
+48. Verify initialization order, error handling propagation, and startup performance targets.

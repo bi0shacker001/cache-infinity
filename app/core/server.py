@@ -43,20 +43,9 @@ from core.config import (
 from db.dbmanage import DatabaseManager, load_database_settings
 from core.services import (
     ApplicationService,
-    AuthService,
-    ChecksumService,
-    ConfigManagerService,
-    CachelinksService,
     BackupService,
-    DatabaseService,
-    FetcherService,
-    IndexerService,
-    LoggingService,
     ServiceManager,
-    StorageService,
-    TLSService,
-    WebDAVService,
-    WebUIService,
+    create_service_manager,
     _build_auth_manager,
     _build_cachelinks,
     _build_checksum_catalog,
@@ -71,6 +60,7 @@ from core.services import (
 from net.fetcher import Fetcher
 from net.indexer import Indexer, RemoteListingFetcher
 from storage.datadir import DatadirRegistry
+from storage.configuration import ConfigurationManager
 from storage.staging import StagingArea
 
 _LOGGER = logging.getLogger(__name__)
@@ -292,7 +282,7 @@ class CacheInfinityService:
                 raise RuntimeError("WebDAV app should be built by WebDAVService")
             return self._wsgi_app
 
-    def get_webui_app(self) -> WebUIApp:
+    def get_webui_app(self):
         with self._lock:
             if self._webui_app is None:
                 raise RuntimeError("WebUI app should be built by WebUIService")
@@ -302,7 +292,7 @@ class CacheInfinityService:
         with self._lock:
             self._wsgi_app = app
 
-    def set_webui_app(self, app: WebUIApp) -> None:
+    def set_webui_app(self, app) -> None:
         with self._lock:
             self._webui_app = app
 
@@ -996,8 +986,11 @@ class CacheInfinityService:
             raise ConfigError(f"Domain {domain} does not support credential-based cookie generation")
         
         credfile_path = definition.credfile
-        credfile_path.parent.mkdir(parents=True, exist_ok=True)
-        credfile_path.write_text(f"username={username}\npassword={password}\n", encoding="utf-8")
+        config_manager = ConfigurationManager(self.settings.config_dir)
+        config_manager.write_text(
+            credfile_path,
+            f"username={username}\npassword={password}\n",
+        )
         self.index_db.clear_cookie_error(domain)
 
     def add_cookie_domain(
@@ -1020,9 +1013,10 @@ class CacheInfinityService:
             jar_path = Path(cookie_jar_value)
             if not jar_path.is_absolute():
                 jar_path = self.settings.config_dir / jar_path
-            if jar_path.exists():
-                cookie_content = jar_path.read_text(encoding="utf-8")
-            else:
+            config_manager = ConfigurationManager(self.settings.config_dir)
+            try:
+                cookie_content = config_manager.read_text(jar_path)
+            except FileNotFoundError:
                 cookie_content = cookie_jar_value
 
         final_credfile = (credfile_path or "").strip()
@@ -1030,9 +1024,11 @@ class CacheInfinityService:
             final_credfile = str(self.settings.config_dir / "credentials" / f"{safe}.txt")
         if final_credfile:
             credfile = Path(final_credfile)
-            credfile.parent.mkdir(parents=True, exist_ok=True)
-            if not credfile.exists():
-                credfile.write_text("", encoding="utf-8")
+            config_manager = ConfigurationManager(self.settings.config_dir)
+            try:
+                config_manager.read_text(credfile)
+            except FileNotFoundError:
+                config_manager.write_text(credfile, "")
 
         self._resolve_index_db().save_cookie(
             {
@@ -2168,21 +2164,7 @@ def run_server(args) -> None:
             bootstrap_path = config_dir / bootstrap_path
         bootstrap_path = bootstrap_path.resolve()
     
-    service_manager = ServiceManager()
-    service_manager.register(DatabaseService())
-    service_manager.register(ConfigManagerService())
-    service_manager.register(BackupService())
-    service_manager.register(LoggingService())
-    service_manager.register(AuthService())
-    service_manager.register(TLSService())
-    service_manager.register(StorageService())
-    service_manager.register(CachelinksService())
-    service_manager.register(FetcherService())
-    service_manager.register(IndexerService())
-    service_manager.register(ChecksumService())
-    service_manager.register(ApplicationService())
-    service_manager.register(WebDAVService())
-    service_manager.register(WebUIService())
+    service_manager = create_service_manager()
 
     base_context = {
         "config_dir": config_dir,

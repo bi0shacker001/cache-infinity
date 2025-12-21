@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+
+import yaml
 
 _logger = logging.getLogger(__name__)
 
@@ -42,6 +44,26 @@ class ConfigurationManager:
             Path to bootstrap.yml
         """
         return self.config_dir / "bootstrap.yml"
+
+    def read_text(self, path: Path) -> str:
+        """Read a UTF-8 text file."""
+        return path.read_text(encoding="utf-8")
+
+    def write_text(self, path: Path, text: str) -> None:
+        """Write a UTF-8 text file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def read_yaml(self, path: Path) -> dict[str, Any]:
+        """Read a YAML file and return a dictionary."""
+        if not path.exists():
+            return {}
+        return yaml.safe_load(self.read_text(path)) or {}
+
+    def write_yaml(self, path: Path, payload: dict[str, Any]) -> None:
+        """Write a dictionary as YAML."""
+        text = yaml.safe_dump(payload, default_flow_style=False, indent=2)
+        self.write_text(path, text)
         
     def get_credentials_path(self) -> Path:
         """Get the path to the credentials directory.

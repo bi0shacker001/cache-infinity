@@ -16,7 +16,7 @@ from core.config import (
     load_database_backed_settings_from_manager,
     validate_settings,
 )
-from db.dbmanage import load_database_settings
+from db.dbmanage import load_database_settings, load_bootstrap_data
 from core.logging import configure_logging
 from core.errors import (
     ServiceDependencyError,
@@ -29,6 +29,7 @@ from net.fetcher import Fetcher
 from net.indexer import Indexer, RemoteListingFetcher
 from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
+from storage.configuration import ConfigurationManager
 from ui.web.webcore import WebUIApp
 from db.backupmgmt import DatabaseBackupManager
 
@@ -159,6 +160,26 @@ class ServiceManager:
         return order
 
 
+def create_service_manager() -> ServiceManager:
+    """Build a ServiceManager with the default CacheInfinity services registered."""
+    manager = ServiceManager()
+    manager.register(DatabaseService())
+    manager.register(BackupService())
+    manager.register(ConfigManagerService())
+    manager.register(LoggingService())
+    manager.register(AuthService())
+    manager.register(TLSService())
+    manager.register(StorageService())
+    manager.register(CachelinksService())
+    manager.register(FetcherService())
+    manager.register(IndexerService())
+    manager.register(ChecksumService())
+    manager.register(ApplicationService())
+    manager.register(WebDAVService())
+    manager.register(WebUIService())
+    return manager
+
+
 class DatabaseService(BaseService):
     """Initializes the database manager from startup database settings."""
 
@@ -200,11 +221,20 @@ class BackupService(BaseService):
     def __init__(self) -> None:
         self.manager: DatabaseBackupManager | None = None
         self.config_dir: Path | None = None
+        self.config_manager: ConfigurationManager | None = None
 
     def initialize(self, context: dict[str, Any]) -> None:
         database_service: DatabaseService = context["database"]
         self.config_dir = context["config_dir"]
+        self.config_manager = ConfigurationManager(self.config_dir)
         self.manager = DatabaseBackupManager(database_service.database_manager, self.config_dir)
+        bootstrap_path = context.get("bootstrap_path")
+        if bootstrap_path:
+            bootstrap_data = load_bootstrap_data(self.config_dir, Path(bootstrap_path))
+            if bootstrap_data:
+                _, warnings = self.manager.import_config_from_data(bootstrap_data)
+                for warning in warnings:
+                    _LOGGER.warning("Bootstrap import warning: %s", warning)
 
     def start(self) -> None:
         return None
@@ -215,12 +245,16 @@ class BackupService(BaseService):
     def export_bootstrap(self, output_path: Path) -> None:
         if not self.manager:
             raise ConfigError("Backup manager is not initialized")
-        self.manager.export_config_to_yaml(output_path)
+        if not self.config_manager:
+            raise ConfigError("Configuration manager is not initialized")
+        text = self.manager.export_config_to_text()
+        self.config_manager.write_text(output_path, text)
 
     @classmethod
     def from_manager(cls, database_manager: DatabaseManager, config_dir: Path) -> "BackupService":
         service = cls()
         service.config_dir = config_dir
+        service.config_manager = ConfigurationManager(config_dir)
         service.manager = DatabaseBackupManager(database_manager, config_dir)
         return service
 
@@ -229,7 +263,7 @@ class ConfigManagerService(BaseService):
     """Loads non-database configuration from the database."""
 
     name = "config"
-    dependencies = ("database",)
+    dependencies = ("database", "backup")
 
     def __init__(self) -> None:
         self.settings: Settings | None = None
@@ -237,12 +271,10 @@ class ConfigManagerService(BaseService):
     def initialize(self, context: dict[str, Any]) -> None:
         database_service: DatabaseService = context["database"]
         config_dir = context["config_dir"]
-        bootstrap_path = context.get("bootstrap_path")
         settings = load_database_backed_settings_from_manager(
             config_dir,
             database_service.database_settings,
             database_service.database_manager,
-            bootstrap_path=bootstrap_path,
         )
         errors = validate_settings(settings)
         if errors:

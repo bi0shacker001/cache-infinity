@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

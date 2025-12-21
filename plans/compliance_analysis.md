@@ -1,5 +1,18 @@
 # CacheInfinity SPEC.md Compliance Analysis - Updated with PycURL Integration
 
+## Reevaluation Snapshot (Post-handoff requirements)
+
+**New layout/config-dir requirements added**: enforced in the plan, not yet fully reflected in code.
+
+**Still out of compliance (highest priority):**
+- `app/core/server.py` imports `ui.web.webcore` and `hosting.webdav` directly (layout violation).
+- `app/db/schema.py` imports `sqlite3` (layout violation).
+- `app/core/config.py` performs filesystem IO (should be none).
+- Config-directory filesystem access is scattered (should flow through `app/storage/configuration.py`).
+- `app/db/dbmanage.py` reads `database.yml` directly instead of through `storage.configuration`, and bootstrap handling should be delegated to `db.backupmgmt`.
+
+**Plan update**: these items are now Phase 0 in `plans/initialization_flow_plan.md`.
+
 ## Executive Summary
 
 After thorough analysis of the current implementation against SPEC.md and layout.md, **the application has significant compliance gaps and implementation issues**. While the basic structure exists, many core features are incomplete, broken, or missing entirely. The TODO.md file shows many items marked as complete that are actually not fully implemented.
