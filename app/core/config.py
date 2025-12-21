@@ -436,8 +436,6 @@ class ConfigService:
         cookies = [
             {
                 "domain": name,
-                "cookie_jar": str(defn.cookie_jar) if defn.cookie_jar else "",
-                "credfile": str(defn.credfile) if defn.credfile else None,
             }
             for name, defn in settings.cookies.items()
         ]
@@ -730,7 +728,7 @@ class ConfigMigration:
                     self._logger.warning("Invalid cookies_b64 for %s: %s", domain, exc)
                     cookie_content = ""
             elif cookie_raw.get("cookie_jar"):
-                # If cookie_jar is a path, read the content
+                # cookie_jar is treated as inline Netscape cookie content.
                 cookie_jar_value = cookie_raw["cookie_jar"]
                 if isinstance(cookie_jar_value, str):
                     cookie_content = cookie_jar_value
@@ -1234,8 +1232,6 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         cookies[cookie_raw["domain"]] = CookieJarDefinition(
             domain=cookie_raw["domain"],
             cookie_content=cookie_raw.get("cookie_content") or "",
-            cookie_jar=None,
-            credfile=None,
         )
     
     # Load shares from database
@@ -1443,15 +1439,11 @@ def _parse_cookies(cookies_raw: dict, config_dir: Path) -> dict[str, CookieJarDe
     for domain, cookie_raw in cookies_raw.items():
         cookie_jar_value = cookie_raw.get("cookie_jar")
         cookie_content = ""
-        cookie_jar = None
         if isinstance(cookie_jar_value, str) and cookie_jar_value:
             cookie_content = cookie_jar_value
-        credfile = _optional_path(cookie_raw.get("credfile"), config_dir)
         cookies[domain] = CookieJarDefinition(
             domain=domain,
             cookie_content=cookie_content,
-            cookie_jar=cookie_jar,
-            credfile=credfile,
         )
     return cookies
 

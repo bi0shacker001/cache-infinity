@@ -383,22 +383,10 @@ class LocalControlServer:
             if action == "upload":
                 mgmt.upload_cookie_file(args.get("domain"), args.get("content", ""))
                 return {"status": "ok"}
-            if action == "credentials":
-                mgmt.update_cookie_credentials(
-                    args.get("domain"),
-                    args.get("username"),
-                    args.get("password"),
-                )
-                return {"status": "ok"}
-            if action == "refresh":
-                mgmt.regenerate_cookie(args.get("domain"))
-                return {"status": "ok"}
             if action == "domain-add":
                 mgmt.add_cookie_domain(
                     domain=args.get("domain"),
-                    credfile=bool(args.get("credfile")),
                     cookie_jar=args.get("cookie_jar"),
-                    credfile_path=args.get("credfile_path"),
                 )
                 return {"status": "ok"}
 
@@ -713,8 +701,10 @@ class LocalControlServer:
     ) -> Dict[str, Any]:
         """Update credentials for cookie generation."""
         try:
-            self.service.update_cookie_credentials(domain, username, password)
-            return {"status": "success", "message": f"Credentials updated for {domain}"}
+            raise ValueError(
+                "Cookie credentials are not stored on disk. "
+                "Import cookies via bootstrap instead."
+            )
         except Exception as e:
             logger.error("Failed to update cookie credentials: %s", e)
             raise
@@ -722,8 +712,9 @@ class LocalControlServer:
     def regenerate_cookie(self, domain: str) -> Dict[str, Any]:
         """Regenerate cookies for a domain."""
         try:
-            self.service.regenerate_cookie(domain)
-            return {"status": "success", "message": f"Cookies regenerated for {domain}"}
+            raise ValueError(
+                "Cookie refresh is disabled. Import cookies via bootstrap instead."
+            )
         except Exception as e:
             logger.error("Failed to regenerate cookie: %s", e)
             raise
@@ -731,17 +722,13 @@ class LocalControlServer:
     def add_cookie_domain(
         self,
         domain: str,
-        credfile: bool = False,
         cookie_jar: Optional[str] = None,
-        credfile_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """Add a new cookie domain configuration."""
         try:
             self.service.add_cookie_domain(
                 domain=domain,
-                credfile=credfile,
                 cookie_jar=cookie_jar,
-                credfile_path=credfile_path
             )
             return {"status": "success", "message": f"Cookie domain {domain} added"}
         except Exception as e:

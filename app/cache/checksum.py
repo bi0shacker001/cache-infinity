@@ -18,18 +18,18 @@ _logger = logging.getLogger(__name__)
 class ChecksumCatalog:
     """Catalog for managing checksums of files from various sources."""
     
-    def __init__(self, config_dir: Path, index_db):
+    def __init__(self, index_db, catalog_dir: Path | None = None):
         """Initialize checksum catalog.
         
         Args:
-            config_dir: Configuration directory path
             index_db: Database instance for storing checksums
+            catalog_dir: Optional directory for catalog scanning
         """
-        self.config_dir = config_dir
         self.index_db = index_db
         self.calculator = ChecksumCalculator()
-        self.catalog_dir = config_dir / "checksums"
-        self.catalog_dir.mkdir(exist_ok=True)
+        self.catalog_dir = catalog_dir
+        if self.catalog_dir:
+            self.catalog_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_catalog_tables()
         _logger.info("Checksum catalog initialized")
     
@@ -387,6 +387,9 @@ class ChecksumCatalog:
     
     def scan_catalog_directory(self) -> bool:
         """Scan the catalog directory for new catalog files and import them."""
+        if not self.catalog_dir:
+            _logger.info("Catalog directory scanning is disabled")
+            return False
         try:
             imported_count = 0
             

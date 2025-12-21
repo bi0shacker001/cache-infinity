@@ -246,30 +246,6 @@ def _handle_cookies(client: LocalControlClient, args) -> int:
         )
         print("ok")
         return 0
-    if args.action == "credentials":
-        client.request(
-            {
-                "command": "cookies",
-                "action": "credentials",
-                "args": {
-                    "domain": args.domain,
-                    "username": args.username,
-                    "password": args.password,
-                },
-            }
-        )
-        print("ok")
-        return 0
-    if args.action == "refresh":
-        client.request(
-            {
-                "command": "cookies",
-                "action": "refresh",
-                "args": {"domain": args.domain},
-            }
-        )
-        print("ok")
-        return 0
     if args.action == "domain-add":
         client.request(
             {
@@ -277,9 +253,7 @@ def _handle_cookies(client: LocalControlClient, args) -> int:
                 "action": "domain-add",
                 "args": {
                     "domain": args.domain,
-                    "credfile": args.credfile,
                     "cookie_jar": args.cookie_jar,
-                    "credfile_path": args.credfile_path,
                 },
             }
         )
@@ -573,17 +547,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
     cookies_upload.add_argument("--domain", required=True)
     cookies_upload.add_argument("--file")
     cookies_upload.add_argument("--content")
-    cookies_creds = cookies_sub.add_parser("credentials", help="Update cookie credentials")
-    cookies_creds.add_argument("--domain", required=True)
-    cookies_creds.add_argument("--username", required=True)
-    cookies_creds.add_argument("--password", required=True)
-    cookies_refresh = cookies_sub.add_parser("refresh", help="Refresh cookies")
-    cookies_refresh.add_argument("--domain", required=True)
     cookies_domain = cookies_sub.add_parser("domain-add", help="Add cookie domain")
     cookies_domain.add_argument("--domain", required=True)
-    cookies_domain.add_argument("--cookie-jar")
-    cookies_domain.add_argument("--credfile", action="store_true")
-    cookies_domain.add_argument("--credfile-path")
+    cookies_domain.add_argument("--cookie-jar", help="Inline cookies.txt content")
 
     users = subparsers.add_parser("users", help="Manage users")
     users.add_argument("--type", dest="user_type", choices=["admin", "webdav"], required=True)

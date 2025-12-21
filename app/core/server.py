@@ -59,8 +59,8 @@ from core.services import (
 )
 from net.fetcher import Fetcher
 from net.indexer import Indexer, RemoteListingFetcher
-from storage.datadir import DatadirRegistry
 from storage.configuration import ConfigurationManager
+from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
 
 _LOGGER = logging.getLogger(__name__)
@@ -319,10 +319,10 @@ class CacheInfinityService:
             if new_signature != current_signature and not allow_switch:
                 raise ConfigError("Dump requires allow_switch when switching databases")
             BackupService.from_manager(self.index_db, config_dir).export_bootstrap(
-                config_dir / "bootstrap.yml"
+                _bootstrap_path(config_dir)
             )
 
-        bootstrap_path = config_dir / "bootstrap.yml" if dump else None
+        bootstrap_path = _bootstrap_path(config_dir) if dump else None
 
         settings = load_database_backed_settings(
             config_dir,
@@ -883,28 +883,9 @@ class CacheInfinityService:
             return []
 
     def regenerate_cookie(self, domain: str) -> None:
-        _LOGGER.debug("Regenerating cookies for domain: %s", domain)
-        if domain not in self.settings.cookies:
-            _LOGGER.error("Unknown cookie domain: %s", domain)
-            raise ConfigError(f"Unknown cookie domain {domain}")
-        try:
-            # Use the fetcher's cookie refresh functionality
-            _LOGGER.debug("Attempting to refresh cookies for domain: %s", domain)
-            success, cookie_content = self.fetcher.refresh_cookies(domain)
-            if not success:
-                raise Exception("Cookie refresh failed")
-            if cookie_content is not None:
-                self._resolve_index_db().save_cookie(
-                    {"domain": domain.lower(), "cookie_content": cookie_content}
-                )
-                self.config_service.reload_settings()
-            _LOGGER.debug("Successfully regenerated cookies for domain: %s", domain)
-        except Exception as exc:
-            _LOGGER.error("Cookie refresh failed for %s: %s", domain, exc, exc_info=True)
-            self.index_db.record_cookie_error(domain, str(exc), auth_fail=_looks_like_auth_error(str(exc)))
-            raise
-        else:
-            self.index_db.mark_cookie_uploaded(domain)
+        raise ConfigError(
+            "Cookie refresh is disabled. Import cookies via bootstrap instead."
+        )
 
     def upload_cookie_file(self, domain: str, cookie_content: str) -> None:
         """Upload a cookies.txt file for a domain."""
@@ -979,27 +960,16 @@ class CacheInfinityService:
 
     def update_cookie_credentials(self, domain: str, username: str, password: str) -> None:
         """Update credentials for cookie generation."""
-        if domain not in self.settings.cookies:
-            raise ConfigError(f"Unknown cookie domain {domain}")
-        definition = self.settings.cookies[domain]
-        if not definition.credfile:
-            raise ConfigError(f"Domain {domain} does not support credential-based cookie generation")
-        
-        credfile_path = definition.credfile
-        config_manager = ConfigurationManager(self.settings.config_dir)
-        config_manager.write_text(
-            credfile_path,
-            f"username={username}\npassword={password}\n",
+        raise ConfigError(
+            "Cookie credentials are not stored on disk. "
+            "Import cookies via bootstrap instead."
         )
-        self.index_db.clear_cookie_error(domain)
 
     def add_cookie_domain(
         self,
         domain: str,
         *,
-        credfile: bool = False,
         cookie_jar: str | None = None,
-        credfile_path: str | None = None,
     ) -> None:
         safe = domain.strip().lower()
         if not safe:
@@ -1007,28 +977,7 @@ class CacheInfinityService:
         if safe in self.settings.cookies:
             raise ConfigError("Domain already exists in cookies")
 
-        cookie_jar_value = (cookie_jar or "").strip()
-        cookie_content = ""
-        if cookie_jar_value:
-            jar_path = Path(cookie_jar_value)
-            if not jar_path.is_absolute():
-                jar_path = self.settings.config_dir / jar_path
-            config_manager = ConfigurationManager(self.settings.config_dir)
-            try:
-                cookie_content = config_manager.read_text(jar_path)
-            except FileNotFoundError:
-                cookie_content = cookie_jar_value
-
-        final_credfile = (credfile_path or "").strip()
-        if not final_credfile and credfile:
-            final_credfile = str(self.settings.config_dir / "credentials" / f"{safe}.txt")
-        if final_credfile:
-            credfile = Path(final_credfile)
-            config_manager = ConfigurationManager(self.settings.config_dir)
-            try:
-                config_manager.read_text(credfile)
-            except FileNotFoundError:
-                config_manager.write_text(credfile, "")
+        cookie_content = (cookie_jar or "").strip()
 
         self._resolve_index_db().save_cookie(
             {
@@ -1098,8 +1047,6 @@ class CacheInfinityService:
             result["cookies"] = [
                 {
                     "domain": name,
-                    "cookie_jar": _path(defn.cookie_jar),
-                    "credfile": _path(defn.credfile),
                 }
                 for name, defn in settings.cookies.items()
             ]
@@ -1211,7 +1158,7 @@ class CacheInfinityService:
         return descriptions
 
     def describe_cachelink_tree(self) -> dict[str, object]:
-        doc = self._load_cachelinks_document(self.settings.config_dir / "bootstrap.yml")
+        doc = self._load_cachelinks_document(_bootstrap_path(self.settings.config_dir))
         folder_nodes = self._collect_folder_nodes(doc)
         entries_by_folder: dict[str, list[dict[str, object]]] = {}
         for descriptor in self.cachelinks.cachelinks.values():
@@ -1296,7 +1243,7 @@ class CacheInfinityService:
 
     def add_cachelink_folder(self, path: str) -> None:
         segments = self._folder_segments(path)
-        doc_path = self.settings.config_dir / "bootstrap.yml"
+        doc_path = _bootstrap_path(self.settings.config_dir)
         doc = self._load_cachelinks_document(doc_path)
         node = doc.setdefault("cachelinks", {})
         if not isinstance(node, dict):
@@ -1314,7 +1261,7 @@ class CacheInfinityService:
         segments = self._folder_segments(path)
         if not segments:
             raise ConfigError("Cannot remove root folder")
-        doc_path = self.settings.config_dir / "bootstrap.yml"
+        doc_path = _bootstrap_path(self.settings.config_dir)
         doc = self._load_cachelinks_document(doc_path)
         node = doc.get("cachelinks")
         if not isinstance(node, dict):
@@ -1351,7 +1298,7 @@ class CacheInfinityService:
         descriptor = CachelinkDescriptor(
             canonical_id="preview",
             path_segments=("preview",),
-            source_file=self.settings.config_dir / "bootstrap.yml",
+            source_file=_bootstrap_path(self.settings.config_dir),
             source_url=url,
             identifier=identifier,
             download_root=download_root,
@@ -1426,7 +1373,7 @@ class CacheInfinityService:
                 "subfolder": cleaned_subfolder,
                 "mode": _detect_mode(cleaned_subfolder).value,
                 "url_handler": url_handler,
-                "source_file": str(self.settings.config_dir / "bootstrap.yml"),
+                "source_file": str(_bootstrap_path(self.settings.config_dir)),
             }
         )
         index_db.save_cachelinks(cachelinks)
@@ -1617,8 +1564,7 @@ class CacheInfinityService:
                     "domain": domain,
                     "cookie_path": None,
                     "cookie_present": bool(cookie_present),
-                    "credfile": str(definition.credfile) if definition and definition.credfile else None,
-                    "supports_generation": bool(definition and definition.credfile),
+                    "supports_generation": False,
                     "auth_fail": bool(state["auth_fail"]) if state else False,
                     "last_error": state.get("last_error") if state else None,
                     "last_error_at": state.get("last_error_at") if state else None,
@@ -1956,6 +1902,10 @@ def _pidfile_path(config_dir: Path) -> Path:
     return _runtime_dir(config_dir) / _PID_FILENAME
 
 
+def _bootstrap_path(config_dir: Path) -> Path:
+    return ConfigurationManager(config_dir).get_bootstrap_path()
+
+
 def _write_pidfile(config_dir: Path) -> None:
     path = _pidfile_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2023,7 +1973,7 @@ def _run_server(server: cheroot_wsgi.Server, label: str = "CacheInfinity") -> No
         server.stop()
 
 
-def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings) -> None:
+def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings, config_dir: Path) -> None:
     if not tls.enabled or tls.mode == "external":
         server.ssl_adapter = None
         return
@@ -2032,7 +1982,8 @@ def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings) -> None:
         key_path = tls.manual.key_path
         if not cert_path or not key_path:
             raise ConfigError("TLS manual mode requires cert_path and key_path")
-        if not cert_path.exists() or not key_path.exists():
+        config_manager = ConfigurationManager(config_dir)
+        if not config_manager.path_exists(cert_path) or not config_manager.path_exists(key_path):
             raise ConfigError("TLS certificate files do not exist at the provided paths")
         server.ssl_adapter = pyopenssl.pyOpenSSLAdapter(
             certificate=str(cert_path),
@@ -2080,7 +2031,7 @@ def _trigger_reload(
 
         if dump:
             backup_service: BackupService = service_manager.context["backup"]
-            backup_service.export_bootstrap(config_dir / "bootstrap.yml")
+            backup_service.export_bootstrap(_bootstrap_path(config_dir))
 
         new_db_settings = load_database_settings(config_dir, args, env)
         current_signature = service._database_signature(service.settings.database)
@@ -2092,7 +2043,7 @@ def _trigger_reload(
             "config_dir": config_dir,
             "args": args,
             "env": dict(env),
-            "bootstrap_path": config_dir / "bootstrap.yml" if dump else None,
+            "bootstrap_path": _bootstrap_path(config_dir) if dump else None,
             "log_level": args.log_level,
         }
         service_manager.stop_all()
@@ -2178,7 +2129,7 @@ def run_server(args) -> None:
     service = _current_service(service_manager)
     reloadable_app = _ReloadableApp(service_manager)
     server = cheroot_wsgi.Server((args.host, args.port), reloadable_app)
-    _configure_tls(server, service.settings.tls)
+    _configure_tls(server, service.settings.tls, service.settings.config_dir)
     
     # Set up reload/reinit/shutdown signal handlers
     reload_callback = lambda reason: _trigger_reload(
@@ -2187,7 +2138,7 @@ def run_server(args) -> None:
         config_dir,
         args,
         os.environ,
-        lambda tls: _configure_tls(server, tls),
+        lambda tls: _configure_tls(server, tls, service.settings.config_dir),
     )
     _install_reload_signal(reload_callback)
     restart_argv = [sys.executable] + sys.argv

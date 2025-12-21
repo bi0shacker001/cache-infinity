@@ -50,8 +50,6 @@ def configure_logging(
     
     # File handler (if log file specified)
     if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
             maxBytes=max_log_size,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from os import stat_result
 from pathlib import Path
 from typing import Optional, Any
 
@@ -37,6 +38,10 @@ class ConfigurationManager:
         """
         return self.config_dir / "database.yml"
 
+    def get_sqlite_db_path(self) -> Path:
+        """Get the path to the SQLite database file."""
+        return self.config_dir / "cacheinfinity.db"
+
     def get_bootstrap_path(self) -> Path:
         """Get the path to the bootstrap configuration file.
         
@@ -44,6 +49,27 @@ class ConfigurationManager:
             Path to bootstrap.yml
         """
         return self.config_dir / "bootstrap.yml"
+
+    def ensure_tls_dirs(self) -> dict[str, Path]:
+        """Ensure TLS directories exist and return their paths."""
+        work_dir = self.config_dir / "tls"
+        certs_dir = work_dir / "certs"
+        live_dir = work_dir / "live"
+        webroot_dir = work_dir / "webroot"
+        for path in (work_dir, certs_dir, live_dir, webroot_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        return {
+            "work_dir": work_dir,
+            "certs_dir": certs_dir,
+            "live_dir": live_dir,
+            "webroot_dir": webroot_dir,
+        }
+
+    def ensure_logs_dir(self) -> Path:
+        """Ensure logs directory exists and return its path."""
+        logs_dir = self.config_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return logs_dir
 
     def read_text(self, path: Path) -> str:
         """Read a UTF-8 text file."""
@@ -64,14 +90,34 @@ class ConfigurationManager:
         """Write a dictionary as YAML."""
         text = yaml.safe_dump(payload, default_flow_style=False, indent=2)
         self.write_text(path, text)
-        
-    def get_credentials_path(self) -> Path:
-        """Get the path to the credentials directory.
-        
-        Returns:
-            Path to credentials directory
-        """
-        return self.config_dir / "credentials"
+
+    def path_exists(self, path: Path) -> bool:
+        """Check whether a path exists."""
+        return path.exists()
+
+    def is_dir(self, path: Path) -> bool:
+        """Check whether a path is a directory."""
+        return path.is_dir()
+
+    def is_file(self, path: Path) -> bool:
+        """Check whether a path is a file."""
+        return path.is_file()
+
+    def iterdir(self, path: Path) -> list[Path]:
+        """List directory contents."""
+        return list(path.iterdir())
+
+    def stat(self, path: Path) -> stat_result:
+        """Return stat information for a path."""
+        return path.stat()
+
+    def remove_tree(self, path: Path) -> None:
+        """Remove a directory tree."""
+        shutil.rmtree(path)
+
+    def remove_file(self, path: Path) -> None:
+        """Remove a single file."""
+        path.unlink()
         
     def get_backups_path(self) -> Path:
         """Get the path to the backups directory.
@@ -117,31 +163,6 @@ class ConfigurationManager:
             _logger.error(f"Failed to create backup for {source_file}: {exc}")
             return None
             
-    def ensure_credentials_directory(self) -> Path:
-        """Ensure the credentials directory exists.
-        
-        Returns:
-            Path to the credentials directory
-        """
-        creds_dir = self.get_credentials_path()
-        creds_dir.mkdir(exist_ok=True)
-        return creds_dir
-        
-    def get_cookie_jar_path(self, domain: str) -> Path:
-        """Get the path for a domain's cookie jar.
-        
-        Args:
-            domain: Domain name
-            
-        Returns:
-            Path to cookie jar file
-        """
-        # Sanitize domain name for filename
-        safe_domain = domain.replace('.', '_').replace(':', '_')
-        cookies_dir = self.config_dir / "cookies"
-        cookies_dir.mkdir(exist_ok=True)
-        return cookies_dir / f"{safe_domain}.txt"
-        
     def get_dns_credentials_path(self, provider: str) -> Path:
         """Get the path for a DNS provider's credentials file.
         
@@ -176,8 +197,6 @@ class ConfigurationManager:
         # Check if it's a known config file or in config subdirectories
         return (
             file_path.name in config_files
-            or "credentials" in str(file_path)
-            or "cookies" in str(file_path)
             or "backups" in str(file_path)
             or (file_path.suffix in {".yaml", ".yml", ".ini"} and file_path.name.startswith("dns-"))
         )

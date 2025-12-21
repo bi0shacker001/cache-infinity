@@ -317,7 +317,7 @@ class Fetcher:
 
         cookie_definition = self.cookie_jars.get(domain)
         cookie_content = self._load_cookie_content(cookie_definition)
-        userpwd = self._read_basic_auth(cookie_definition.credfile) if cookie_definition else None
+        userpwd = None
 
         start_ts = time.time()
         existing_size = destination.stat().st_size if resume and destination.exists() else 0
@@ -459,45 +459,10 @@ class Fetcher:
         """
         return urlparse(url).netloc
 
-    def _read_basic_auth(self, credfile: Path | None) -> str | None:
-        if not credfile or not credfile.exists():
-            return None
-        try:
-            payload = credfile.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError as exc:
-            _logger.warning("Failed to read credentials from %s: %s", credfile, exc)
-            return None
-
-        if ":" in payload and "\n" not in payload:
-            return payload
-
-        username = None
-        password = None
-        for line in payload.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip().lower()
-            value = value.strip()
-            if key == "username":
-                username = value
-            elif key == "password":
-                password = value
-        if username and password:
-            return f"{username}:{password}"
-        return None
-
     def _load_cookie_content(self, cookie_definition: CookieJarDefinition | None) -> str:
         if not cookie_definition:
             return ""
-        if cookie_definition.cookie_content:
-            return cookie_definition.cookie_content
-        if cookie_definition.cookie_jar and cookie_definition.cookie_jar.exists():
-            try:
-                return cookie_definition.cookie_jar.read_text(encoding="utf-8")
-            except OSError as exc:
-                _logger.warning("Failed to read cookies from %s: %s", cookie_definition.cookie_jar, exc)
-        return ""
+        return cookie_definition.cookie_content or ""
 
     def _apply_cookies(self, curl, pycurl, cookie_content: str) -> None:
         curl.setopt(pycurl.COOKIELIST, "ALL")
@@ -578,64 +543,8 @@ class Fetcher:
         Returns:
             Tuple of (success, cookie_content)
         """
-        pycurl = _import_pycurl()
-        cookie_jar = self.cookie_jars.get(domain)
-        if not cookie_jar or not cookie_jar.credfile or not cookie_jar.credfile.exists():
-            _logger.warning(f"No credentials available for domain: {domain}")
-            return False, None
-        
-        try:
-            userpwd = self._read_basic_auth(cookie_jar.credfile)
-            if not userpwd:
-                _logger.error("Invalid credentials format for domain: %s", domain)
-                return False, None
-            
-            # Try to refresh cookies by making a request to a known endpoint
-            # This would typically be a login endpoint specific to the domain
-            refresh_urls = {
-                'archive.org': 'https://archive.org/account/login.php',
-                'the-eye.eu': 'https://the-eye.eu/'
-            }
-            
-            refresh_url = refresh_urls.get(domain)
-            if not refresh_url:
-                _logger.warning(f"No known refresh endpoint for domain: {domain}")
-                return False, None
-
-            sink = io.BytesIO()
-            curl = pycurl.Curl()
-            try:
-                curl.setopt(pycurl.URL, refresh_url)
-                curl.setopt(pycurl.FOLLOWLOCATION, 1)
-                curl.setopt(pycurl.MAXREDIRS, 10)
-                curl.setopt(pycurl.CONNECTTIMEOUT, 30)
-                curl.setopt(pycurl.TIMEOUT, 60)
-                curl.setopt(pycurl.NOSIGNAL, 1)
-                curl.setopt(pycurl.USERAGENT, "CacheInfinity/0.1")
-                curl.setopt(pycurl.WRITEDATA, sink)
-                curl.setopt(pycurl.SSL_VERIFYPEER, 1)
-                curl.setopt(pycurl.SSL_VERIFYHOST, 2)
-                cookie_content = self._load_cookie_content(cookie_jar)
-                if cookie_content:
-                    self._apply_cookies(curl, pycurl, cookie_content)
-                curl.setopt(pycurl.USERPWD, userpwd)
-                curl.perform()
-                status_code = int(curl.getinfo(pycurl.RESPONSE_CODE) or 0)
-                cookie_list = curl.getinfo(pycurl.INFO_COOKIELIST)
-            finally:
-                curl.close()
-
-            if 200 <= status_code < 400:
-                cookie_text = self._format_cookie_list(cookie_list)
-                _logger.debug("Successfully refreshed cookies for domain: %s", domain)
-                return True, cookie_text
-
-            _logger.warning("Failed to refresh cookies for domain %s: HTTP %d", domain, status_code)
-            return False, None
-                
-        except Exception as e:
-            _logger.error(f"Error refreshing cookies for domain {domain}: {e}")
-            return False, None
+        _logger.warning("Cookie refresh is disabled; credentials are not stored on disk.")
+        return False, None
 
     def _format_cookie_list(self, cookie_list: list[str] | None) -> str:
         if not cookie_list:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, TYPE_CHECKING
 
 from core.errors import ConfigError
+from storage.configuration import ConfigurationManager
 
 _logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class DatabaseBackupManager:
         """
         self.index_db = index_db
         self.config_dir = config_dir
+        self.config_manager = ConfigurationManager(config_dir)
         self._logger = logging.getLogger(__name__)
 
     def export_config_to_yaml(self, output_path: Path) -> Path:
@@ -51,8 +53,7 @@ class DatabaseBackupManager:
         """
         try:
             text = self.export_config_to_text()
-            with output_path.open('w', encoding='utf-8') as f:
-                f.write(text)
+            self.config_manager.write_text(output_path, text)
 
             self._logger.info(f"Configuration exported to {output_path}")
             return output_path
@@ -75,8 +76,7 @@ class DatabaseBackupManager:
             ConfigImportError: If no valid data was found or critical errors occurred
         """
         try:
-            with bootstrap_path.open('r', encoding='utf-8') as f:
-                text = f.read()
+            text = self.config_manager.read_text(bootstrap_path)
             return self.import_config_from_text(text)
         except Exception as exc:
             error_msg = f"Configuration import failed: {exc}"
@@ -622,12 +622,6 @@ class DatabaseBackupManager:
                         continue
                 else:
                     cookie_content = cookie_data.get('cookie_jar', '')
-                    if isinstance(cookie_content, str):
-                        jar_path = Path(cookie_content)
-                        if not jar_path.is_absolute():
-                            jar_path = self.config_dir / jar_path
-                        if jar_path.exists():
-                            cookie_content = jar_path.read_text(encoding="utf-8")
                 if isinstance(cookie_content, str):
                     cookie_content = cookie_content.replace("\r\n", "\n")
 

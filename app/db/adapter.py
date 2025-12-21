@@ -100,10 +100,10 @@ class DBAdapter:
         
         # Initialize SQL backend
         if engine == "sqlite":
-            config_dir = settings.config_dir
-            if not config_dir:
-                raise ConfigError("SQLite engine requires config_dir")
-            self._backend = SQLiteBackend(config_dir)
+            sqlite_path = settings.sqlite_path
+            if not sqlite_path:
+                raise ConfigError("SQLite engine requires sqlite_path")
+            self._backend = SQLiteBackend(sqlite_path)
             self._backend.connect()
         elif engine == "postgres":
             dsn = settings.postgres_dsn

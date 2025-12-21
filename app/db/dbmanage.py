@@ -104,6 +104,7 @@ class DatabaseManager:
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
+        self.adapter.commit()
 
 
 @dataclass
@@ -191,7 +192,7 @@ def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
     return DatabaseSettings(
         engine="sqlite",
         config_dir=config_dir,
-        sqlite_path=config_dir / "cacheinfinity.db",
+        sqlite_path=config_manager.get_sqlite_db_path(),
         postgres_dsn="",
         db_type="sqlite",
     )
@@ -200,9 +201,6 @@ def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
 def validate_database_yml(config_manager: ConfigurationManager) -> dict:
     """Validate that database.yml only contains database configuration."""
     database_path = config_manager.get_database_path()
-    if not database_path.exists():
-        return {}
-
     try:
         config_data = config_manager.read_yaml(database_path) or {}
     except yaml.YAMLError as exc:

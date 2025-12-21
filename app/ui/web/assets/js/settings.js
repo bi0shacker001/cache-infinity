@@ -401,8 +401,6 @@ function cookieConfigTemplate(data = {}) {
   return `<div class="cookie-config-block">
     <div class="form-grid">
       <label>Domain<input type="text" class="cookie-domain" value="${esc(data.domain || '')}" placeholder="example.org"></label>
-      <label>Cookie Jar<input type="text" class="cookie-path" value="${esc(data.cookie_jar || '')}" placeholder="<config-dir>/cookies/example.txt"></label>
-      <label>Credfile<input type="text" class="cookie-cred" value="${esc(data.credfile || '')}" placeholder="<config-dir>/credentials/example.txt"></label>
     </div>
     <div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-cookie-remove">Remove</button></div>
   </div>`;
@@ -514,8 +512,6 @@ function collectCookieConfigs() {
     if (!domain) return;
     list.push({
       domain,
-      cookie_jar: block.querySelector('.cookie-path')?.value.trim(),
-      credfile: block.querySelector('.cookie-cred')?.value.trim(),
     });
   });
   return list;

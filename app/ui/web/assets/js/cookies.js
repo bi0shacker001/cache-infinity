@@ -49,15 +49,9 @@ function bindCookiesDelegatedEvents() {
     const action = target.dataset.action;
     const domain = target.dataset.domain;
 
-    if (action === 'cookie-refresh' && domain) {
-      event.preventDefault();
-      refreshCookie(domain);
-    } else if (action === 'cookie-upload' && domain) {
+    if (action === 'cookie-upload' && domain) {
       event.preventDefault();
       showCookieUpload(domain);
-    } else if (action === 'cookie-credentials' && domain) {
-      event.preventDefault();
-      showCredentialDialog(domain);
     }
   });
 }
@@ -77,9 +71,7 @@ async function loadCookies() {
           <div class="cookie-header">
             <div class="cookie-domain">${domain}</div>
             <div class="cookie-actions">
-              ${c.supports_generation ? `<button class="btn btn-secondary btn-small" type="button" data-action="cookie-credentials" data-domain="${domain}">Update Credentials</button>` : ''}
               <button class="btn btn-secondary btn-small" type="button" data-action="cookie-upload" data-domain="${domain}">Upload cookies.txt</button>
-              ${c.configured ? `<button class="btn btn-primary btn-small" type="button" data-action="cookie-refresh" data-domain="${domain}">Refresh</button>` : ''}
             </div>
           </div>
           <div class="cookie-info">
@@ -98,44 +90,11 @@ async function loadCookies() {
   }
 }
 
-async function refreshCookie(domain) {
-  const payload = { domain: domain };
-  try {
-    await fetchJSON('cookies/refresh', { method: 'POST', body: JSON.stringify(payload) });
-    alert('Cookie refresh triggered.');
-    loadCookies();
-  } catch (err) {
-    alert('Error: ' + err.message);
-  }
-}
-
-function showCredentialDialog(domain) {
-  const username = prompt(`Enter username for ${domain}:`);
-  if (!username) return;
-  const password = prompt(`Enter password for ${domain}:`);
-  if (!password) return;
-  updateCookieCredentials(domain, username, password);
-}
-
-async function updateCookieCredentials(domain, username, password) {
-  const payload = { domain, username, password };
-  try {
-    await fetchJSON('cookies/credentials', { method: 'POST', body: JSON.stringify(payload) });
-    alert('Credentials updated.');
-    loadCookies();
-  } catch (err) {
-    alert('Error: ' + err.message);
-  }
-}
-
 async function addCookieDomain() {
   const domainInput = document.getElementById('cookie-new-domain');
   const jarInput = document.getElementById('cookie-new-jar');
-  const credInput = document.getElementById('cookie-new-cred');
   const domain = domainInput.value.trim();
-  const jarPath = jarInput.value.trim();
-  const credPath = credInput.value.trim();
-  const credfile = document.getElementById('cookie-new-credfile').checked;
+  const cookieContent = jarInput.value.trim();
 
   if (!domain) {
     alert('Enter a domain name');
@@ -147,16 +106,12 @@ async function addCookieDomain() {
       method: 'POST',
       body: JSON.stringify({
         domain,
-        credfile,
-        cookie_jar: jarPath || null,
-        credfile_path: credPath || null,
+        cookie_jar: cookieContent || null,
       }),
     });
 
     domainInput.value = '';
     jarInput.value = '';
-    credInput.value = '';
-    document.getElementById('cookie-new-credfile').checked = false;
     loadCookies();
   } catch (err) {
     alert('Error: ' + err.message);

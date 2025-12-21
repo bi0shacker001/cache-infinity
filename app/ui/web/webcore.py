@@ -393,18 +393,6 @@ class WebUIApp:
                 return self.handlers['cookies'].handle_cookie_upload(environ, start_response)
             return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
 
-        if path == "/cookies/credentials" and method == "POST":
-            _LOGGER.debug("Handling cookie credentials update")
-            if 'cookies' in self.handlers:
-                return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_credentials)
-            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
-
-        if path == "/cookies/refresh" and method == "POST":
-            _LOGGER.debug("Handling cookie refresh")
-            if 'cookies' in self.handlers:
-                return self._handle_json_request(environ, start_response, self.handlers['cookies'].handle_cookie_refresh)
-            return self._json_error(start_response, "Cookies handler not available", status="500 Internal Server Error")
-
         if path == "/cookies/domain" and method == "POST":
             _LOGGER.debug("Handling cookie domain addition")
             if 'cookies' in self.handlers:
@@ -952,40 +940,14 @@ class CookiesHandlers:
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
 
-    def handle_cookie_credentials(self, payload: dict[str, object], start_response):
-        """Handle cookie credentials update."""
-        domain = payload.get("domain")
-        username = payload.get("username")
-        password = payload.get("password")
-        if not isinstance(domain, str) or not isinstance(username, str) or not isinstance(password, str):
-            return self._json_error(start_response, "domain, username, and password required", status="400 Bad Request")
-        try:
-            self.management.update_cookie_credentials(domain, username, password)
-            return self._json_response(start_response, {"status": "ok"})
-        except Exception as exc:
-            return self._json_error(start_response, str(exc), status="400 Bad Request")
-
-    def handle_cookie_refresh(self, payload: dict[str, object], start_response):
-        """Handle cookie regeneration."""
-        domain = payload.get("domain")
-        if not isinstance(domain, str):
-            return self._json_error(start_response, "domain required", status="400 Bad Request")
-        try:
-            self.management.regenerate_cookie(domain)
-            return self._json_response(start_response, {"status": "ok"})
-        except Exception as exc:
-            return self._json_error(start_response, str(exc), status="400 Bad Request")
-
     def handle_cookie_domain_add(self, payload: dict[str, object], start_response):
         """Handle adding a new cookie domain."""
         domain = payload.get("domain")
-        credfile = bool(payload.get("credfile", False))
         cookie_jar = payload.get("cookie_jar")
-        credfile_path = payload.get("credfile_path")
         if not isinstance(domain, str):
             return self._json_error(start_response, "domain required", status="400 Bad Request")
         try:
-            self.management.add_cookie_domain(domain, credfile=credfile, cookie_jar=cookie_jar, credfile_path=credfile_path)
+            self.management.add_cookie_domain(domain, cookie_jar=cookie_jar)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")

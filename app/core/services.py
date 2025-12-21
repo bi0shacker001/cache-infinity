@@ -201,11 +201,7 @@ class DatabaseService(BaseService):
         self.database_manager.ensure_indexer_tables()
 
     def start(self) -> None:
-        if not self.datadir_registry or not self.staging:
-            return
-        for storage in self.datadir_registry.storages.values():
-            storage.ensure_ready()
-        self.staging.ensure_ready()
+        return None
 
     def stop(self) -> None:
         if self.database_manager:
@@ -237,7 +233,11 @@ class BackupService(BaseService):
                     _LOGGER.warning("Bootstrap import warning: %s", warning)
 
     def start(self) -> None:
-        return None
+        if not self.datadir_registry or not self.staging:
+            return
+        for storage in self.datadir_registry.storages.values():
+            storage.ensure_ready()
+        self.staging.ensure_ready()
 
     def stop(self) -> None:
         return None
@@ -299,7 +299,8 @@ class LoggingService(BaseService):
     def initialize(self, context: dict[str, Any]) -> None:
         config_service: ConfigManagerService = context["config"]
         log_level = context.get("log_level", "INFO")
-        log_file = config_service.settings.config_dir / "logs" / "cacheinfinity.log"
+        config_manager = ConfigurationManager(config_service.settings.config_dir)
+        log_file = config_manager.ensure_logs_dir() / "cacheinfinity.log"
         configure_logging(log_file, log_level)
 
     def start(self) -> None:
@@ -607,7 +608,7 @@ def _sync_database_state(
 
 
 def _build_checksum_catalog(settings: Settings, index_db: DatabaseManager) -> ChecksumCatalog:
-    checksum_catalog = ChecksumCatalog(settings.config_dir, index_db)
+    checksum_catalog = ChecksumCatalog(index_db)
     _LOGGER.debug("Initialized checksum catalog")
     return checksum_catalog
 

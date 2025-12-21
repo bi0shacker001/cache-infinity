@@ -17,19 +17,17 @@ class SQLiteBackend:
     It provides a clean interface for the database adapter to use.
     """
     
-    def __init__(self, config_dir: Path):
-        """Initialize SQLite backend with config directory.
+    def __init__(self, db_path: Path):
+        """Initialize SQLite backend with database path.
         
         Args:
-            config_dir: Configuration directory where cacheinfinity.db will be created
+            db_path: Path to the SQLite database file
         """
-        self._config_dir = config_dir
-        self._db_path = config_dir / "cacheinfinity.db"
+        self._db_path = db_path
         self._conn = None
         
     def connect(self):
         """Establish SQLite connection."""
-        self._config_dir.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         _logger.info(f"Connected to SQLite database at {self._db_path}")

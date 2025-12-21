@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings, Settings
+from storage.configuration import ConfigurationManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,14 +42,12 @@ class TLSAutomationService:
     def __init__(self, config_dir: Path, tls_settings: TLSSettings):
         self.config_dir = config_dir
         self.tls_settings = tls_settings
-        self.work_dir = config_dir / "tls"
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.certs_dir = self.work_dir / "certs"
-        self.certs_dir.mkdir(parents=True, exist_ok=True)
-        self.live_dir = self.work_dir / "live"
-        self.live_dir.mkdir(parents=True, exist_ok=True)
-        self.webroot_dir = self.work_dir / "webroot"
-        self.webroot_dir.mkdir(parents=True, exist_ok=True)
+        self.config_manager = ConfigurationManager(config_dir)
+        tls_dirs = self.config_manager.ensure_tls_dirs()
+        self.work_dir = tls_dirs["work_dir"]
+        self.certs_dir = tls_dirs["certs_dir"]
+        self.live_dir = tls_dirs["live_dir"]
+        self.webroot_dir = tls_dirs["webroot_dir"]
         
     def ensure_certbot_installed(self) -> bool:
         """Check if certbot is installed and available."""
@@ -177,7 +175,7 @@ class TLSAutomationService:
         
         # Handle credentials file
         if dns_settings.credentials_ini:
-            if not dns_settings.credentials_ini.exists():
+            if not self.config_manager.path_exists(dns_settings.credentials_ini):
                 raise ConfigError(f"DNS credentials file not found: {dns_settings.credentials_ini}")
             cmd.extend(["--dns-credentials", str(dns_settings.credentials_ini)])
         
@@ -248,14 +246,14 @@ class TLSAutomationService:
         """Get existing certificate for the given domains."""
         cert_name = self._get_cert_name(domains)
         cert_dir = self.live_dir / cert_name
-        
-        if not cert_dir.exists():
+
+        if not self.config_manager.path_exists(cert_dir):
             return None
         
         cert_path = cert_dir / "fullchain.pem"
         key_path = cert_dir / "privkey.pem"
-        
-        if not cert_path.exists() or not key_path.exists():
+
+        if not self.config_manager.path_exists(cert_path) or not self.config_manager.path_exists(key_path):
             return None
         
         # Get certificate info
@@ -358,12 +356,12 @@ class TLSAutomationService:
         try:
             # Remove old certificate directories
             current_time = time.time()
-            for cert_dir in self.live_dir.iterdir():
-                if cert_dir.is_dir():
-                    age_days = (current_time - cert_dir.stat().st_mtime) / (24 * 3600)
+            for cert_dir in self.config_manager.iterdir(self.live_dir):
+                if self.config_manager.is_dir(cert_dir):
+                    age_days = (current_time - self.config_manager.stat(cert_dir).st_mtime) / (24 * 3600)
                     if age_days > keep_days:
                         _LOGGER.debug("Removing old certificate directory: %s", cert_dir)
-                        shutil.rmtree(cert_dir)
+                        self.config_manager.remove_tree(cert_dir)
         except Exception as e:
             _LOGGER.warning("Failed to cleanup old certificates: %s", e)
 

@@ -158,16 +158,7 @@ def load_cachelinks(
                 )
 
     for path in mount_tree_paths:
-        if not path.exists():
-            continue
-        try:
-            import yaml
-            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:
-            _logger.warning("Failed to load cachelinks from %s: %s", path, exc)
-            continue
-        _logger.info("Loading cachelinks from %s", path)
-        process_doc(doc, path)
+        _logger.warning("Cachelink file loading is disabled; ignoring %s", path)
 
     if inline_docs:
         source_path = inline_source or Path("<inline>")

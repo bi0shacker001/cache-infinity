@@ -163,17 +163,11 @@ class CookieJarDefinition:
     
     domain: str
     cookie_content: str = ""
-    cookie_jar: Optional[Path] = None
-    credfile: Optional[Path] = None
     
     def validate(self) -> None:
         """Validate the cookie jar definition."""
         if not self.domain:
             raise CredentialError("Cookie jar domain is required")
-        if not (self.cookie_content or self.cookie_jar):
-            raise CredentialError("Cookie jar content or path is required")
-        if self.cookie_jar and not self.cookie_jar.exists():
-            raise CredentialError(f"Cookie jar file not found: {self.cookie_jar}")
 
 
 @dataclass
