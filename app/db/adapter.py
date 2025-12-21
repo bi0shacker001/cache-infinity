@@ -1,10 +1,9 @@
-"""Shared database adapter for SQLite, PostgreSQL, and Redis backends.
+"""Shared database adapter for SQLite and PostgreSQL backends.
 
 This module centralizes the small abstraction layer used by CacheInfinity to
-support both SQLite (default) and PostgreSQL connections, with optional Redis
-caching for file metadata and checksums. It wraps the minimal SQL dialect
+support both SQLite (default) and PostgreSQL connections. It wraps the minimal SQL dialect
 differences (parameter style, AUTOINCREMENT syntax) and provides helper methods
-for executing queries and fetching rows as dicts, plus Redis caching operations.
+for executing queries and fetching rows as dicts.
 """
 
 from __future__ import annotations
@@ -17,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from core.errors import ConfigError
+from .backends.mariadb import MariaDBBackend
 from .backends.postgresql import PostgreSQLBackend
-from .backends.redis import RedisBackend
 from .backends.sqlite import SQLiteBackend
 
 _HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
@@ -80,12 +79,11 @@ def _verify_password_hash(password: str, stored_hash: str) -> bool:
 
 
 class DBAdapter:
-    """Lightweight helper that hides SQL dialect differences and provides Redis caching.
+    """Lightweight helper that hides SQL dialect differences.
 
     The adapter exposes a SQLite-like API (`?` parameters, AUTOINCREMENT
     semantics) so the rest of the code can remain blissfully unaware of the
-    underlying engine. It also provides Redis caching for file metadata and
-    checksums when Redis is enabled.
+    underlying engine.
     """
 
     def __init__(self, settings: 'DatabaseSettings'):
@@ -93,10 +91,6 @@ class DBAdapter:
         engine = settings.engine or "sqlite"
         self.engine = engine
         self._lock = threading.RLock()
-        
-        # Redis support
-        self._redis_enabled = getattr(settings, 'redis_enabled', False)
-        self._redis_backend: RedisBackend | None = None
         
         # Initialize SQL backend
         if engine == "sqlite":
@@ -106,10 +100,16 @@ class DBAdapter:
             self._backend = SQLiteBackend(sqlite_path)
             self._backend.connect()
         elif engine == "postgres":
-            dsn = settings.postgres_dsn
+            dsn = settings.database_url
             if not dsn:
-                raise ConfigError("postgres engine requires postgres_dsn")
+                raise ConfigError("postgres engine requires database_url")
             self._backend = PostgreSQLBackend(dsn)
+            self._backend.connect()
+        elif engine == "mariadb":
+            dsn = settings.database_url
+            if not dsn:
+                raise ConfigError("mariadb engine requires database_url")
+            self._backend = MariaDBBackend(dsn)
             self._backend.connect()
         else:
             raise ConfigError(f"Unsupported database engine '{engine}'")
@@ -117,20 +117,7 @@ class DBAdapter:
         # Initialize authentication tables
         self._init_auth_tables()
         
-        # Initialize Redis if enabled
-        if self._redis_enabled:
-            self._init_redis()
 
-    def _init_redis(self):
-        """Initialize Redis connection for caching."""
-        if not self._redis_enabled:
-            return
-
-        redis_url = getattr(self._settings, "redis_url", "redis://localhost:6379/0")
-        self._redis_backend = RedisBackend(redis_url)
-        if not self._redis_backend.is_connected():
-            self._redis_enabled = False
-            self._redis_backend = None
 
     # Basic execution helpers -------------------------------------------
     def execute(self, sql: str, params: Sequence[Any] | None = None):
@@ -152,29 +139,8 @@ class DBAdapter:
         self._backend.rollback()
 
     def close(self) -> None:
-        # Close Redis connection
-        if self._redis_backend:
-            self._redis_backend.close()
-            self._redis_backend = None
-        
         self._backend.close()
 
-    # Operation routing helpers -------------------------------------------
-    def should_use_redis(self, operation_type: str) -> bool:
-        """Determine if Redis should be used for the given operation type."""
-        if not self._redis_enabled or not self._redis_backend:
-            return False
-        
-        # Operations that should use Redis when available
-        redis_operations = {
-            'file_metadata',
-            'checksums',
-            'indexing_data',
-            'cache_state',
-            'session_data'
-        }
-        
-        return operation_type in redis_operations
 
     def health_check(self) -> bool:
         """Perform a comprehensive health check on the database connection."""
@@ -185,74 +151,18 @@ class DBAdapter:
             return False
 
     def get_pool_stats(self) -> dict:
-        """Get connection pool statistics (PostgreSQL only)."""
-        return {"engine": self.engine, "pool_size": 0, "available_connections": 0, "in_use_connections": 0}
+        """Get connection pool statistics."""
+        try:
+            return self._backend.get_pool_stats()
+        except Exception:
+            return {"engine": self.engine, "pool_size": 0, "available_connections": 0, "in_use_connections": 0}
 
     def close_idle_connections(self) -> None:
         """Close idle connections in the pool to prevent resource leaks."""
         return
 
-    # Redis-specific operations -------------------------------------------
-    def redis_set(self, key: str, value: str, ttl: int = None) -> bool:
-        """Set a value in Redis with optional TTL."""
-        if not self._redis_enabled or not self._redis_backend:
-            return False
-        
-        return self._redis_backend.set_value(key, value, ttl=ttl)
 
-    def redis_get(self, key: str) -> str | None:
-        """Get a value from Redis."""
-        if not self._redis_enabled or not self._redis_backend:
-            return None
-        return self._redis_backend.get_value(key)
 
-    def redis_delete(self, key: str) -> bool:
-        """Delete a key from Redis."""
-        if not self._redis_enabled or not self._redis_backend:
-            return False
-        return self._redis_backend.delete_value(key)
-
-    def redis_exists(self, key: str) -> bool:
-        """Check if a key exists in Redis."""
-        if not self._redis_enabled or not self._redis_backend:
-            return False
-        return self._redis_backend.exists(key)
-
-    def redis_keys(self, pattern: str) -> list[str]:
-        """Get keys matching a pattern from Redis."""
-        if not self._redis_enabled or not self._redis_backend:
-            return []
-        return self._redis_backend.keys(pattern)
-
-    def redis_flushdb(self) -> bool:
-        """Flush the Redis database."""
-        if not self._redis_enabled or not self._redis_backend:
-            return False
-        return self._redis_backend.flushdb()
-
-    # Sync operations -----------------------------------------------------
-    def sync_redis_to_sql(self) -> bool:
-        """Sync Redis data to SQL database."""
-        if not self._redis_enabled or not self._redis_backend:
-            return True  # Nothing to sync
-        
-        try:
-            # This is a placeholder for the actual sync logic
-            # In a real implementation, this would:
-            # 1. Get all keys from Redis
-            # 2. For each key, get the value and sync to appropriate SQL table
-            # 3. Handle conflicts and data consistency
-            import logging
-            logging.getLogger(__name__).info("Redis to SQL sync completed")
-            return True
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).error("Redis to SQL sync failed: %s", exc)
-            return False
-
-    def is_redis_enabled(self) -> bool:
-        """Check if Redis is enabled and available."""
-        return self._redis_enabled and self._redis_backend is not None
 
     # Internal helpers --------------------------------------------------
     def _convert_sql(self, sql: str) -> str:

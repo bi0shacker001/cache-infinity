@@ -115,18 +115,16 @@ class DatabaseSettings:
     config_dir: Optional[Path] = None
     sqlite_path: Optional[Path] = None
     postgres_dsn: str = ""
-    redis_enabled: bool = False
-    redis_url: str = "redis://localhost:6379/0"
     db_type: Optional[str] = None
     database_url: Optional[str] = None
     db_user: Optional[str] = None
     db_password: Optional[str] = None
 
     def validate(self) -> None:
-        if self.engine not in ("sqlite", "postgres"):
+        if self.engine not in ("sqlite", "postgres", "mariadb"):
             raise ConfigError(f"Invalid database engine: {self.engine}")
-        if self.engine == "postgres" and not self.postgres_dsn:
-            raise ConfigError("PostgreSQL requires postgres_dsn")
+        if self.engine in ("postgres", "mariadb") and not self.database_url:
+            raise ConfigError(f"{self.engine.title()} requires database_url")
         if self.engine == "sqlite" and self.sqlite_path is None:
             self.sqlite_path = self.config_dir / "cacheinfinity.db" if self.config_dir else Path("cacheinfinity.db")
 
@@ -186,6 +184,17 @@ def load_database_settings(config_dir: Path, args, env) -> DatabaseSettings:
             db_password=db_password,
         )
 
+    if normalized_db_type in ("mariadb", "mariadb"):
+        return DatabaseSettings(
+            engine="mariadb",
+            config_dir=config_dir,
+            postgres_dsn="",  # Keep for backward compatibility
+            db_type="mariadb",
+            database_url=database_url,
+            db_user=db_user,
+            db_password=db_password,
+        )
+
     if normalized_db_type not in ("sqlite", ""):
         normalized_db_type = "sqlite"
 
@@ -224,10 +233,6 @@ def load_bootstrap_data(config_dir: Path, bootstrap_path: Path | None) -> dict:
         return {}
     config_manager = ConfigurationManager(config_dir)
     return config_manager.read_yaml(bootstrap_path)
-        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_time ON indexing_log(timestamp)")
-        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_cachelink ON indexed_entries(cachelink_id)")
-        self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexed_entries_path ON indexed_entries(relative_path)")
-        self.adapter.commit()
 
     def get_indexing_cache(self, target_id: str) -> dict[str, object] | None:
         return self.adapter.fetchone(

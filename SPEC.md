@@ -294,7 +294,6 @@ Indexing follows a tiered, access-aware policy:
 
   * PostgreSQL connectivity is provided via CLI/env (or `config.yml` as last resort).
   * Docker Compose deployments should include a dedicated PostgreSQL container. The WebDAV service points to it via `CACHEINFINITY_DATABASE_URL` and does not expose the DB port publicly.
-* Optional: Redis may be enabled as a performance cache for index metadata; the SQL database remains authoritative.
 * On startup the service must auto-create/upgrade required tables (targets, files, events, access logs).
 
 ## 10. Read-through caching
@@ -450,7 +449,6 @@ Top-level:
   * `app/db/backends/`:
     * `postgresql.py`: PostgreSQL connection logic with pooling
     * `sqlite.py`: SQLite connection logic (development/testing)
-    * `redis.py`: optional Redis caching layer for performance optimization
 * `app/hosting/`: end-user interface implementations
   * `browser_interface.py`: user-facing browser interface (served alongside WebDAV port)
   * `frontend.py`: interface adapter (uniform interface for all frontends)

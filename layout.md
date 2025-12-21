@@ -18,7 +18,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - schema.py #File. Active database schema and query logic. Used by dbmanage.py to format and validate DB data. -- CAN ONLY BE IMPORTED BY: dbmanage.py
     backends: #Folder. Database backend implementations; implement HOW data is written/read.
       - postgresql.py #File. PostgreSQL database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
-      - redis.py #File. Redis caching layer for performance optimization -- CAN ONLY BE IMPORTED BY: db.adapter
+      - mariadb.py #File. MariaDB database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
       - sqlite.py #File. SQLite database connection logic for development and testing -- CAN ONLY BE IMPORTED BY: db.adapter --NOTHING ELSE CAN IMPORT (systemx): sqlite
   hosting: #Folder. End user interface implementations
     - browser_interface.py #File. User-facing browser interface for CacheInfinity operations -- CAN ONLY BE IMPORTED BY: core.services

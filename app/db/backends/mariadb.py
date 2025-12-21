@@ -1,4 +1,4 @@
-"""PostgreSQL backend implementation for CacheInfinity database operations."""
+"""MariaDB backend implementation for CacheInfinity database operations."""
 
 from __future__ import annotations
 
@@ -9,39 +9,68 @@ from typing import Any, Optional, Iterable
 _logger = logging.getLogger(__name__)
 
 
-class PostgreSQLBackend:
-    """PostgreSQL backend implementation.
+class MariaDBBackend:
+    """MariaDB backend implementation.
     
-    This class handles all PostgreSQL-specific database operations.
+    This class handles all MariaDB-specific database operations.
     It provides a clean interface for the database adapter to use.
     """
     
     def __init__(self, dsn: str):
-        """Initialize PostgreSQL backend with connection string.
+        """Initialize MariaDB backend with connection string.
         
         Args:
-            dsn: PostgreSQL connection string (Data Source Name)
+            dsn: MariaDB connection string (Data Source Name)
         """
         self._dsn = dsn
         self._conn = None
         self._lock = threading.RLock()
         
     def connect(self):
-        """Establish PostgreSQL connection."""
+        """Establish MariaDB connection."""
         if not self._dsn:
-            raise ValueError("PostgreSQL DSN is required")
+            raise ValueError("MariaDB DSN is required")
             
         try:
-            import psycopg
+            import mariadb
         except ImportError as exc:
-            raise ImportError("psycopg package is required for PostgreSQL support") from exc
+            raise ImportError("mariadb package is required for MariaDB support") from exc
             
-        self._conn = psycopg.connect(self._dsn)
-        self._conn.autocommit = False
-        _logger.info("Connected to PostgreSQL database")
-        
+        try:
+            # Parse DSN to extract connection parameters
+            import urllib.parse
+            parsed = urllib.parse.urlparse(self._dsn)
+            
+            # Extract connection parameters from DSN
+            params = {}
+            if parsed.username:
+                params['user'] = parsed.username
+            if parsed.password:
+                params['password'] = parsed.password
+            if parsed.hostname:
+                params['host'] = parsed.hostname
+            if parsed.port:
+                params['port'] = parsed.port
+            if parsed.path and len(parsed.path) > 1:
+                params['database'] = parsed.path[1:]  # Remove leading slash
+            
+            # Handle query parameters
+            if parsed.query:
+                query_params = urllib.parse.parse_qs(parsed.query)
+                for key, value in query_params.items():
+                    if value and len(value) > 0:
+                        params[key] = value[0]
+            
+            self._conn = mariadb.connect(**params)
+            self._conn.autocommit = False
+            _logger.info("Connected to MariaDB database")
+            
+        except Exception as exc:
+            _logger.error(f"Failed to connect to MariaDB: {exc}")
+            raise
+    
     def close(self):
-        """Close PostgreSQL connection."""
+        """Close MariaDB connection."""
         if self._conn:
             self._conn.close()
             self._conn = None
@@ -95,7 +124,7 @@ class PostgreSQLBackend:
             return None
         
         # Convert to dict using column names
-        columns = [col.name for col in description]
+        columns = [col[0] for col in description]
         return {col: value for col, value in zip(columns, row)}
         
     def fetchall(self, sql: str, params: tuple = ()):
@@ -114,7 +143,7 @@ class PostgreSQLBackend:
         cursor.close()
         
         # Convert to list of dicts using column names
-        columns = [col.name for col in description]
+        columns = [col[0] for col in description]
         return [{col: value for col, value in zip(columns, row)} for row in rows]
         
     def commit(self):
@@ -128,7 +157,7 @@ class PostgreSQLBackend:
             self._conn.rollback()
             
     def health_check(self) -> bool:
-        """Perform a health check on the PostgreSQL connection.
+        """Perform a health check on the MariaDB connection.
         
         Returns:
             True if connection is healthy, False otherwise
@@ -136,7 +165,9 @@ class PostgreSQLBackend:
         try:
             if not self._conn:
                 return False
-            self._conn.execute("SELECT 1")
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
             return True
         except Exception:
             return False
@@ -151,18 +182,18 @@ class PostgreSQLBackend:
             if not self._conn:
                 return {"connected": False, "pool_size": 0, "available_connections": 0, "in_use_connections": 0}
             
-            # For psycopg3, we don't have built-in pool stats, so we return basic info
+            # For MariaDB connector, we don't have built-in pool stats, so we return basic info
             return {
                 "connected": True,
-                "pool_size": 0,  # psycopg3 doesn't expose pool size directly
+                "pool_size": 0,  # MariaDB connector doesn't expose pool size directly
                 "available_connections": 0,
                 "in_use_connections": 0,
-                "connection_status": "active" if self._conn.closed == 0 else "closed"
+                "connection_status": "active" if self._conn.open else "closed"
             }
         except Exception:
             return {"connected": False, "pool_size": 0, "available_connections": 0, "in_use_connections": 0}
 
     @property
     def dsn(self) -> str:
-        """Get the PostgreSQL connection string."""
+        """Get the MariaDB connection string."""
         return self._dsn
