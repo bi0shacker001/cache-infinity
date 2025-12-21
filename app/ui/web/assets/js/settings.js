@@ -105,6 +105,7 @@ function renderSettingsDetail() {
   const tlsHttp = tls.http || {};
   const tlsDns = tls.dns01 || {};
   const db = detail.database || {};
+  const rclone = detail.rclone || {};
   const indexing = detail.indexing || {};
   const weights = indexing.score_weights || {};
   const auth = detail.auth || {};
@@ -140,6 +141,26 @@ function renderSettingsDetail() {
         </label>
         <label>One ZIP at a Time?
           <input type="checkbox" id="limit-one-zip" ${limits.one_zip_cache_at_a_time ? 'checked' : ''}>
+        </label>
+      </div>
+    </div>
+    <div class="settings-block">
+      <h4>Rclone</h4>
+      <div class="form-grid">
+        <label>Enabled
+          <input type="checkbox" id="rclone-enabled" ${rclone.enabled ? 'checked' : ''}>
+        </label>
+        <label>Config Path
+          <input type="text" id="rclone-config-path" value="${esc(rclone.config_path || '')}" placeholder="/config/rclone.conf">
+        </label>
+        <label>RC URL
+          <input type="text" id="rclone-rc-url" value="${esc(rclone.rc_url || '')}" placeholder="http://127.0.0.1:5572">
+        </label>
+        <label>RC User
+          <input type="text" id="rclone-rc-user" value="${esc(rclone.rc_user || '')}">
+        </label>
+        <label>RC Pass
+          <input type="password" id="rclone-rc-pass" value="${esc(rclone.rc_pass || '')}">
         </label>
       </div>
     </div>
@@ -452,6 +473,13 @@ function collectSettingsDetail() {
     limits: {
       max_zip_total_gb: parseNumber(document.getElementById('limit-zip').value),
       one_zip_cache_at_a_time: document.getElementById('limit-one-zip').checked,
+    },
+    rclone: {
+      enabled: document.getElementById('rclone-enabled').checked,
+      config_path: document.getElementById('rclone-config-path').value.trim(),
+      rc_url: document.getElementById('rclone-rc-url').value.trim(),
+      rc_user: document.getElementById('rclone-rc-user').value.trim(),
+      rc_pass: document.getElementById('rclone-rc-pass').value.trim(),
     },
     cookies: collectCookieConfigs(),
     shares: collectShareConfigs(),

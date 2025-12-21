@@ -5,12 +5,14 @@ from __future__ import annotations
 import io
 import hashlib
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urljoin, urlparse, parse_qs
 from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 
 from auth.credentials import CookieJarDefinition
 from core.config import IndexingSettings
@@ -56,6 +58,49 @@ def _rclone_spec(url: str) -> str:
     if url.startswith("rclone:"):
         return url[len("rclone:"):]
     return url
+
+
+def _normalize_url_handler(handler_value: str | None) -> str:
+    if not handler_value:
+        return "auto"
+    value = str(handler_value).strip().lower()
+    if value in ("auto", "default"):
+        return "auto"
+    if value in ("rclone", "rclone-python"):
+        return "rclone"
+    if value in ("http", "https", "ftp", "ftps"):
+        return value
+    return "auto"
+
+
+def _resolve_url_handler(url: str, handler_value: str | None) -> str:
+    handler = _normalize_url_handler(handler_value)
+    if handler != "auto":
+        return handler
+    if _is_rclone_url(url):
+        return "rclone"
+    if url.startswith("ftp"):
+        return "ftp"
+    if url.startswith("http"):
+        return "http"
+    return "auto"
+
+
+@contextmanager
+def _rclone_env(config_path: Optional[Path]):
+    if not config_path:
+        yield
+        return
+    key = "RCLONE_CONFIG"
+    previous = os.environ.get(key)
+    os.environ[key] = str(config_path)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
@@ -109,9 +154,11 @@ class _AnchorHTMLParser(HTMLParser):
 class RemoteListingFetcher:
     """Fetcher for remote directory listings with support for multiple protocols."""
     
-    def __init__(self):
+    def __init__(self, rclone_config_path: Optional[Path] = None, rclone_enabled: bool = False):
         """Initialize remote listing fetcher."""
         self._pycurl = _import_pycurl()
+        self._rclone_config_path = rclone_config_path
+        self._rclone_enabled = rclone_enabled
         _logger.debug("RemoteListingFetcher initialized")
 
     def _fetch_bytes(
@@ -169,6 +216,7 @@ class RemoteListingFetcher:
         *,
         cached_etag: str | None = None,
         cached_modified: str | None = None,
+        url_handler: str | None = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch remote directory listing.
         
@@ -180,20 +228,19 @@ class RemoteListingFetcher:
             Tuple of (entries list, metadata dict)
         """
         try:
-            # Determine protocol and fetch accordingly
-            if _is_rclone_url(url):
+            handler = _resolve_url_handler(url, url_handler)
+            if handler == "rclone":
                 return self._fetch_rclone_listing(url, parse_entries)
-            if url.startswith('http'):
+            if handler in ("http", "https") or url.startswith('http'):
                 return self._fetch_http_listing(
                     url,
                     parse_entries,
                     cached_etag=cached_etag,
                     cached_modified=cached_modified,
                 )
-            elif url.startswith('ftp'):
+            if handler in ("ftp", "ftps") or url.startswith('ftp'):
                 return self._fetch_ftp_listing(url, parse_entries)
-            else:
-                raise ValueError(f"Unsupported protocol for URL: {url}")
+            raise ValueError(f"Unsupported protocol for URL: {url}")
                 
         except Exception as exc:
             _logger.error(f"Failed to fetch listing from {url}: {exc}")
@@ -258,9 +305,10 @@ class RemoteListingFetcher:
         try:
             if not parse_entries:
                 return [], {"url": url, "status": "ok", "source": "rclone"}
-            rclone = _import_rclone()
-            spec = _rclone_spec(url)
-            rows = rclone.lsjson(spec)
+            with _rclone_env(self._rclone_config_path if self._rclone_enabled else None):
+                rclone = _import_rclone()
+                spec = _rclone_spec(url)
+                rows = rclone.lsjson(spec)
             entries: list[dict[str, Any]] = []
             for row in rows or []:
                 name = row.get("Name") or row.get("Path") or ""
@@ -346,6 +394,8 @@ class Indexer:
         cookie_jars: Dict[str, CookieJarDefinition],
         db_manager: DatabaseManager | None = None,
         cachelinks: CachelinkIndex | None = None,
+        rclone_config_path: Optional[Path] = None,
+        rclone_enabled: bool = False,
     ):
         """Initialize indexer.
         
@@ -360,7 +410,10 @@ class Indexer:
         self.db_manager = db_manager
         self.cachelinks = cachelinks
         self._last_index_times: Dict[str, int] = {}
-        self._fetcher = RemoteListingFetcher()
+        self._fetcher = RemoteListingFetcher(
+            rclone_config_path=rclone_config_path,
+            rclone_enabled=rclone_enabled,
+        )
         _logger.debug("Indexer initialized")
         
     def should_reindex(self, target_id: str) -> bool:
@@ -461,8 +514,10 @@ class Indexer:
         try:
             descriptor = self._get_cachelink_descriptor(target_id)
             listing_url = url
+            url_handler = None
             if descriptor:
                 listing_url = descriptor.remote_listing_url
+                url_handler = descriptor.url_handler
             elif subfolder:
                 listing_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
 
@@ -477,6 +532,7 @@ class Indexer:
                 parse_entries=True,
                 cached_etag=cached_etag,
                 cached_modified=cached_modified,
+                url_handler=url_handler,
             )
 
             if metadata.get("status") == "not_modified":

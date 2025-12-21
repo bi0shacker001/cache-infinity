@@ -533,7 +533,11 @@ class CachelinkFileResource:
                 _logger.error("Could not build remote URL for %s", self.path)
                 return None
             staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
-            result = self.service.fetcher.download_file(remote_url, staging_path)
+            result = self.service.fetcher.download_file(
+                remote_url,
+                staging_path,
+                url_handler=self.descriptor.url_handler,
+            )
             if not result.success:
                 _logger.error("Failed to download %s: %s", self.path, result.error_message)
                 self._mark_reindex_on_failure(result.error_message or "")
@@ -653,7 +657,11 @@ class CachelinkFileResource:
             return self._download_single_file(datadir_path)
 
         staging_zip = self.service.staging.reserve_tempfile("zip")
-        result = self.service.fetcher.download_file(remote_zip_url, staging_zip)
+        result = self.service.fetcher.download_file(
+            remote_zip_url,
+            staging_zip,
+            url_handler=self.descriptor.url_handler,
+        )
         if not result.success:
             lock.release()
             _logger.error("Failed to download zip %s: %s", remote_zip_url, result.error_message)
@@ -731,7 +739,11 @@ class CachelinkFileResource:
         if not remote_url:
             return None
         staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
-        result = self.service.fetcher.download_file(remote_url, staging_path)
+        result = self.service.fetcher.download_file(
+            remote_url,
+            staging_path,
+            url_handler=self.descriptor.url_handler,
+        )
         if not result.success:
             _logger.error("Failed to download %s: %s", self.path, result.error_message)
             self._mark_reindex_on_failure(result.error_message or "")

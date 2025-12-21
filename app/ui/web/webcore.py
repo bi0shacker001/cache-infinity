@@ -787,6 +787,7 @@ class CachelinksHandlers:
                 name=payload.get("name"),
                 url=payload.get("url"),
                 subfolder=payload.get("subfolder", "/"),
+                url_handler=payload.get("url_handler"),
             )
             _LOGGER.debug("Cachelink creation successful")
             return self._json_response(start_response, snapshot)
@@ -799,10 +800,11 @@ class CachelinksHandlers:
         canonical_id = payload.get("canonical_id")
         url = payload.get("url")
         subfolder = payload.get("subfolder", "/")
+        url_handler = payload.get("url_handler")
         if not isinstance(canonical_id, str) or not isinstance(url, str):
             return self._json_error(start_response, "canonical_id and url required", status="400 Bad Request")
         try:
-            self.management.update_cachelink(canonical_id, url=url, subfolder=subfolder)
+            self.management.update_cachelink(canonical_id, url=url, subfolder=subfolder, url_handler=url_handler)
             return self._json_response(start_response, {"status": "ok"})
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")
@@ -811,10 +813,11 @@ class CachelinksHandlers:
         """Handle cachelink preview."""
         url = payload.get("url")
         subfolder = payload.get("subfolder", "/")
+        url_handler = payload.get("url_handler")
         if not isinstance(url, str):
             return self._json_error(start_response, "url required", status="400 Bad Request")
         try:
-            preview = self.management.preview_cachelink(url, subfolder=subfolder)
+            preview = self.management.preview_cachelink(url, subfolder=subfolder, url_handler=url_handler)
             return self._json_response(start_response, preview)
         except Exception as exc:
             return self._json_error(start_response, str(exc), status="400 Bad Request")

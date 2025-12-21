@@ -22,6 +22,9 @@ import signal
 import socket
 import tempfile
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -104,6 +107,38 @@ class ManagementLayer:
         except KeyError as e:
             logger.error("Failed to get system status: %s", e, exc_info=True)
             raise
+
+    # Rclone control -------------------------------------------------
+    def rclone_list_remotes(self) -> Dict[str, Any]:
+        """List rclone remotes via rclone rc."""
+        return self._rclone_rc("config/listremotes")
+
+    def _rclone_rc(self, command: str, payload: Optional[dict] = None) -> Dict[str, Any]:
+        settings = self.service.settings.rclone
+        if not settings.enabled:
+            raise RuntimeError("Rclone is disabled")
+        if not settings.rc_url:
+            raise RuntimeError("Rclone rc_url is not configured")
+        url = settings.rc_url.rstrip("/") + "/" + command.lstrip("/")
+        data = json.dumps(payload or {}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if settings.rc_user or settings.rc_pass:
+            user = settings.rc_user or ""
+            password = settings.rc_pass or ""
+            token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Rclone rc failed: HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Rclone rc unavailable: {exc.reason}") from exc
+        try:
+            return json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return {"raw": body}
         except Exception as e:
             logger.error("Failed to get system status: %s", e, exc_info=True)
             raise
@@ -313,25 +348,35 @@ class LocalControlServer:
                     name=args.get("name"),
                     url=args.get("url"),
                     subfolder=args.get("subfolder", "/"),
+                    url_handler=args.get("url_handler"),
                 )
             if action == "update":
                 mgmt.update_cachelink(
                     args.get("canonical_id"),
                     url=args.get("url"),
                     subfolder=args.get("subfolder"),
+                    url_handler=args.get("url_handler"),
                 )
                 return {"status": "ok"}
             if action == "delete":
                 mgmt.delete_cachelink(args.get("canonical_id"))
                 return {"status": "ok"}
             if action == "preview":
-                return mgmt.preview_cachelink(args.get("url"), args.get("subfolder", "/"))
+                return mgmt.preview_cachelink(
+                    args.get("url"),
+                    args.get("subfolder", "/"),
+                    url_handler=args.get("url_handler"),
+                )
             if action == "folder-add":
                 mgmt.add_cachelink_folder(args.get("path"))
                 return {"status": "ok"}
             if action == "folder-delete":
                 mgmt.delete_cachelink_folder(args.get("path"))
                 return {"status": "ok"}
+
+        if command == "rclone":
+            if action == "remotes":
+                return mgmt.rclone_list_remotes()
 
         if command == "cookies":
             if action == "list":
@@ -726,7 +771,8 @@ class LocalControlServer:
         parent_path: str,
         name: str,
         url: str,
-        subfolder: str = "/"
+        subfolder: str = "/",
+        url_handler: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new cachelink."""
         try:
@@ -734,7 +780,8 @@ class LocalControlServer:
                 parent_path=parent_path,
                 name=name,
                 url=url,
-                subfolder=subfolder
+                subfolder=subfolder,
+                url_handler=url_handler,
             )
             return {"status": "success", "cachelink": result}
         except Exception as e:
@@ -745,12 +792,18 @@ class LocalControlServer:
         self,
         canonical_id: str,
         url: Optional[str] = None,
-        subfolder: Optional[str] = None
+        subfolder: Optional[str] = None,
+        url_handler: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update an existing cachelink."""
         try:
             if url:
-                self.service.update_cachelink_entry(canonical_id, url=url, subfolder=subfolder or "/")
+                self.service.update_cachelink_entry(
+                    canonical_id,
+                    url=url,
+                    subfolder=subfolder or "/",
+                    url_handler=url_handler,
+                )
             return {"status": "success", "message": f"Cachelink {canonical_id} updated"}
         except Exception as e:
             logger.error("Failed to update cachelink: %s", e)
@@ -786,11 +839,12 @@ class LocalControlServer:
     def preview_cachelink(
         self,
         url: str,
-        subfolder: str = "/"
+        subfolder: str = "/",
+        url_handler: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Preview a cachelink to see what would be indexed."""
         try:
-            return self.service.preview_cachelink(url, subfolder)
+            return self.service.preview_cachelink(url, subfolder, url_handler=url_handler)
         except Exception as e:
             logger.error("Failed to preview cachelink: %s", e)
             raise

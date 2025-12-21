@@ -20,12 +20,13 @@ The project is inspired by Infinite Mac's **Infinite Drive** and adapts that exp
 * **Datadir storage:** one or more datadir roots. Datadir is the canonical storage for cached files and all user-authored content.
 * **Local staging:** local volume for downloads/extractions before copying to datadir.
 * **Indexer:** refreshes remote listings on a schedule.
-* **Fetcher:** **PycURL-based** downloader for HTTP(S) and FTP transfers.
+* **Fetcher:** **PycURL-based** downloader for HTTP(S) and FTP transfers, plus optional rclone-backed transfers for cloud remotes.
 * **Interfaces:**
 
   * **End-user interface** (`app/hosting/browser_interface.py`): browses and reads content.
   * **Admin WebUI** (`app/ui/web/*`): administrative configuration and maintenance actions.
-  * **Admin API** (`app/ui/api.py`): exposes **read-only** administrative and status information over the service port; authenticated using the admin user/permission model and implemented through the admin management layer.
+* **Admin API** (`app/ui/api.py`): exposes **read-only** administrative and status information over the service port; authenticated using the admin user/permission model and implemented through the admin management layer.
+  * Read-only endpoints include status, storage listings, cachelinks, and users.
 
 ## 3. Terminology
 
@@ -44,38 +45,37 @@ Note: when using SQLite, the database backend stores its state in a fixed file n
 
 CacheInfinity reads/writes configuration on disk only in these situations (no other runtime config files are used):
 
-* `config.yml` (optional last-resort DB connectivity)
+* `database.yml` (optional last-resort DB connectivity)
 * operator-supplied bootstrap YAML (`--bootstrap <path>`) and operator-requested bootstrap YAML backups/exports
 * TLS certificate/key files (when using manual TLS)
 * logs (always written to the `logs/` subfolder of the config directory; location not configurable)
 
 Note: the SQLite database file `cacheinfinity.db` inside the config directory is part of the SQLite database backend, not a configuration export file.
 
-1. **Startup (required):** determine database connectivity using the precedence chain **CLI flags → environment variables → `config.yml` (last resort)**.
+1. **Startup (required):** determine database connectivity using the precedence chain **CLI flags → environment variables → `database.yml` (last resort)**.
 2. **Startup (optional):** if `--bootstrap <path>` is provided, import a **bootstrap YAML** into the database after validation.
 3. **On-demand backup/export:** when an operator requests a backup, export durable configuration to disk in YAML format.
 4. **Logs:** write operational logs under `<config-dir>/logs/`.
 
 CacheInfinity does not watch YAML files on disk for changes during normal operation.
 
-### 4.2 `config.yml` (database access only)
+### 4.2 `database.yml` (database access only)
 
-`config.yml` is a last-resort input and contains **only** database access information (engine/type, URL/path, credentials).
+`database.yml` is a last-resort input and contains **only** database access information (engine/type, URL/path, credentials).
 
 Example:
 
 ```yaml
-config:
-  database:
-    engine: postgres          # postgres | sqlite
-    url: postgresql://user:pass@db/cacheinfinity
-    # For sqlite: omit `url`. SQLite is always <config-dir>/cacheinfinity.db (fixed).
+database:
+  engine: postgres          # postgres | sqlite
+  url: postgresql://user:pass@db/cacheinfinity
+  # For sqlite: omit `url`. SQLite is always <config-dir>/cacheinfinity.db (fixed).
 ```
 
 Rules:
 
-* `config.yml` must never contain cachelinks, share permissions, cookies, TLS settings, indexing budgets, or other operational settings.
-* Environment variables and CLI flags override `config.yml`.
+* `database.yml` must never contain cachelinks, share permissions, cookies, TLS settings, indexing budgets, or other operational settings.
+* Environment variables and CLI flags override `database.yml`.
 
 ### 4.3 Bootstrap YAML (optional import via `--bootstrap`)
 
@@ -98,6 +98,18 @@ Cookie import/export uses the same canonical representation as the database:
 * import may optionally accept a raw Netscape `cookies.txt` payload and will normalize newlines then encode it before storing
 
 It must **not** contain transient runtime/indexing results (remote listings, access logs, per-file remote metadata, etc.).
+
+### 4.6 Rclone configuration
+
+Rclone settings are database-backed and may be imported/exported via bootstrap YAML.
+
+* `rclone.enabled`: enable rclone-based fetch/index handlers.
+* `rclone.config_path`: optional path to an rclone config file (passed via `RCLONE_CONFIG`).
+* `rclone.rc_url`: rclone rc endpoint URL for control operations (for `ui.backend`).
+* `rclone.rc_user` / `rclone.rc_pass`: optional basic auth for rclone rc.
+
+Rclone is optional; when disabled, rclone handlers are ignored even if present in cachelinks.
+Rclone control is handled via `ui.backend` using rclone's own API (rc); the Admin API does not expose rclone operations.
 
 ### 4.4 Backups and exports
 
@@ -206,6 +218,7 @@ Required:
 
 * `url`: remote root
 * `subfolder`: scope within that root
+* `url_handler` (optional): `auto`, `http`, `ftp`, `rclone`
 
 ### 7.6 Database mirroring
 
@@ -237,6 +250,15 @@ Normalization rules:
 #### Mode A: Plain folder
 
 * `subfolder` is `/` or a normal prefix with no `.zip` directory segment.
+
+### 8.3 URL handler selection
+
+Cachelinks can specify a `url_handler` to select which handler the indexer/fetcher uses.
+
+* `auto`: choose based on URL scheme or rclone prefix.
+* `http`: force HTTP(S) handler.
+* `ftp`: force FTP/FTPS handler.
+* `rclone`: force rclone handler (requires rclone enabled and available).
 
 #### Mode B: Zip-folder
 

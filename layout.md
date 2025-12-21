@@ -33,7 +33,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
   ui: #Folder. Admin interface components and management layer
     - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces  -- CAN ONLY BE IMPORTED BY: core.services, hosting.*  --CAN ONLY IMPORT INTERNALLY: ui.backend
-    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services  --CAN ONLY IMPORT INTERNALLY: ui.backend
+    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services  --CAN ONLY IMPORT INTERNALLY: ui.backend, auth.credentials
     - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py -- CAN ONLY BE IMPORTED BY: ui.*
     web: #Folder. Web-based user interface assets
       - webcore.py #File. WebUI application core and page routing --CAN ONLY BE IMPORTED BY: core.services --CAN ONLY IMPORT INTERNALLY: ui.backend

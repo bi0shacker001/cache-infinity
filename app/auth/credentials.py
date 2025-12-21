@@ -225,7 +225,7 @@ class AuthConfigManager:
         """Get or create the CLI backend user from database."""
         try:
             # Check if CLI backend user exists
-            cli_user = self.db_adapter.get_user_credentials("cli-backend")
+            cli_user = self.db_adapter.get_user_credentials("cli-backend", purpose="cli")
             if not cli_user:
                 # Create CLI backend user
                 success = self.db_adapter.upsert_auth_user(
@@ -237,7 +237,7 @@ class AuthConfigManager:
                     purpose="cli"
                 )
                 if success:
-                    cli_user = self.db_adapter.get_user_credentials("cli-backend")
+                    cli_user = self.db_adapter.get_user_credentials("cli-backend", purpose="cli")
             
             return cli_user
         except Exception as exc:
@@ -284,7 +284,7 @@ class AuthConfigManager:
         """Get existing CLI API key or generate a new one using database adapter."""
         try:
             # Check if API key already exists
-            cli_user = self.db_adapter.get_user_credentials("cli-backend")
+            cli_user = self.db_adapter.get_user_credentials("cli-backend", purpose="cli")
             
             if cli_user and cli_user.get('password_plain'):
                 self._cli_api_key = cli_user['password_plain']
@@ -314,7 +314,7 @@ class AuthConfigManager:
             if 'app.ui.cli' in caller_module:
                 # Return the API key from database
                 try:
-                    user_data = self.db_adapter.get_user_credentials("cli-backend")
+                    user_data = self.db_adapter.get_user_credentials("cli-backend", purpose="cli")
                     return user_data.get('password_plain', '')
                 except Exception as exc:
                     logging.getLogger(__name__).error(f"Failed to retrieve CLI API key: {exc}")
@@ -331,7 +331,7 @@ class AuthConfigManager:
         
         # Get the current API key from database
         try:
-            user_data = self.db_adapter.get_user_credentials("cli-backend")
+            user_data = self.db_adapter.get_user_credentials("cli-backend", purpose="cli")
             stored_key = user_data.get('password_plain', '')
             return secrets.compare_digest(password, stored_key)
         except Exception as exc:
@@ -456,6 +456,17 @@ class AuthConfigManager:
             username = session_data['username']
             last_used = session_data['last_used']
             expires_at = session_data['expires_at']
+
+            if isinstance(last_used, str):
+                try:
+                    last_used = datetime.fromisoformat(last_used)
+                except ValueError:
+                    last_used = datetime.utcnow()
+            if isinstance(expires_at, str):
+                try:
+                    expires_at = datetime.fromisoformat(expires_at)
+                except ValueError:
+                    expires_at = datetime.utcnow()
             
             # Check if expired
             if datetime.utcnow() >= expires_at:
@@ -477,7 +488,11 @@ class AuthConfigManager:
                 self._sessions[token] = SessionToken(
                     token=token,
                     username=username,
-                    created_at=session_data['created_at'],
+                    created_at=(
+                        datetime.fromisoformat(session_data['created_at'])
+                        if isinstance(session_data.get('created_at'), str)
+                        else session_data['created_at']
+                    ),
                     last_used=new_last_used,
                     expires_at=expires_at
                 )
@@ -577,7 +592,7 @@ class AuthConfigManager:
             }
         
         # Check database credentials
-        if self.db_adapter.validate_credentials(username, password):
+        if self.db_adapter.validate_credentials(username, password, purpose="webui"):
             # Create new session token
             token = self._create_session_token(username)
             return {
@@ -607,10 +622,11 @@ def get_cli_api_key() -> Optional[str]:
     db_settings = load_database_settings(Path(config_dir_raw), args, os.environ)
     db_manager = DatabaseManager.from_settings(db_settings)
     try:
-        cli_user = db_manager.get_user_credentials("cli-backend")
+        adapter = db_manager.adapter
+        cli_user = adapter.get_user_credentials("cli-backend", purpose="cli")
         if cli_user and cli_user.get("password_plain"):
             return cli_user["password_plain"]
-        auth_manager = AuthConfigManager(db_manager)
+        auth_manager = AuthConfigManager(adapter)
         return auth_manager.create_cli_api_key()
     finally:
         db_manager.close()

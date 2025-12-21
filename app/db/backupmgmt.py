@@ -123,6 +123,12 @@ class DatabaseBackupManager:
                     valid_data_found = True
                 warnings.extend(tls_warnings)
 
+            if 'rclone' in bootstrap_data:
+                rclone_valid, rclone_warnings = self._process_rclone(bootstrap_data['rclone'])
+                if rclone_valid:
+                    valid_data_found = True
+                warnings.extend(rclone_warnings)
+
             if 'cookies' in bootstrap_data:
                 cookies_valid, cookies_warnings = self._process_cookies(bootstrap_data['cookies'])
                 if cookies_valid:
@@ -264,8 +270,10 @@ class DatabaseBackupManager:
         # Collect cookies - convert database format to bootstrap.yml format
         cookies = {}
         for cookie in self.index_db.get_all_cookies():
+            cookie_content = cookie.get("cookie_content") or ""
+            cookies_b64 = base64.b64encode(cookie_content.encode("utf-8")).decode("ascii") if cookie_content else ""
             cookies[cookie['domain']] = {
-                'cookie_jar': cookie.get('cookie_content') or "",
+                'cookies_b64': cookies_b64,
                 'captured_at': cookie.get('captured_at'),
             }
 
@@ -304,6 +312,17 @@ class DatabaseBackupManager:
                 'dns01': json.loads(tls['dns01_config']) if tls['dns01_config'] else {}
             }
 
+        # Collect rclone settings
+        rclone = self.index_db.get_rclone()
+        if rclone:
+            bootstrap_data['rclone'] = {
+                'enabled': rclone['enabled'],
+                'config_path': rclone.get('config_path'),
+                'rc_url': rclone.get('rc_url'),
+                'rc_user': rclone.get('rc_user'),
+                'rc_pass': rclone.get('rc_pass'),
+            }
+
         # Collect users
         users = {}
         for user in self.index_db.get_all_users():
@@ -326,6 +345,7 @@ class DatabaseBackupManager:
                 'url': cachelink['url'],
                 'subfolder': cachelink['subfolder'],
                 'mode': cachelink['mode'],
+                'url_handler': cachelink.get('url_handler'),
                 'source_file': cachelink['source_file']
             })
 
@@ -541,6 +561,29 @@ class DatabaseBackupManager:
             self._logger.warning(f"Failed to process TLS: {exc}")
             return False, warnings
 
+    def _process_rclone(self, rclone_data: dict) -> Tuple[bool, List[str]]:
+        """Process rclone configuration section."""
+        warnings = []
+
+        if not isinstance(rclone_data, dict):
+            warnings.append("Rclone section must be a dictionary")
+            return False, warnings
+
+        try:
+            rclone_db = {
+                "enabled": bool(rclone_data.get("enabled", False)),
+                "config_path": rclone_data.get("config_path"),
+                "rc_url": rclone_data.get("rc_url"),
+                "rc_user": rclone_data.get("rc_user"),
+                "rc_pass": rclone_data.get("rc_pass"),
+            }
+            self.index_db.save_rclone(rclone_db)
+            return True, warnings
+        except Exception as exc:
+            warnings.append(f"Failed to process rclone: {exc}")
+            self._logger.warning(f"Failed to process rclone: {exc}")
+            return False, warnings
+
     def _process_cookies(self, cookies_data: dict) -> Tuple[bool, List[str]]:
         """Process cookies configuration section.
 
@@ -563,13 +606,24 @@ class DatabaseBackupManager:
                     warnings.append(f"Cookie {domain} must be a dictionary")
                     continue
 
-                cookie_content = cookie_data.get('cookie_jar', '')
+                cookie_content = ""
+                cookies_b64 = cookie_data.get("cookies_b64")
+                if isinstance(cookies_b64, str) and cookies_b64:
+                    try:
+                        cookie_content = base64.b64decode(cookies_b64.encode("ascii")).decode("utf-8")
+                    except Exception:
+                        warnings.append(f"Cookie {domain} has invalid cookies_b64")
+                        continue
+                else:
+                    cookie_content = cookie_data.get('cookie_jar', '')
+                    if isinstance(cookie_content, str):
+                        jar_path = Path(cookie_content)
+                        if not jar_path.is_absolute():
+                            jar_path = self.config_dir / jar_path
+                        if jar_path.exists():
+                            cookie_content = jar_path.read_text(encoding="utf-8")
                 if isinstance(cookie_content, str):
-                    jar_path = Path(cookie_content)
-                    if not jar_path.is_absolute():
-                        jar_path = self.config_dir / jar_path
-                    if jar_path.exists():
-                        cookie_content = jar_path.read_text(encoding="utf-8")
+                    cookie_content = cookie_content.replace("\r\n", "\n")
 
                 cookie_db = {
                     'domain': domain.lower(),
@@ -696,6 +750,7 @@ class DatabaseBackupManager:
                     'url': cachelink_data.get('url'),
                     'subfolder': cachelink_data.get('subfolder'),
                     'mode': cachelink_data.get('mode'),
+                    'url_handler': cachelink_data.get('url_handler') or cachelink_data.get('handler'),
                     'source_file': cachelink_data.get('source_file')
                 }
 

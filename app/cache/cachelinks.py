@@ -25,6 +25,7 @@ class CachelinkDescriptor:
     download_root: str
     subfolder: str
     mode: "CachelinkMode"
+    url_handler: str
 
     @property
     def backend_relative_folder(self) -> PurePosixPath:
@@ -88,12 +89,14 @@ def load_cachelinks(
         url: str,
         subfolder: str,
         mode_value: str | None = None,
+        handler_value: str | None = None,
     ) -> None:
         clean_url = (url or "").strip()
         if not clean_url:
             return
         identifier, download_root = normalize_source_url(clean_url)
         mode = _parse_mode(mode_value) or _detect_mode(subfolder or "/")
+        url_handler = _normalize_url_handler(handler_value)
         descriptor = CachelinkDescriptor(
             canonical_id=canonical_id,
             path_segments=tuple(path_segments),
@@ -103,6 +106,7 @@ def load_cachelinks(
             download_root=download_root,
             subfolder=subfolder or "/",
             mode=mode,
+            url_handler=url_handler,
         )
         cachelinks[canonical_id] = descriptor
 
@@ -120,6 +124,7 @@ def load_cachelinks(
                     url=value.get("url", ""),
                     subfolder=value.get("subfolder", "/"),
                     mode_value=value.get("mode"),
+                    handler_value=value.get("url_handler") or value.get("handler"),
                 )
             elif isinstance(value, dict):
                 walk_tree(value, path_segments + [key], source_file)
@@ -149,6 +154,7 @@ def load_cachelinks(
                     url=item.get("url", ""),
                     subfolder=item.get("subfolder", "/"),
                     mode_value=item.get("mode"),
+                    handler_value=item.get("url_handler") or item.get("handler"),
                 )
 
     for path in mount_tree_paths:
@@ -233,6 +239,19 @@ def _parse_mode(mode_value: str | None) -> CachelinkMode | None:
     if value in ("plain", "directory"):
         return CachelinkMode.PLAIN
     return None
+
+
+def _normalize_url_handler(handler_value: str | None) -> str:
+    if not handler_value:
+        return "auto"
+    value = str(handler_value).strip().lower()
+    if value in ("auto", "default"):
+        return "auto"
+    if value in ("rclone", "rclone-python"):
+        return "rclone"
+    if value in ("http", "https", "ftp", "ftps"):
+        return value
+    return "auto"
 
 
 def _sanitize_identifier(value: str) -> str:

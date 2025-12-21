@@ -130,7 +130,7 @@ class WebUIAPI:
             except Exception as exc:
                 _logger.error(f"Failed to list cachelinks: {exc}")
                 return jsonify({'error': str(exc)}), 500
-        
+
         @app.route('/api/users', methods=['GET'])
         def list_users():
             """List all users."""

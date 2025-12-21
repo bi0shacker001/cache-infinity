@@ -174,6 +174,7 @@ function updateCachelinkEditor() {
   const nameInput = document.getElementById('cachelink-entry-name');
   const urlInput = document.getElementById('cachelink-url');
   const subfolderInput = document.getElementById('cachelink-subfolder');
+  const handlerInput = document.getElementById('cachelink-url-handler');
   const preview = document.getElementById('cachelink-preview');
   const deleteBtn = document.getElementById('cachelink-delete-btn');
   document.getElementById('cachelink-status').textContent = '';
@@ -185,6 +186,7 @@ function updateCachelinkEditor() {
     nameInput.disabled = true;
     urlInput.value = selectedCachelinkEntry.url || '';
     subfolderInput.value = selectedCachelinkEntry.subfolder || '/';
+    handlerInput.value = selectedCachelinkEntry.url_handler || 'auto';
     deleteBtn.style.display = 'inline-flex';
   } else if (editorMode === 'create') {
     title.textContent = selectedCachelinkFolder ? `New cachelink in /${selectedCachelinkFolder}` : 'New cachelink in ROOT';
@@ -192,12 +194,14 @@ function updateCachelinkEditor() {
     nameInput.disabled = true;
     urlInput.value = '';
     subfolderInput.value = '/';
+    handlerInput.value = 'auto';
   } else {
     title.textContent = 'Cachelink Editor';
     nameInput.value = '';
     nameInput.disabled = true;
     urlInput.value = '';
     subfolderInput.value = '/';
+    handlerInput.value = 'auto';
     preview.innerHTML = `<table><tbody><tr><td style="padding:0.5rem;color:var(--text-muted);">Select a cachelink or create a new one.</td></tr></tbody></table>`;
     return;
   }
@@ -208,6 +212,7 @@ function updateCachelinkEditor() {
 async function saveCachelink() {
   const url = document.getElementById('cachelink-url').value.trim();
   const subfolder = document.getElementById('cachelink-subfolder').value.trim() || '/';
+  const urlHandler = document.getElementById('cachelink-url-handler').value || 'auto';
   if (!url) {
     alert('URL is required');
     return;
@@ -218,7 +223,7 @@ async function saveCachelink() {
         alert('Select or create a folder first (cachelinks cannot be added at ROOT).');
         return;
       }
-      const payload = { parent_path: selectedCachelinkFolder, url, subfolder };
+      const payload = { parent_path: selectedCachelinkFolder, url, subfolder, url_handler: urlHandler };
       const created = await fetchJSON('cachelinks', { method: 'POST', body: JSON.stringify(payload) });
       await loadCachelinks();
       if (created?.cachelink?.canonical_id) {
@@ -233,6 +238,7 @@ async function saveCachelink() {
         canonical_id: selectedCachelinkEntry.canonical_id,
         url,
         subfolder,
+        url_handler: urlHandler,
       };
       await fetchJSON('cachelinks/update', { method: 'POST', body: JSON.stringify(payload) });
     }
@@ -267,6 +273,7 @@ function revertCachelink() {
   if (editorMode === 'edit' && originalEntry) {
     document.getElementById('cachelink-url').value = originalEntry.url || '';
     document.getElementById('cachelink-subfolder').value = originalEntry.subfolder || '/';
+    document.getElementById('cachelink-url-handler').value = originalEntry.url_handler || 'auto';
   } else if (editorMode === 'create') {
     updateCachelinkEditor();
   }
@@ -275,12 +282,16 @@ function revertCachelink() {
 async function processCachelink() {
   const url = document.getElementById('cachelink-url').value.trim();
   const subfolder = document.getElementById('cachelink-subfolder').value.trim() || '/';
+  const urlHandler = document.getElementById('cachelink-url-handler').value || 'auto';
   if (!url) {
     alert('Enter a URL to process.');
     return;
   }
   try {
-    const data = await fetchJSON('cachelinks/preview', { method: 'POST', body: JSON.stringify({ url, subfolder }) });
+    const data = await fetchJSON('cachelinks/preview', {
+      method: 'POST',
+      body: JSON.stringify({ url, subfolder, url_handler: urlHandler }),
+    });
     const rows = (data.entries || []).slice(0, 200).map((entry) =>
       `<tr><td>${entry.path}</td><td>${entry.is_dir ? 'Dir' : 'File'}</td><td>${entry.size || ''}</td><td>${entry.modified || ''}</td></tr>`
     ).join('');

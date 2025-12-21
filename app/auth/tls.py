@@ -374,17 +374,36 @@ class TLSService:
     def __init__(self, config_dir: Path, tls_settings: TLSSettings):
         self.config_dir = config_dir
         self.tls_settings = tls_settings
-        # TODO: Implement basic TLS service functionality
+        self._automation = TLSAutomationService(config_dir, tls_settings)
     
     def get_certificate_path(self) -> Optional[Path]:
         """Get the path to the certificate file."""
-        # TODO: Implement certificate path retrieval
-        return None
+        if not self.tls_settings.enabled or self.tls_settings.mode == "external":
+            return None
+        if self.tls_settings.mode == "manual":
+            return self.tls_settings.manual.cert_path
+        cert = self._get_automated_certificate()
+        return cert.cert_path if cert else None
     
     def get_key_path(self) -> Optional[Path]:
         """Get the path to the private key file."""
-        # TODO: Implement key path retrieval
-        return None
+        if not self.tls_settings.enabled or self.tls_settings.mode == "external":
+            return None
+        if self.tls_settings.mode == "manual":
+            return self.tls_settings.manual.key_path
+        cert = self._get_automated_certificate()
+        return cert.key_path if cert else None
+
+    def _get_automated_certificate(self) -> Optional[TLSCertificate]:
+        if self.tls_settings.mode == "http":
+            domains = self.tls_settings.http.domains
+        elif self.tls_settings.mode == "dns-01":
+            domains = self.tls_settings.dns01.domains
+        else:
+            return None
+        if not domains:
+            return None
+        return self._automation._get_existing_certificate(domains)
 
 
 def create_tls_service(config_dir: Path, settings: Settings) -> Optional[TLSAutomationService]:

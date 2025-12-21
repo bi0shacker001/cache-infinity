@@ -300,6 +300,27 @@ class IndexDatabase:
                 )
                 """
             )
+
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_rclone (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enabled BOOLEAN NOT NULL,
+                    config_path TEXT,
+                    rc_url TEXT,
+                    rc_user TEXT,
+                    rc_pass TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            rclone_columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_rclone)")}
+            if "rc_url" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_url TEXT")
+            if "rc_user" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_user TEXT")
+            if "rc_pass" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_pass TEXT")
             
             self._db.execute(
                 """
@@ -326,6 +347,7 @@ class IndexDatabase:
                     url TEXT NOT NULL,
                     subfolder TEXT NOT NULL,
                     mode TEXT NOT NULL,
+                    url_handler TEXT,
                     source_file TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -333,6 +355,9 @@ class IndexDatabase:
                 )
                 """
             )
+            columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_cachelinks)")}
+            if "url_handler" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN url_handler TEXT")
             
             self._db.execute(
                 """
@@ -449,6 +474,7 @@ class IndexDatabase:
                     url TEXT NOT NULL,
                     subfolder TEXT NOT NULL,
                     mode TEXT NOT NULL,
+                    url_handler TEXT,
                     source_file TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -477,11 +503,13 @@ class IndexDatabase:
             )
             self._db.execute(
                 """
-                CREATE TABLE IF NOT EXISTS webui_sessions (
-                    token TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token TEXT UNIQUE NOT NULL,
                     username TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    last_used_at TEXT,
+                    last_used TEXT,
+                    expires_at TEXT,
                     FOREIGN KEY (username) REFERENCES auth_users(username)
                 )
                 """
@@ -784,6 +812,7 @@ class IndexDatabase:
                 descriptor.source_url,
                 descriptor.subfolder,
                 descriptor.mode.value,
+                descriptor.url_handler,
                 str(descriptor.source_file),
                 now,
                 now,
@@ -796,8 +825,8 @@ class IndexDatabase:
                 self._db.executemany(
                     """
                     INSERT INTO config_cachelinks
-                    (canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -807,7 +836,7 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT canonical_id, backend_path, url, subfolder, mode, source_file, updated_at
+                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, updated_at
                 FROM config_cachelinks
                 ORDER BY backend_path, canonical_id
                 """
@@ -1258,81 +1287,6 @@ class IndexDatabase:
 
     def list_webdav_credentials(self) -> list[dict[str, object]]:
         return self.list_users(purpose="webdav")
-
-    # WebUI Session Management -------------------------------------------------
-    def load_webui_sessions(self) -> dict[str, dict[str, object]]:
-        """Load all active WebUI sessions from the database."""
-        with self._lock:
-            rows = self._db.fetchall(
-                "SELECT token, username, created_at, last_used_at FROM webui_sessions"
-            )
-        sessions: dict[str, dict[str, object]] = {}
-        for row in rows:
-            sessions[row["token"]] = {
-                "username": row["username"],
-                "created_at": row["created_at"],
-                "last_used_at": row["last_used_at"],
-            }
-        return sessions
-
-    def save_webui_sessions(self, sessions: dict[str, dict[str, object]]) -> None:
-        """Save WebUI sessions to the database."""
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            # Clear existing sessions
-            self._db.execute("DELETE FROM webui_sessions")
-            # Insert current sessions
-            if sessions:
-                self._db.executemany(
-                    """
-                    INSERT INTO webui_sessions (token, username, created_at, last_used_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            token,
-                            session_data["username"],
-                            session_data.get("created_at", now),
-                            session_data.get("last_used_at", now),
-                        )
-                        for token, session_data in sessions.items()
-                    ],
-                )
-            self._db.commit()
-
-    def update_session_last_used(self, token: str) -> None:
-        """Update the last used timestamp for a session."""
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            self._db.execute(
-                "UPDATE webui_sessions SET last_used_at = ? WHERE token = ?",
-                (now, token),
-            )
-            self._db.commit()
-
-    def cleanup_expired_sessions(self, max_age_hours: int = 24) -> int:
-        """Remove sessions older than the specified age in hours."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-        with self._lock:
-            row = self._db.fetchone(
-                "SELECT COUNT(*) as count FROM webui_sessions WHERE last_used_at < ?",
-                (cutoff,)
-            )
-            deleted_count = row["count"] if row else 0
-            self._db.execute(
-                "DELETE FROM webui_sessions WHERE last_used_at < ?",
-                (cutoff,)
-            )
-            self._db.commit()
-            return deleted_count
-
-    def get_active_sessions_count(self) -> int:
-        """Get the number of active sessions."""
-        with self._lock:
-            row = self._db.fetchone(
-                "SELECT COUNT(*) as count FROM webui_sessions"
-            )
-            return row["count"] if row else 0
 
     # Configuration Repository Methods -----------------------------------------
     def get_backend(self, name: str) -> dict | None:
@@ -1823,6 +1777,48 @@ class IndexDatabase:
             )
             self._db.commit()
 
+    def get_rclone(self) -> dict | None:
+        """Get rclone configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT enabled, config_path, rc_url, rc_user, rc_pass, updated_at
+                FROM config_rclone
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "enabled": bool(row["enabled"]),
+            "config_path": row["config_path"],
+            "rc_url": row.get("rc_url"),
+            "rc_user": row.get("rc_user"),
+            "rc_pass": row.get("rc_pass"),
+            "updated_at": row["updated_at"],
+        }
+
+    def save_rclone(self, rclone: dict) -> None:
+        """Save rclone configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_rclone (enabled, config_path, rc_url, rc_user, rc_pass, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    1 if rclone["enabled"] else 0,
+                    rclone.get("config_path"),
+                    rclone.get("rc_url"),
+                    rclone.get("rc_user"),
+                    rclone.get("rc_pass"),
+                    now,
+                ),
+            )
+            self._db.commit()
+
     def get_user(self, username: str) -> dict | None:
         """Get user configuration by username."""
         with self._lock:
@@ -1920,7 +1916,7 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at
+                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at
                 FROM config_cachelinks
                 ORDER BY backend_path, canonical_id
                 """
@@ -1932,6 +1928,7 @@ class IndexDatabase:
                 "url": row["url"],
                 "subfolder": row["subfolder"],
                 "mode": row["mode"],
+                "url_handler": row.get("url_handler"),
                 "source_file": row["source_file"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -1947,8 +1944,8 @@ class IndexDatabase:
             if cachelinks:
                 self._db.executemany(
                     """
-                    INSERT INTO config_cachelinks (canonical_id, backend_path, url, subfolder, mode, source_file, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO config_cachelinks (canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -1957,6 +1954,7 @@ class IndexDatabase:
                             c["url"],
                             c["subfolder"],
                             c["mode"],
+                            c.get("url_handler"),
                             c["source_file"],
                             now,
                             now,
@@ -2103,49 +2101,6 @@ class IndexDatabase:
         except Exception:
             self._db.rollback()
             return 0
-
-    def validate_credentials(self, username: str, password: str) -> bool:
-        """Validate user credentials against database."""
-        self._logger.debug("Validating credentials for user: %s", username)
-        try:
-            result = self.get_user_credentials(username)
-            if not result:
-                self._logger.warning("User not found: %s", username)
-                return False
-            
-            stored_plain = result.get('password_plain')
-            stored_hash = _normalize_password_hash(result.get('password_hash'))
-            purpose = result.get("purpose")
-            
-            # Check plain text password first (for backward compatibility)
-            if stored_plain and stored_plain == password:
-                if not stored_hash:
-                    stored_hash = _hash_password(password)
-                    if purpose != "cli" and username != "cli-backend":
-                        stored_plain = None
-                    self._db.execute(
-                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ?",
-                        (stored_plain, stored_hash, username),
-                    )
-                    self._db.commit()
-                self._logger.info("Successful plain text authentication for user: %s", username)
-                return True
-            
-            # Check hashed password
-            if stored_hash and _verify_password_hash(password, stored_hash):
-                self._logger.info("Successful hash authentication for user: %s", username)
-                return True
-            
-            self._logger.warning("Authentication failed for user: %s", username)
-            return False
-        except Exception as exc:
-            self._logger.error("Error validating credentials for user %s: %s", username, exc)
-            return False
-
-    def _verify_password_hash(self, password: str, stored_hash: str) -> bool:
-        """Verify a password against its hash."""
-        return _verify_password_hash(password, stored_hash)
-
 
 def _parse_ts(value: str | None) -> datetime | None:
     if not value:

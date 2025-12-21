@@ -288,7 +288,7 @@ class AuthService(BaseService):
 
     def initialize(self, context: dict[str, Any]) -> None:
         database_service: DatabaseService = context["database"]
-        self.auth_manager = AuthConfigManager(database_service.database_manager)
+        self.auth_manager = AuthConfigManager(database_service.database_manager.adapter)
         self.auth_manager.create_cli_api_key()
 
     def start(self) -> None:
@@ -581,7 +581,11 @@ def _build_checksum_catalog(settings: Settings, index_db: DatabaseManager) -> Ch
 
 
 def _build_fetcher(settings: Settings) -> Fetcher:
-    fetcher = Fetcher(settings.cookies)
+    fetcher = Fetcher(
+        settings.cookies,
+        rclone_config_path=settings.rclone.config_path,
+        rclone_enabled=settings.rclone.enabled,
+    )
     _LOGGER.debug("Initialized fetcher with %d cookie domains", len(settings.cookies))
     return fetcher
 
@@ -591,7 +595,14 @@ def _build_indexer(
     cachelinks: CachelinkIndex,
     index_db: DatabaseManager,
 ) -> Indexer:
-    indexer = Indexer(settings.indexing, settings.cookies, index_db, cachelinks)
+    indexer = Indexer(
+        settings.indexing,
+        settings.cookies,
+        index_db,
+        cachelinks,
+        rclone_config_path=settings.rclone.config_path,
+        rclone_enabled=settings.rclone.enabled,
+    )
     _LOGGER.debug(
         "Initialized indexer with settings: min_days=%d, max_days=%d",
         settings.indexing.min_full_reindex_days,
@@ -607,7 +618,7 @@ def _build_tls_service(settings: Settings) -> TLSAutomationService | None:
 
 
 def _build_auth_manager(index_db: DatabaseManager) -> AuthConfigManager:
-    auth_manager = AuthConfigManager(index_db)
+    auth_manager = AuthConfigManager(index_db.adapter)
     auth_manager.create_cli_api_key()
     _LOGGER.debug("Created CLI API key")
     return auth_manager

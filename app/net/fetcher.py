@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import time
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, List, Any, Callable
@@ -54,6 +56,49 @@ def _rclone_spec(url: str) -> str:
     return url
 
 
+def _normalize_url_handler(handler_value: str | None) -> str:
+    if not handler_value:
+        return "auto"
+    value = str(handler_value).strip().lower()
+    if value in ("auto", "default"):
+        return "auto"
+    if value in ("rclone", "rclone-python"):
+        return "rclone"
+    if value in ("http", "https", "ftp", "ftps"):
+        return value
+    return "auto"
+
+
+def _resolve_url_handler(url: str, handler_value: str | None) -> str:
+    handler = _normalize_url_handler(handler_value)
+    if handler != "auto":
+        return handler
+    if _is_rclone_url(url):
+        return "rclone"
+    if url.startswith("ftp"):
+        return "ftp"
+    if url.startswith("http"):
+        return "http"
+    return "auto"
+
+
+@contextmanager
+def _rclone_env(config_path: Optional[Path]):
+    if not config_path:
+        yield
+        return
+    key = "RCLONE_CONFIG"
+    previous = os.environ.get(key)
+    os.environ[key] = str(config_path)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 @dataclass
 class DownloadResult:
     """Result of a download operation."""
@@ -81,9 +126,16 @@ class DownloadProgress:
 class Fetcher:
     """Manages downloads using PycURL with robust retry and resume capabilities."""
     
-    def __init__(self, cookie_jars: Dict[str, CookieJarDefinition],
-                 max_retries: int = 3, retry_delay: int = 5,
-                 verify_checksums: bool = True, max_concurrent: int = 3):
+    def __init__(
+        self,
+        cookie_jars: Dict[str, CookieJarDefinition],
+        max_retries: int = 3,
+        retry_delay: int = 5,
+        verify_checksums: bool = True,
+        max_concurrent: int = 3,
+        rclone_config_path: Optional[Path] = None,
+        rclone_enabled: bool = False,
+    ):
         """Initialize fetcher.
         
         Args:
@@ -102,6 +154,8 @@ class Fetcher:
         self._active_downloads = 0
         self._download_lock = threading.Lock()
         self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
+        self._rclone_config_path = rclone_config_path
+        self._rclone_enabled = rclone_enabled
         _logger.debug("Fetcher initialized")
         
     def add_progress_callback(self, callback: Callable[[str, DownloadProgress], None]) -> None:
@@ -112,10 +166,16 @@ class Fetcher:
         """
         self._progress_callbacks.append(callback)
     
-    def download_file(self, url: str, destination: Path,
-                      resume: bool = True, timeout: int = 300,
-                      expected_checksum: Optional[str] = None,
-                      progress_callback: Optional[Callable[[DownloadProgress], None]] = None) -> DownloadResult:
+    def download_file(
+        self,
+        url: str,
+        destination: Path,
+        resume: bool = True,
+        timeout: int = 300,
+        expected_checksum: Optional[str] = None,
+        progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
+        url_handler: Optional[str] = None,
+    ) -> DownloadResult:
         """Download a file using PycURL with cookie support and checksum verification.
         
         Args:
@@ -129,7 +189,8 @@ class Fetcher:
         Returns:
             DownloadResult with operation status and checksum
         """
-        if _is_rclone_url(url):
+        handler = _resolve_url_handler(url, url_handler)
+        if handler == "rclone":
             return self._download_rclone(
                 url=url,
                 destination=destination,
@@ -344,13 +405,14 @@ class Fetcher:
         last_error: str | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                rclone = _import_rclone()
-                if hasattr(rclone, "copyto"):
-                    rclone.copyto(remote, str(destination))
-                elif hasattr(rclone, "copy"):
-                    rclone.copy(remote, str(destination.parent))
-                else:
-                    raise RuntimeError("rclone-python missing copy/copyto support")
+                with _rclone_env(self._rclone_config_path if self._rclone_enabled else None):
+                    rclone = _import_rclone()
+                    if hasattr(rclone, "copyto"):
+                        rclone.copyto(remote, str(destination))
+                    elif hasattr(rclone, "copy"):
+                        rclone.copy(remote, str(destination.parent))
+                    else:
+                        raise RuntimeError("rclone-python missing copy/copyto support")
 
                 if not destination.exists():
                     raise RuntimeError("Rclone transfer finished but destination is missing")
@@ -612,7 +674,8 @@ class Fetcher:
                     url, destination,
                     resume=download_spec.get('resume', True),
                     timeout=download_spec.get('timeout', 300),
-                    expected_checksum=expected_checksum
+                    expected_checksum=expected_checksum,
+                    url_handler=download_spec.get("url_handler"),
                 )
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
@@ -627,9 +690,14 @@ class Fetcher:
         
         return results
     
-    def download_with_staging(self, url: str, destination: Path,
-                             expected_checksum: Optional[str] = None,
-                             staging_dir: Optional[Path] = None) -> bool:
+    def download_with_staging(
+        self,
+        url: str,
+        destination: Path,
+        expected_checksum: Optional[str] = None,
+        staging_dir: Optional[Path] = None,
+        url_handler: Optional[str] = None,
+    ) -> bool:
         """Download with enhanced staging and datadir integration.
         
         Args:
@@ -657,7 +725,8 @@ class Fetcher:
                 destination=staging_path,
                 resume=True,
                 timeout=300,
-                expected_checksum=expected_checksum
+                expected_checksum=expected_checksum,
+                url_handler=url_handler,
             )
             
             if not result.success:

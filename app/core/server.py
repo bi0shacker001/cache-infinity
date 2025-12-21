@@ -72,7 +72,6 @@ from net.fetcher import Fetcher
 from net.indexer import Indexer, RemoteListingFetcher
 from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
-from ui.web.webcore import WebUIApp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,7 +97,10 @@ class CacheInfinityService:
         self._lock = threading.RLock()
         self._background_running = False
         self._state_store = state_store
-        self._preview_fetcher = RemoteListingFetcher()
+        self._preview_fetcher = RemoteListingFetcher(
+            rclone_config_path=settings.rclone.config_path,
+            rclone_enabled=settings.rclone.enabled,
+        )
         self._tls_automation: Optional[TLSAutomationService] = None
         # Initialize config service
         self.config_service = ConfigService(self)
@@ -226,6 +228,10 @@ class CacheInfinityService:
         checksum_catalog = checksum_catalog or _build_checksum_catalog(settings, index_db)
         fetcher = fetcher or _build_fetcher(settings)
         indexer = indexer or _build_indexer(settings, cachelinks, index_db)
+        preview_fetcher = RemoteListingFetcher(
+            rclone_config_path=settings.rclone.config_path,
+            rclone_enabled=settings.rclone.enabled,
+        )
 
         self._validate_tls_requirements(settings)
         _LOGGER.debug("TLS requirements validated")
@@ -241,13 +247,14 @@ class CacheInfinityService:
             self.fetcher = fetcher
             self.indexer = indexer
             self.checksum_catalog = checksum_catalog
+            self._preview_fetcher = preview_fetcher
             # Initialize authentication manager and generate CLI API key
             self.auth_manager = auth_manager or _build_auth_manager(index_db)
             if build_apps:
-                self._wsgi_app = self._build_wsgi_app()
-                _LOGGER.debug("Built WSGI application")
-                self._webui_app = WebUIApp(self)
-                _LOGGER.debug("Initialized WebUI application")
+                # WebDAV and WebUI app creation is now handled by services
+                self._wsgi_app = None
+                self._webui_app = None
+                _LOGGER.debug("Apps will be built by services")
             else:
                 self._wsgi_app = None
                 self._webui_app = None
@@ -275,18 +282,20 @@ class CacheInfinityService:
 
     def build_wsgi_app(self) -> WsgiDAVApp:
         with self._lock:
-            return self._build_wsgi_app()
+            if self._wsgi_app is None:
+                raise RuntimeError("WebDAV app should be built by WebDAVService")
+            return self._wsgi_app
 
     def get_wsgi_app(self):
         with self._lock:
             if self._wsgi_app is None:
-                self._wsgi_app = self._build_wsgi_app()
+                raise RuntimeError("WebDAV app should be built by WebDAVService")
             return self._wsgi_app
 
     def get_webui_app(self) -> WebUIApp:
         with self._lock:
             if self._webui_app is None:
-                self._webui_app = WebUIApp(self)
+                raise RuntimeError("WebUI app should be built by WebUIService")
             return self._webui_app
 
     def set_wsgi_app(self, app: WsgiDAVApp) -> None:
@@ -353,23 +362,8 @@ class CacheInfinityService:
     # Internal helpers ----------------------------------------------------
     def _build_wsgi_app(self):
         """Create a configured WsgiDAV application."""
-        from hosting.webdav import CacheInfinityDomainController, WebDAVProvider
-        
-        provider_mapping = {}
-        for share in self.settings.shares.values():
-            provider_mapping[share.frontend_folder.as_posix()] = WebDAVProvider(self)
-        
-        user_mapping = self._build_user_mapping()
-        config = {
-            "provider_mapping": provider_mapping,
-            "verbose": 1,
-            "http_authenticator": {
-                "domain_controller": CacheInfinityDomainController,
-            },
-            "simple_dc": {"user_mapping": user_mapping},
-            "cacheinfinity_service": self,
-        }
-        return WsgiDAVApp(config)
+        # WebDAV app creation is now handled by WebDAVService
+        raise NotImplementedError("WebDAV app creation should be handled by WebDAVService")
 
     def _build_user_mapping(self) -> dict[str, dict[str, dict[str, str]]]:
         mapping: dict[str, dict[str, dict[str, str]]] = {}
@@ -585,7 +579,11 @@ class CacheInfinityService:
             return
 
         staging_path = self.staging.reserve_tempfile("probe")
-        result = self.fetcher.download_file(remote_url, staging_path)
+        result = self.fetcher.download_file(
+            remote_url,
+            staging_path,
+            url_handler=descriptor.url_handler,
+        )
         if not result.success:
             message = result.error_message or ""
             _LOGGER.warning("Availability probe failed for %s: %s", remote_url, message)
@@ -1090,6 +1088,15 @@ class CacheInfinityService:
             "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
         }
 
+        # Always show rclone settings
+        result["rclone"] = {
+            "enabled": settings.rclone.enabled,
+            "config_path": _path(settings.rclone.config_path),
+            "rc_url": settings.rclone.rc_url or "",
+            "rc_user": settings.rclone.rc_user or "",
+            "rc_pass": settings.rclone.rc_pass or "",
+        }
+
         # Always show cookies (even if empty)
         if settings.cookies:
             result["cookies"] = [
@@ -1230,7 +1237,14 @@ class CacheInfinityService:
             folders.append({"path": path, "label": label, "parent": parent, "depth": depth})
         return {"folders": folders, "entries": entries_by_folder}
 
-    def update_cachelink_entry(self, canonical_id: str, *, url: str, subfolder: str) -> None:
+    def update_cachelink_entry(
+        self,
+        canonical_id: str,
+        *,
+        url: str,
+        subfolder: str,
+        url_handler: str | None = None,
+    ) -> None:
         descriptor = self.cachelinks.cachelinks.get(canonical_id)
         if not descriptor:
             raise ConfigError(f"Unknown cachelink id {canonical_id}")
@@ -1250,6 +1264,8 @@ class CacheInfinityService:
             raise ConfigError(f"Entry '{canonical_id}' missing in source file")
         leaf["url"] = url.strip()
         leaf["subfolder"] = subfolder.strip() or "/"
+        if url_handler is not None:
+            leaf["url_handler"] = url_handler
         self._write_cachelinks_document(doc, descriptor.source_file)
 
     def delete_cachelink_entry(self, canonical_id: str) -> None:
@@ -1328,7 +1344,12 @@ class CacheInfinityService:
                 break
         self._write_cachelinks_document(doc, doc_path)
 
-    def preview_cachelink(self, url: str, subfolder: str | None = None) -> dict[str, object]:
+    def preview_cachelink(
+        self,
+        url: str,
+        subfolder: str | None = None,
+        url_handler: str | None = None,
+    ) -> dict[str, object]:
         sub = (subfolder or "/").strip() or "/"
         identifier, download_root = normalize_source_url(url)
         descriptor = CachelinkDescriptor(
@@ -1340,9 +1361,14 @@ class CacheInfinityService:
             download_root=download_root,
             subfolder=sub,
             mode=_detect_mode(sub),
+            url_handler=url_handler or "auto",
         )
         remote_url = descriptor.remote_listing_url
-        entries, metadata = self._preview_fetcher.fetch(descriptor, remote_url, parse_entries=True)
+        entries, metadata = self._preview_fetcher.fetch(
+            remote_url,
+            parse_entries=True,
+            url_handler=descriptor.url_handler,
+        )
         preview_rows = [
             {
                 "path": entry.path,
@@ -1363,6 +1389,7 @@ class CacheInfinityService:
         name: Optional[str] = None,
         url: Optional[str],
         subfolder: Optional[str] = None,
+        url_handler: Optional[str] = None,
     ) -> dict[str, object]:
         if not isinstance(url, str) or not url.strip():
             raise ConfigError("cachelink creation requires a URL")
@@ -1402,6 +1429,7 @@ class CacheInfinityService:
                 "url": normalized_url,
                 "subfolder": cleaned_subfolder,
                 "mode": _detect_mode(cleaned_subfolder).value,
+                "url_handler": url_handler,
                 "source_file": str(self.settings.config_dir / "bootstrap.yml"),
             }
         )

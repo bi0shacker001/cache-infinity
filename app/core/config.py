@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
@@ -84,6 +85,24 @@ class ConfigService:
                 {
                     "max_zip_total_gb": int(limits.get("max_zip_total_gb") or 100),
                     "one_zip_cache_at_a_time": bool(limits.get("one_zip_cache_at_a_time", False)),
+                }
+            )
+
+        if "rclone" in payload:
+            rclone = payload.get("rclone") or {}
+            config_path = rclone.get("config_path") or None
+            if config_path:
+                config_path = Path(config_path)
+                if not config_path.is_absolute():
+                    config_path = config_dir / config_path
+                config_path = str(config_path)
+            index_db.save_rclone(
+                {
+                    "enabled": bool(rclone.get("enabled", False)),
+                    "config_path": config_path,
+                    "rc_url": rclone.get("rc_url") or None,
+                    "rc_user": rclone.get("rc_user") or None,
+                    "rc_pass": rclone.get("rc_pass") or None,
                 }
             )
 
@@ -274,14 +293,17 @@ class ConfigService:
             _, leaf = self.locate_cachelink_leaf(descriptor)
             source_url = leaf.get("url", descriptor.source_url)
             subfolder = leaf.get("subfolder", descriptor.subfolder)
+            url_handler = leaf.get("url_handler", descriptor.url_handler)
         except ConfigError:
             source_url = descriptor.source_url
             subfolder = descriptor.subfolder
+            url_handler = descriptor.url_handler
         return {
             "canonical_id": descriptor.canonical_id,
             "name": descriptor.path_segments[-1],
             "url": source_url,
             "subfolder": subfolder,
+            "url_handler": url_handler,
             "mode": snapshot["mode"],
             "files_total": snapshot["files_total"],
             "cached_files": snapshot["cached_files"],
@@ -313,6 +335,7 @@ class ConfigService:
             "remote_url": descriptor.remote_listing_url,
             "download_root": descriptor.download_root,
             "identifier": descriptor.identifier,
+            "url_handler": descriptor.url_handler,
             "mode": descriptor.mode.value,
             "entries_total": counts["entries_total"],
             "files_total": counts["files_total"],
@@ -443,6 +466,13 @@ class ConfigService:
                 "max_zip_total_gb": settings.limits.max_zip_total_gb,
                 "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
             },
+            "rclone": {
+                "enabled": settings.rclone.enabled,
+                "config_path": str(settings.rclone.config_path) if settings.rclone.config_path else None,
+                "rc_url": settings.rclone.rc_url,
+                "rc_user": settings.rclone.rc_user,
+                "rc_pass": settings.rclone.rc_pass,
+            },
             "indexing": {
                 "min_full_reindex_days": settings.indexing.min_full_reindex_days,
                 "max_full_reindex_days": settings.indexing.max_full_reindex_days,
@@ -533,6 +563,7 @@ class ConfigService:
                 "url": cachelink.get("url") or "",
                 "subfolder": cachelink.get("subfolder") or "/",
                 "mode": cachelink.get("mode") or _detect_mode(cachelink.get("subfolder") or "/").value,
+                "url_handler": cachelink.get("url_handler"),
             }
         return tree
 
@@ -555,6 +586,7 @@ class ConfigService:
                             "url": value.get("url", ""),
                             "subfolder": value.get("subfolder", "/"),
                             "mode": value.get("mode") or _detect_mode(value.get("subfolder", "/")).value,
+                            "url_handler": value.get("url_handler") or value.get("handler"),
                             "source_file": str(config_dir / "bootstrap.yml"),
                         }
                     )
@@ -597,6 +629,7 @@ class ConfigMigration:
                 "config_shares",
                 "config_auth",
                 "config_tls",
+                "config_rclone",
                 "config_users",
                 "config_cachelinks"
             ]
@@ -704,7 +737,14 @@ class ConfigMigration:
         for domain, cookie_raw in cookies_raw.items():
             # Cookie jar content should be stored as string directly
             cookie_content = ""
-            if cookie_raw.get("cookie_jar"):
+            cookies_b64 = cookie_raw.get("cookies_b64")
+            if isinstance(cookies_b64, str) and cookies_b64:
+                try:
+                    cookie_content = base64.b64decode(cookies_b64.encode("ascii")).decode("utf-8")
+                except Exception as exc:
+                    self._logger.warning("Invalid cookies_b64 for %s: %s", domain, exc)
+                    cookie_content = ""
+            elif cookie_raw.get("cookie_jar"):
                 # If cookie_jar is a path, read the content
                 cookie_jar_value = cookie_raw["cookie_jar"]
                 if isinstance(cookie_jar_value, str):
@@ -719,6 +759,8 @@ class ConfigMigration:
                     else:
                         # Treat as direct cookie content string
                         cookie_content = cookie_jar_value
+            if isinstance(cookie_content, str):
+                cookie_content = cookie_content.replace("\r\n", "\n")
             
             cookie = {
                 "domain": domain.lower(),
@@ -761,6 +803,18 @@ class ConfigMigration:
             "dns01_config": json.dumps(tls_raw.get("dns01", {}))
         }
         self.index_db.save_tls(tls)
+
+        # Migrate rclone
+        rclone_raw = bootstrap_data.get("rclone", {})
+        if rclone_raw:
+            rclone = {
+                "enabled": bool(rclone_raw.get("enabled", False)),
+                "config_path": rclone_raw.get("config_path"),
+                "rc_url": rclone_raw.get("rc_url"),
+                "rc_user": rclone_raw.get("rc_user"),
+                "rc_pass": rclone_raw.get("rc_pass"),
+            }
+            self.index_db.save_rclone(rclone)
         
         # Migrate users
         users_raw = bootstrap_data.get("users", {})
@@ -804,6 +858,7 @@ class ConfigMigration:
                     "url": item.get("url", ""),
                     "subfolder": item.get("subfolder", "/"),
                     "mode": item.get("mode", "directory"),
+                    "url_handler": item.get("url_handler") or item.get("handler"),
                     "source_file": item.get("source_file")
                     or str(bootstrap_path or (self.config_dir / "bootstrap.yml")),
                 }
@@ -827,6 +882,7 @@ class ConfigMigration:
                             "url": value.get("url", ""),
                             "subfolder": value.get("subfolder", "/"),
                             "mode": value.get("mode", "directory"),
+                            "url_handler": value.get("url_handler") or value.get("handler"),
                             "source_file": source_file,
                         }
                     )
@@ -1074,6 +1130,17 @@ class TLSSettings:
             raise ConfigError("HTTP-01 mode requires domains")
         if self.mode == "dns-01" and not self.dns01.domains:
             raise ConfigError("DNS-01 mode requires domains")
+
+
+@dataclass
+class RcloneSettings:
+    """Rclone configuration for cloud remotes."""
+
+    enabled: bool = False
+    config_path: Optional[Path] = None
+    rc_url: Optional[str] = None
+    rc_user: Optional[str] = None
+    rc_pass: Optional[str] = None
 
 
 def load_database_backed_settings(
@@ -1338,6 +1405,12 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         )
     else:
         tls = TLSSettings()
+
+    rclone_raw = index_db.get_rclone()
+    if rclone_raw:
+        rclone = _parse_rclone(rclone_raw, config_dir)
+    else:
+        rclone = RcloneSettings()
     
     cachelinks_data = index_db.get_cachelinks() or []
     mount_tree_paths: list[Path] = []
@@ -1357,6 +1430,7 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         database=database_settings,
         auth=auth,
         tls=tls,
+        rclone=rclone,
         indexing=indexing,
         limits=limits,
         datadirs=datadirs,
@@ -1390,6 +1464,7 @@ def _build_cachelinks_tree(cachelinks_data: list[dict]) -> dict:
             "url": cachelink.get("url") or "",
             "subfolder": cachelink.get("subfolder") or "/",
             "mode": cachelink.get("mode") or _detect_mode(cachelink.get("subfolder") or "/").value,
+            "url_handler": cachelink.get("url_handler"),
         }
     return cachelinks_dict
 
@@ -1600,6 +1675,18 @@ def _parse_tls(tls_raw: dict, config_dir: Path) -> TLSSettings:
     return tls
 
 
+def _parse_rclone(rclone_raw: dict, config_dir: Path) -> RcloneSettings:
+    """Parse rclone configuration."""
+    config_path = _optional_path(rclone_raw.get("config_path"), config_dir)
+    return RcloneSettings(
+        enabled=bool(rclone_raw.get("enabled", False)),
+        config_path=config_path,
+        rc_url=rclone_raw.get("rc_url"),
+        rc_user=rclone_raw.get("rc_user"),
+        rc_pass=rclone_raw.get("rc_pass"),
+    )
+
+
 def _require_path(payload: dict, key: str, base: Optional[Path] = None) -> Path:
     """Require a path value and resolve it relative to base."""
     value = payload.get(key)
@@ -1638,6 +1725,7 @@ class Settings:
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
     auth: AuthSettings = field(default_factory=AuthSettings)
     tls: TLSSettings = field(default_factory=TLSSettings)
+    rclone: RcloneSettings = field(default_factory=RcloneSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     limits: LimitsDefinition = field(default_factory=LimitsDefinition)
     datadirs: dict[str, DatadirDefinition] = field(default_factory=dict)
@@ -1681,6 +1769,7 @@ __all__ = [
     "LDAPSettings",
     "ProxyAuthSettings",
     "AuthSettings",
+    "RcloneSettings",
     "TLSHTTPSettings",
     "TLSDNS01Settings",
     "TLSManualSettings",

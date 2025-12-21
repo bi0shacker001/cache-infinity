@@ -348,12 +348,12 @@ class DBAdapter:
             logging.getLogger(__name__).error(f"Failed to upsert auth user: {exc}")
             return False
     
-    def get_user_credentials(self, username: str) -> dict | None:
+    def get_user_credentials(self, username: str, *, purpose: str = "webui") -> dict | None:
         """Get user credentials from database."""
         try:
             result = self.fetchone(
-                "SELECT id, username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at FROM auth_users WHERE username = ?",
-                (username,)
+                "SELECT id, username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at FROM auth_users WHERE username = ? AND purpose = ?",
+                (username, purpose)
             )
             return result
         except Exception as exc:
@@ -361,16 +361,17 @@ class DBAdapter:
             logging.getLogger(__name__).error(f"Failed to get user credentials: {exc}")
             return None
     
-    def validate_credentials(self, username: str, password: str) -> bool:
+    def validate_credentials(self, username: str, password: str, *, purpose: str = "webui") -> bool:
         """Validate user credentials against database."""
         try:
-            result = self.get_user_credentials(username)
+            result = self.get_user_credentials(username, purpose=purpose)
             if not result:
                 return False
-            
+            if not result.get("enabled"):
+                return False
+
             stored_plain = result.get('password_plain')
             stored_hash = _normalize_password_hash(result.get('password_hash'))
-            purpose = result.get("purpose")
             
             # Check plain text password first (for backward compatibility)
             if stored_plain and stored_plain == password:

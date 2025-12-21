@@ -152,6 +152,7 @@ def _handle_cachelinks(client: LocalControlClient, args) -> int:
                     "name": args.name,
                     "url": args.url,
                     "subfolder": args.subfolder,
+                    "url_handler": args.url_handler,
                 },
             }
         )
@@ -166,6 +167,7 @@ def _handle_cachelinks(client: LocalControlClient, args) -> int:
                     "canonical_id": args.canonical_id,
                     "url": args.url,
                     "subfolder": args.subfolder,
+                    "url_handler": args.url_handler,
                 },
             }
         )
@@ -187,7 +189,11 @@ def _handle_cachelinks(client: LocalControlClient, args) -> int:
                 {
                     "command": "cachelinks",
                     "action": "preview",
-                    "args": {"url": args.url, "subfolder": args.subfolder},
+                    "args": {
+                        "url": args.url,
+                        "subfolder": args.subfolder,
+                        "url_handler": args.url_handler,
+                    },
                 }
             )
         )
@@ -213,6 +219,13 @@ def _handle_cachelinks(client: LocalControlClient, args) -> int:
         print("ok")
         return 0
     raise ValueError("Unknown cachelinks action")
+
+
+def _handle_rclone(client: LocalControlClient, args) -> int:
+    if args.action == "remotes":
+        _print_json(client.request({"command": "rclone", "action": "remotes"}))
+        return 0
+    raise ValueError("Unknown rclone action")
 
 
 def _handle_cookies(client: LocalControlClient, args) -> int:
@@ -532,19 +545,26 @@ def create_argument_parser() -> argparse.ArgumentParser:
     cachelinks_create.add_argument("--name", required=True)
     cachelinks_create.add_argument("--url", required=True)
     cachelinks_create.add_argument("--subfolder", default="/")
+    cachelinks_create.add_argument("--url-handler", default=None)
     cachelinks_update = cachelinks_sub.add_parser("update", help="Update cachelink")
     cachelinks_update.add_argument("--canonical-id", required=True)
     cachelinks_update.add_argument("--url")
     cachelinks_update.add_argument("--subfolder")
+    cachelinks_update.add_argument("--url-handler", default=None)
     cachelinks_delete = cachelinks_sub.add_parser("delete", help="Delete cachelink")
     cachelinks_delete.add_argument("--canonical-id", required=True)
     cachelinks_preview = cachelinks_sub.add_parser("preview", help="Preview cachelink")
     cachelinks_preview.add_argument("--url", required=True)
     cachelinks_preview.add_argument("--subfolder", default="/")
+    cachelinks_preview.add_argument("--url-handler", default=None)
     cachelinks_folder_add = cachelinks_sub.add_parser("folder-add", help="Add cachelink folder")
     cachelinks_folder_add.add_argument("--path", required=True)
     cachelinks_folder_delete = cachelinks_sub.add_parser("folder-delete", help="Delete cachelink folder")
     cachelinks_folder_delete.add_argument("--path", required=True)
+
+    rclone = subparsers.add_parser("rclone", help="Rclone control via rclone rc")
+    rclone_sub = rclone.add_subparsers(dest="action", required=True)
+    rclone_sub.add_parser("remotes", help="List rclone remotes")
 
     cookies = subparsers.add_parser("cookies", help="Manage cookies")
     cookies_sub = cookies.add_subparsers(dest="action", required=True)
@@ -667,6 +687,8 @@ def main() -> int:
         return _handle_storage(client, args)
     if args.command == "cachelinks":
         return _handle_cachelinks(client, args)
+    if args.command == "rclone":
+        return _handle_rclone(client, args)
     if args.command == "cookies":
         return _handle_cookies(client, args)
     if args.command == "users":

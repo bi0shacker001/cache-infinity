@@ -27,6 +27,13 @@
     <input type="text" id="cachelink-url" placeholder="https://archive.org/download/Identifier" />
     <label>Subfolder</label>
     <input type="text" id="cachelink-subfolder" value="/" />
+    <label>URL Handler</label>
+    <select id="cachelink-url-handler">
+      <option value="auto">Auto</option>
+      <option value="http">HTTP/HTTPS</option>
+      <option value="ftp">FTP/FTPS</option>
+      <option value="rclone">Rclone</option>
+    </select>
     <div class="editor-actions">
       <button class="btn btn-primary" id="cachelink-save-btn" type="button">Save</button>
       <button class="btn btn-secondary" id="cachelink-revert-btn" type="button">Revert</button>

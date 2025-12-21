@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -15,9 +15,6 @@ from core.errors import ConfigError
 
 from .adapter import DBAdapter
 from .schema import IndexDatabase
-
-if TYPE_CHECKING:
-    from db.settings import DatabaseSettings
 
 _logger = logging.getLogger(__name__)
 
@@ -514,12 +511,6 @@ def validate_database_yml(database_path: Path) -> dict:
                 (cutoff,),
             )
             
-            # Clean up old WebUI sessions
-            self.adapter.execute(
-                "DELETE FROM webui_sessions WHERE last_used_at < ?",
-                (cutoff,),
-            )
-
             # Clean up old auth sessions
             self.adapter.execute(
                 "DELETE FROM auth_sessions WHERE expires_at < ?",
