@@ -8,11 +8,10 @@ import secrets
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Iterable, Sequence, Protocol
 
 from cache.cachelinks import CachelinkDescriptor
-from core.errors import ConfigError
 
 _HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
 _HASH_SCHEME_SHA256 = "sha256"

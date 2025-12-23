@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from wsgidav.dav_provider import DAVProvider
 from wsgidav.dc.base_dc import BaseDomainController

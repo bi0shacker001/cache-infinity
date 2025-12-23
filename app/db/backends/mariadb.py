@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Optional, Iterable
 
 _logger = logging.getLogger(__name__)
 

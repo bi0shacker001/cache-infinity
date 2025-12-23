@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 import logging
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from cache.cachelinks import CachelinkIndex, load_cachelinks
 from cache.checksum import ChecksumCatalog
@@ -26,7 +26,7 @@ from core.errors import (
 from auth.credentials import AuthConfigManager
 from auth.tls import TLSAutomationService, create_tls_automation_service
 from net.fetcher import Fetcher
-from net.indexer import Indexer, RemoteListingFetcher
+from net.indexer import Indexer
 from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
 from storage.configuration import ConfigurationManager

@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import subprocess
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from core.config import ConfigError, TLSSettings, TLSHTTPSettings, TLSDNS01Settings, Settings
+from core.config import ConfigError, TLSSettings, Settings
 from storage.configuration import ConfigurationManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,7 +30,6 @@ class TLSAutomationError(Exception):
     """Raised when TLS automation fails."""
     
     # TODO: Add specific error codes and detailed error messages
-    pass
 
 
 class TLSAutomationService:

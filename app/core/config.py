@@ -6,11 +6,10 @@ import base64
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from wsgidav.dav_provider import DAVProvider
 
 from auth.credentials import CookieJarDefinition
 from cache.cachelinks import _detect_mode
@@ -585,7 +584,6 @@ class ConfigService:
 
 class ConfigMigrationError(Exception):
     """Raised when configuration migration fails."""
-    pass
 
 
 class ConfigMigration:

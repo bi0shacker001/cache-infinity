@@ -253,7 +253,7 @@ class AuthConfigManager:
             api_key = secrets.token_urlsafe(32)
             
             # Get or create cli-backend user
-            cli_user = self._get_or_create_cli_user()
+            self._get_or_create_cli_user()
             
             # Remove existing API key if present (handled by upsert)
             # Update user with new API key using standard method
@@ -516,7 +516,7 @@ class AuthConfigManager:
     def _cleanup_expired_sessions(self) -> None:
         """Clean up expired sessions from memory using database adapter."""
         with self._lock:
-            now = datetime.utcnow()
+            datetime.utcnow()
             expired_tokens = []
             for token, session in self._sessions.items():
                 if not session.is_valid():

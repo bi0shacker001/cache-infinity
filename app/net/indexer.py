@@ -9,7 +9,7 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse
 from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager

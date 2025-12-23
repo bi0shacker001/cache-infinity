@@ -115,7 +115,6 @@ class FrontendService(ABC):
         Returns:
             Dictionary with user-friendly status information
         """
-        pass
     
     @abstractmethod
     def get_help_information(self) -> Dict[str, Any]:
@@ -124,7 +123,6 @@ class FrontendService(ABC):
         Returns:
             Dictionary with help information
         """
-        pass
     
     @abstractmethod
     def get_service_capabilities(self) -> List[str]:
@@ -133,7 +131,6 @@ class FrontendService(ABC):
         Returns:
             List of feature descriptions
         """
-        pass
     
     def validate_user_access(self, username: str, path: str) -> bool:
         """Validate if a user has access to a specific path.

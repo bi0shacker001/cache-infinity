@@ -132,7 +132,6 @@ class DatadirStorage:
         Returns:
             True if write was successful
         """
-        import tempfile
         
         try:
             # Write to temporary file first
@@ -163,7 +162,6 @@ class DatadirStorage:
         Returns:
             Dictionary with file information or None if file doesn't exist
         """
-        import time
         
         try:
             path = self.resolve(relative_path)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import html
 import logging
 import os
 from urllib.parse import parse_qs, unquote
@@ -753,7 +752,6 @@ def load_cachelinks(app: "WebUIApp"):
     _LOGGER.debug("Registered cachelinks handlers")
 
     # Add cachelinks-specific routes to the main app
-    pass
 
 class CachelinksHandlers:
     """Handle cachelink-specific API requests."""
@@ -889,7 +887,6 @@ def load_cookies(app: "WebUIApp"):
     app.handlers['cookies'] = CookiesHandlers(app.service, app.management)
 
     # Add cookies-specific routes to the main app
-    pass
 
 class CookiesHandlers:
     """Handle cookie-specific API requests."""
@@ -984,7 +981,6 @@ def load_maintenance(app: "WebUIApp"):
     _LOGGER.debug("Registered maintenance handlers")
 
     # Add maintenance-specific routes to the main app
-    pass
 
 class MaintenanceHandlers:
     """Handle maintenance-specific API requests."""
@@ -1043,7 +1039,6 @@ def load_settings(app: "WebUIApp"):
     _LOGGER.debug("Registered settings handlers")
 
     # Add settings-specific routes to the main app
-    pass
 
 class SettingsHandlers:
     """Handle settings-specific API requests."""
@@ -1115,7 +1110,6 @@ def load_users(app: "WebUIApp"):
     _LOGGER.debug("Registered users handlers")
 
     # Add users-specific routes to the main app
-    pass
 
 class UsersHandlers:
     """Handle user-specific API requests."""
@@ -1253,7 +1247,6 @@ def load_storage(app: "WebUIApp"):
 
     # Add storage-specific routes to the main app
     # These will be handled by the main WebUIApp.__call__ method
-    pass
 
 class StorageHandlers:
     """Handle storage-specific API requests."""

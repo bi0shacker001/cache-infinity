@@ -1,0 +1,75 @@
+app/ui/backend.py:29:1: 'typing.Tuple' imported but unused
+app/ui/api.py:6:1: 'typing.Any' imported but unused
+app/ui/api.py:6:1: 'typing.Dict' imported but unused
+app/ui/api.py:6:1: 'typing.List' imported but unused
+app/ui/api.py:6:1: 'typing.Optional' imported but unused
+app/ui/web/webcore.py:6:1: 'html' imported but unused
+app/net/__init__.py:6:1: 'typing.Optional' imported but unused
+app/net/indexer.py:12:1: 'urllib.parse.parse_qs' imported but unused
+app/core/logging.py:7:1: 'os' imported but unused
+app/core/services.py:9:1: 'typing.Optional' imported but unused
+app/core/services.py:29:1: 'net.indexer.RemoteListingFetcher' imported but unused
+app/core/server.py:74:22: undefined name 'ConfigStateStore'
+app/core/server.py:116:22: undefined name 'ConfigStateStore'
+app/core/server.py:135:22: undefined name 'ConfigStateStore'
+app/core/server.py:153:22: undefined name 'ConfigStateStore'
+app/core/server.py:403:24: undefined name 'TLSMode'
+app/core/server.py:407:29: undefined name 'TLSMode'
+app/core/server.py:407:45: undefined name 'TLSMode'
+app/core/server.py:407:59: undefined name 'TLSMode'
+app/core/server.py:784:56: undefined name 'Any'
+app/core/server.py:867:65: undefined name 'Any'
+app/core/server.py:1597:5: redefinition of unused 'validate_ui_credentials' from line 386
+app/core/config.py:9:1: 'pathlib.PurePosixPath' imported but unused
+app/core/config.py:13:1: 'wsgidav.dav_provider.DAVProvider' imported but unused
+app/cache/checksum.py:9:1: 'time' imported but unused
+app/cache/checksum.py:12:1: 'typing.Iterator' imported but unused
+app/cache/checksum.py:13:1: 'urllib.parse.urlparse' imported but unused
+app/auth/credentials.py:256:13: local variable 'cli_user' is assigned to but never used
+app/auth/credentials.py:519:13: local variable 'now' is assigned to but never used
+app/auth/tls.py:5:1: 'json' imported but unused
+app/auth/tls.py:7:1: 'os' imported but unused
+app/auth/tls.py:9:1: 'tempfile' imported but unused
+app/auth/tls.py:15:1: 'core.config.TLSHTTPSettings' imported but unused
+app/auth/tls.py:15:1: 'core.config.TLSDNS01Settings' imported but unused
+app/storage/datadir.py:135:9: 'tempfile' imported but unused
+app/storage/datadir.py:166:9: 'time' imported but unused
+app/storage/staging.py:11:1: redefinition of unused 'dataclass' from line 7
+app/storage/staging.py:12:1: redefinition of unused 'Path' from line 8
+app/storage/staging.py:49:38: undefined name 'Dict'
+app/storage/staging.py:49:48: undefined name 'Any'
+app/storage/staging.py:115:21: undefined name '_logger'
+app/storage/staging.py:117:13: undefined name '_logger'
+app/storage/staging.py:121:13: undefined name '_logger'
+app/storage/staging.py:124:36: undefined name 'List'
+app/storage/staging.py:124:41: undefined name 'Dict'
+app/storage/staging.py:124:51: undefined name 'Any'
+app/storage/staging.py:150:21: undefined name '_logger'
+app/storage/staging.py:155:13: undefined name '_logger'
+app/storage/staging.py:197:17: undefined name '_logger'
+app/storage/staging.py:204:17: undefined name '_logger'
+app/storage/staging.py:219:17: undefined name '_logger'
+app/storage/staging.py:222:13: undefined name '_logger'
+app/storage/staging.py:226:13: undefined name '_logger'
+app/db/backupmgmt.py:9:1: 'typing.Optional' imported but unused
+app/db/backupmgmt.py:11:1: 'core.errors.ConfigError' imported but unused
+app/db/backupmgmt.py:280:27: undefined name 'base64'
+app/db/backupmgmt.py:619:42: undefined name 'base64'
+app/db/adapter.py:89:34: undefined name 'DatabaseSettings'
+app/db/adapter.py:362:42: undefined name 'timedelta'
+app/db/schema.py:11:1: 'pathlib.Path' imported but unused
+app/db/schema.py:15:1: 'core.errors.ConfigError' imported but unused
+app/db/schema.py:2013:5: redefinition of unused 'upsert_auth_user' from line 1138
+app/db/backends/postgresql.py:7:1: 'typing.Any' imported but unused
+app/db/backends/postgresql.py:7:1: 'typing.Optional' imported but unused
+app/db/backends/postgresql.py:7:1: 'typing.Iterable' imported but unused
+app/db/backends/sqlite.py:8:1: 'typing.Any' imported but unused
+app/db/backends/sqlite.py:8:1: 'typing.Optional' imported but unused
+app/db/backends/mariadb.py:7:1: 'typing.Any' imported but unused
+app/db/backends/mariadb.py:7:1: 'typing.Optional' imported but unused
+app/db/backends/mariadb.py:7:1: 'typing.Iterable' imported but unused
+app/hosting/webdav.py:10:1: 'typing.Tuple' imported but unused
+app/hosting/webdav.py:634:50: undefined name 'Path'
+app/hosting/webdav.py:726:51: undefined name 'Path'
+app/hosting/webdav.py:726:76: undefined name 'Path'
+app/hosting/browser_interface.py:6:1: 'typing.Optional' imported but unused

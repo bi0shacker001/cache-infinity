@@ -6,11 +6,9 @@ import hashlib
 import json
 import logging
 import re
-import time
 import zipfile
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Iterator
-from urllib.parse import urlparse
+from typing import Optional, List, Dict, Any
 
 _logger = logging.getLogger(__name__)
 

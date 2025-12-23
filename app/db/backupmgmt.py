@@ -6,9 +6,8 @@ import json
 import logging
 import yaml
 from pathlib import Path
-from typing import Optional, Tuple, List, TYPE_CHECKING
+from typing import Tuple, List, TYPE_CHECKING
 
-from core.errors import ConfigError
 from storage.configuration import ConfigurationManager
 
 _logger = logging.getLogger(__name__)
@@ -18,11 +17,9 @@ if TYPE_CHECKING:
 
 class ConfigExportError(Exception):
     """Raised when configuration export fails."""
-    pass
 
 class ConfigImportError(Exception):
     """Raised when configuration import fails."""
-    pass
 
 class DatabaseBackupManager:
     """Manages database backup and restore operations using bootstrap.yml."""
