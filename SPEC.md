@@ -429,46 +429,72 @@ Top-level:
 
 #### 14.1.1 `/app` package structure
 
-* `app/auth/`: authentication and security management
-  * `credentials.py`: user credential management, authentication store, and session handling
-  * `tls.py`: TLS certificate management and automation for secure communications
-* `app/cache/`: caching logic and checksum validation
-  * `cachelinks.py`: virtual filesystem overlay for organizing remote content
-  * `checksum.py`: checksum calculation and validation for file integrity
-* `app/core/`: core application infrastructure and configuration management
-  * `config.py`: configuration loading, validation, and runtime configuration model
-  * `errors.py`: custom exception classes and error handling utilities
-  * `logging.py`: centralized logging configuration and utilities
-  * `server.py`: core server loop (startup/shutdown)
-  * `services.py`: service orchestration and lifecycle management
-* `app/db/`: database layer (configuration state, metadata, migrations)
-  * `adapter.py`: database access shim for pluggable backends
-  * `backupmgmt.py`: database backup and restore management
-  * `dbmanage.py`: database controller (migrations, maintenance utilities)
-  * `schema.py`: active schema plus query parsing logic for seamless upgrades
-  * `app/db/backends/`:
-    * `postgresql.py`: PostgreSQL connection logic with pooling
-    * `sqlite.py`: SQLite connection logic (development/testing)
-* `app/hosting/`: end-user interface implementations
-  * `browser_interface.py`: user-facing browser interface (served alongside WebDAV port)
-  * `frontend.py`: interface adapter (uniform interface for all frontends)
-  * `webdav.py`: WebDAV provider for remote filesystem access
-* `app/net/`: network operations and data transfer
-  * `fetcher.py`: **PycURL-based** download manager for remote file retrieval
-  * `indexer.py`: background indexing worker for remote content discovery
-* `app/storage/`: storage management (datadir, config dir, staging)
-  * `datadir.py`: datadir storage manager; handles all reads and writes to datadir storage
-  * `configuration.py`: configuration directory manager; handles all reads and writes to the config directory
-  * `staging.py`: staging storage manager; handles all reads and writes to staging storage
-* `app/ui/`: admin interface and management layer
-  * `api.py`: admin API endpoints exposed over the WebDAV port (not the WebUI)
-  * `cli.py`: command-line interface for administration and automation
-  * `backend.py`: management layer for WebUI operations and user interactions (old name: `management.py`)
-  * `app/ui/web/`: web-based UI assets
-    * `webcore.py`: WebUI application core and page routing
-    * `assets/`: static web assets (CSS/JS/HTML templates)
-* `app/utils/`: utilities and helpers
-  * `filemanager.py`: browser-based file management module
+app: #Folder. Main application package containing all CacheInfinity core functionality
+  auth: #Folder. Authentication and security management components
+    - credentials.py #File. User credential management, authentication store, and session handling
+    - tls.py #File. TLS certificate management and automation for secure communications. Also handles
+  cache: #Folder. Caching logic and checksum validation systems
+    - cachelinks.py #File. Virtual file system management for remote content organization
+    - checksum.py #File. Checksum calculation and validation for file integrity verification
+  core: #Folder. Core application infrastructure and configuration management
+    - config.py #File. Configuration loading, validation, and management system
+    - errors.py #File. Custom exception classes and error handling utilities
+    - logging.py #File. Centralized logging configuration and utilities
+    - server.py #File. Core server loop. Handles startup and shutdown of the server overall
+    - services.py #File. Service orchestration and lifecycle management
+  db: #Folder. All database functionality. Database flow: dbmanage.py (formats/maintains data using schema.py) -> adapter.py (routes WHERE data is written) -> backends/* (implement HOW the DB is accessed)
+    - adapter.py #File. Database access shim that routes WHERE data is written; never touches the database directly. -- CAN ONLY BE IMPORTED BY: db.dbmanage
+    - backupmgmt.py #File. Database backup and restore management. -- CAN ONLY BE IMPORTED BY: ui.backend, core.services
+    - dbmanage.py #File. Database controller. Formats data using schema.py and runs maintenance tasks before handing off to adapter.py. 
+    - schema.py #File. Active database schema and query logic. Used by dbmanage.py to format and validate DB data. -- CAN ONLY BE IMPORTED BY: dbmanage.py
+    backends: #Folder. Database backend implementations; implement HOW data is written/read.
+      - postgresql.py #File. PostgreSQL database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
+      - mariadb.py #File. MariaDB database connection logic with connection pooling -- CAN ONLY BE IMPORTED BY: db.adapter
+      - sqlite.py #File. SQLite database connection logic for development and testing -- CAN ONLY BE IMPORTED BY: db.adapter --NOTHING ELSE CAN IMPORT (systemx): sqlite
+  hosting: #Folder. End user interface implementations
+    - browser_interface.py #File. User-facing browser interface for CacheInfinity operations -- CAN ONLY BE IMPORTED BY: core.services
+    - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions. -- CAN ONLY BE IMPORTED BY: hosting.*
+    - webdav.py #File. WebDAV provider for remote file system access -- CAN ONLY BE IMPORTED BY: core.services
+  net: #Folder. Network operations and data transfer components
+    - fetcher.py #File. Download manager (primarily using curl) for remote file retrieval
+    - indexer.py #File. Background indexing worker for remote content discovery
+  storage: #Folder. Storage management and staging area handling
+    - datadir.py #File. Datadir storage management for cached content. Handles ALL reads and writes to datadir storage
+    - configuration.py #File. Configuration directory management. Handle ALL reads and writes to the configuration directory 
+    - staging.py #File. Storage management for staging area. Handles all reads and writes to the staging storage
+  ui: #Folder. Admin interface components and management layer
+    - api.py #File. API Endpoints for admin actions. Completely unrelated to the WebUI, and exposed over the webdav port, with the hosting interfaces  -- CAN ONLY BE IMPORTED BY: core.services, hosting.*  --CAN ONLY IMPORT INTERNALLY: ui.backend
+    - cli.py #File. Command-line interface for administration and automation -- CAN ONLY BE IMPORTED BY: core.services  --CAN ONLY IMPORT INTERNALLY: ui.backend, auth.credentials
+    - backend.py #File. Management layer for WebUI operations and user interactions. Old name: management.py -- CAN ONLY BE IMPORTED BY: ui.*
+    web: #Folder. Web-based user interface assets
+      - webcore.py #File. WebUI application core and page routing --CAN ONLY BE IMPORTED BY: core.services --CAN ONLY IMPORT INTERNALLY: ui.backend
+      assets: #Folder. Static web assets (CSS, JavaScript, HTML)
+        css: #Folder. Cascading Style Sheets for UI theming
+          - components.css #File. UI component styling
+          - layout.css #File. Page layout and structure styles
+          - styles.css #File. Global styles and theme definitions
+        js: #Folder. JavaScript files for interactive UI functionality
+          - cachelinks.js #File. Cachelink management interface logic
+          - common.js #File. Shared JavaScript utilities and helpers
+          - cookies.js #File. Cookie management interface functionality
+          - maintenance.js #File. System maintenance and administration tools
+          - overview.js #File. Dashboard and status overview interface
+          - settings.js #File. Configuration settings interface
+          - storage.js #File. Storage management interface
+          - users.js #File. User management interface
+        pages: #Folder. HTML page templates for WebUI
+          - cachelinks.html #File. Cachelink management page
+          - cookies.html #File. Cookie management page
+          - index.html #File. Main WebUI dashboard page
+          - login.html #File. Authentication login page
+          - maintenance.html #File. System maintenance page
+          - overview.html #File. System overview and statistics page
+          - settings.html #File. Configuration settings page
+          - storage.html #File. Storage management page
+          - users.html #File. User administration page
+  utils: #Folder. Utility functions and helper modules
+    - filemanager.py #File. Graphical module for managing files in a browser
+
 
 ### 14.2 TLS and reverse proxy
 
