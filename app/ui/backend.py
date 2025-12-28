@@ -153,6 +153,36 @@ class ManagementLayer:
             logger.error("Failed to get storage utilization: %s", e)
             raise
 
+    def list_shares(self) -> list[Dict[str, Any]]:
+        """Return configured WebDAV shares and user policies."""
+
+        shares = []
+        for share in self.service.settings.shares.values():
+            shares.append(
+                {
+                    "name": share.name,
+                    "datadir_folder": share.datadir_folder.as_posix(),
+                    "frontend_folder": share.frontend_folder.as_posix(),
+                    "writable": share.writable,
+                    "cachelink_overlay": share.cachelink_overlay,
+                    "users": {
+                        username: {
+                            "login": policy.login,
+                            "read": policy.read,
+                            "write": policy.write,
+                            "cache": policy.cache,
+                        }
+                        for username, policy in share.users.items()
+                    },
+                }
+            )
+        return shares
+
+    def list_download_queue(self, *, statuses: list[str] | None = None, limit: int = 50) -> list[Dict[str, Any]]:
+        """Expose queued and in-progress downloads for monitoring."""
+
+        return self.service.index_db.list_download_jobs(statuses=statuses, limit=limit)
+
     def reload_service(self, allow_switch: bool = False, dump: bool = False) -> Dict[str, Any]:
         """Reload configuration and reinitialize the running service."""
         try:

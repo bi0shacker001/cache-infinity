@@ -52,6 +52,29 @@ When running natively the config search order is:
   files, but it no longer watches the filesystem for edits.
 - Deployable via systemd or Docker (with a dedicated PostgreSQL sidecar in Compose).
 
+### WebDAV behavior
+
+- The WebDAV server is backed directly by the primary datadir, so reads and writes
+  are immediately reflected on disk. PUT/MKCOL requests create datadir files or
+  folders as needed, while DELETE removes local objects.
+- Cachelink overlays present remote descriptors alongside datadir content when the
+  share and user allow cache access. Cachelink directories enumerate children from
+  the index, and cachelink files lazily download into the datadir on first access.
+- COPY and MOVE operations target the datadir paths resolved from each share, so
+  clients can duplicate or reorganize cached files without touching remote sources.
+- WebDAV support depends on the optional `wsgidav` extra. You can disable the
+  WebDAV server entirely with `--disable-webdav` (useful when running only the
+  Web UI/API or when WsgiDAV is not installed).
+
+### Admin API (read-only)
+
+- `GET /api/status`: health snapshot used by the Web UI dashboard.
+- `GET /api/storage/files`: browse datadir/staging paths.
+- `GET /api/cachelinks`: list configured cachelink descriptors.
+- `GET /api/shares`: describe WebDAV shares and per-user permissions.
+- `GET /api/downloads`: inspect queued/in-progress downloads (filter via
+  `?status=pending,in_progress&limit=25`).
+
 ## Status & inspiration
 
 - **Initial state warning:** the project is intentionally incomplete so the spec and

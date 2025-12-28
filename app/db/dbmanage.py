@@ -104,6 +104,31 @@ class DatabaseManager:
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
+
+        # Pending downloads queue for background fetcher
+        self.adapter.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                expected_checksum TEXT,
+                priority INTEGER DEFAULT 1,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                bytes_downloaded INTEGER DEFAULT 0,
+                actual_checksum TEXT,
+                verified INTEGER DEFAULT 0,
+                completed_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self.adapter.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_status_priority ON pending_downloads(status, priority DESC, created_at ASC)"
+        )
+        self._ensure_pending_download_columns()
         self.adapter.commit()
 
 
@@ -399,6 +424,217 @@ def load_bootstrap_data(config_dir: Path, bootstrap_path: Path | None) -> dict:
 
     def rollback(self) -> None:
         self.adapter.rollback()
+
+    # Pending download management -----------------------------------------
+    def enqueue_download(
+        self,
+        url: str,
+        destination: str,
+        *,
+        expected_checksum: str | None = None,
+        priority: int = 1,
+    ) -> bool:
+        now = int(datetime.now(timezone.utc).timestamp())
+        try:
+            self.adapter.execute(
+                """
+                INSERT INTO pending_downloads (
+                    url, destination, expected_checksum, priority, status, error_message,
+                    bytes_downloaded, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', '', 0, ?, ?)
+                """,
+                (url, destination, expected_checksum, priority, now, now),
+            )
+            self.adapter.commit()
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to enqueue download %s: %s", url, exc)
+            self.adapter.rollback()
+            return False
+
+    def list_pending_downloads(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        try:
+            return self.adapter.fetchall(
+                """
+                SELECT id, url, destination, expected_checksum, priority
+                FROM pending_downloads
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to list pending downloads: %s", exc)
+            return []
+
+    def list_download_jobs(
+        self, *, statuses: list[str] | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return download queue entries across statuses for monitoring.
+
+        Args:
+            statuses: Optional list of status filters. When omitted, all jobs are
+                returned.
+            limit: Maximum number of rows to return.
+        """
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if statuses:
+            placeholders = ",".join(["?"] * len(statuses))
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        try:
+            return self.adapter.fetchall(
+                f"""
+                SELECT
+                    id,
+                    url,
+                    destination,
+                    expected_checksum,
+                    actual_checksum,
+                    priority,
+                    status,
+                    error_message,
+                    bytes_downloaded,
+                    verified,
+                    created_at,
+                    updated_at,
+                    completed_at
+                FROM pending_downloads
+                {where_sql}
+                ORDER BY
+                    CASE status
+                        WHEN 'pending' THEN 0
+                        WHEN 'in_progress' THEN 1
+                        WHEN 'completed' THEN 2
+                        WHEN 'failed' THEN 3
+                        ELSE 4
+                    END,
+                    priority DESC,
+                    created_at ASC
+                LIMIT ?
+                """,
+                (*params, limit),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to list download queue: %s", exc)
+            return []
+
+    def claim_pending_downloads(self, *, limit: int = 10) -> list[dict[str, Any]]:
+        """Atomically mark pending downloads as in-progress and return them."""
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        try:
+            jobs = self.adapter.fetchall(
+                """
+                SELECT id, url, destination, expected_checksum, priority
+                FROM pending_downloads
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+
+            if not jobs:
+                return []
+
+            ids = [job["id"] for job in jobs if job.get("id") is not None]
+            if not ids:
+                return []
+
+            placeholders = ",".join(["?"] * len(ids))
+            params: tuple[Any, ...] = (now, *ids)
+            self.adapter.execute(
+                f"UPDATE pending_downloads SET status = 'in_progress', updated_at = ? WHERE id IN ({placeholders})",
+                params,
+            )
+            self.adapter.commit()
+            return jobs
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to claim pending downloads: %s", exc)
+            self.adapter.rollback()
+            return []
+
+    def update_download_status(
+        self,
+        download_id: int,
+        *,
+        status: str,
+        bytes_downloaded: int = 0,
+        error_message: str = "",
+        actual_checksum: str | None = None,
+        verified: bool | None = None,
+        completed_at: int | None = None,
+    ) -> None:
+        now = int(datetime.now(timezone.utc).timestamp())
+        finished_at = completed_at if completed_at is not None else (now if status in {"completed", "failed"} else None)
+        fields = ["status = ?", "bytes_downloaded = ?", "error_message = ?", "updated_at = ?"]
+        params: list[Any] = [status, bytes_downloaded, error_message, now]
+        if actual_checksum is not None:
+            fields.append("actual_checksum = ?")
+            params.append(actual_checksum)
+        if verified is not None:
+            fields.append("verified = ?")
+            params.append(1 if verified else 0)
+        if finished_at is not None:
+            fields.append("completed_at = ?")
+            params.append(finished_at)
+        params.append(download_id)
+        try:
+            self.adapter.execute(
+                f"UPDATE pending_downloads SET {', '.join(fields)} WHERE id = ?",
+                tuple(params),
+            )
+            self.adapter.commit()
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to update download %s: %s", download_id, exc)
+            self.adapter.rollback()
+
+    def _ensure_pending_download_columns(self) -> None:
+        """Backfill pending_downloads table with optional columns if missing."""
+
+        expected_columns = {
+            "actual_checksum": "TEXT",
+            "verified": "INTEGER DEFAULT 0",
+            "completed_at": "INTEGER",
+        }
+
+        existing: set[str] = set()
+        try:
+            if self.adapter.engine == "sqlite":
+                rows = self.adapter.fetchall("PRAGMA table_info(pending_downloads)")
+                existing = {str(row.get("name")) for row in rows if "name" in row}
+            else:
+                rows = self.adapter.fetchall(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'pending_downloads'"
+                )
+                existing = {str(row.get("column_name")) for row in rows if "column_name" in row}
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.debug("Could not inspect pending_downloads columns: %s", exc)
+            return
+
+        for column, definition in expected_columns.items():
+            if column in existing:
+                continue
+            try:
+                self.adapter.execute(
+                    f"ALTER TABLE pending_downloads ADD COLUMN {column} {definition}"
+                )
+                self.adapter.commit()
+                existing.add(column)
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.debug(
+                    "Pending downloads column %s already exists or could not be added: %s",
+                    column,
+                    exc,
+                )
+                self.adapter.rollback()
 
     def __getattr__(self, name: str):
         return getattr(self.index_db, name)

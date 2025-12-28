@@ -9,8 +9,31 @@ import time
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 
-from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
-from wsgidav.dc.base_dc import BaseDomainController
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - only used for type hints
+    from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
+    from wsgidav.dc.base_dc import BaseDomainController
+else:  # pragma: no cover - fallback when optional dependency is absent
+    class _MissingWsgiDAV:  # pylint: disable=too-few-public-methods
+        """Placeholder base that raises if WsgiDAV isn't installed."""
+
+        def __init__(self, *args, **kwargs):
+            raise ModuleNotFoundError(
+                "WsgiDAV is not installed; install the 'wsgidav' extra to enable WebDAV"
+            )
+
+    class DAVCollection(_MissingWsgiDAV):
+        pass
+
+    class DAVNonCollection(_MissingWsgiDAV):
+        pass
+
+    class DAVProvider(_MissingWsgiDAV):
+        pass
+
+    class BaseDomainController(_MissingWsgiDAV):
+        pass
 
 _logger = logging.getLogger(__name__)
 
@@ -43,6 +66,7 @@ class CacheInfinityDomainController(BaseDomainController):
         super().__init__(wsgidav_app, config)
         self._config = config
         self._service = config.get("cacheinfinity_service")
+        self._auth_manager = getattr(self._service, "auth_manager", None)
         self._user_mapping = config.get("simple_dc", {}).get("user_mapping", {})
 
     def getDomainRealm(self, path_info, environ):
@@ -66,12 +90,33 @@ class CacheInfinityDomainController(BaseDomainController):
             return bool(self._service.index_db.validate_ldap_credentials(username, password, purpose="webdav"))
         if mode == "oidc":
             return bool(self._service.index_db.validate_oidc_credentials(username, password))
+        if self._auth_manager:
+            return bool(self._auth_manager.authenticate_user(username, password, purpose="webdav"))
         return bool(self._service.index_db.validate_credentials(username, password, purpose="webdav"))
 
     def basic_authentication(self, realm, username, password, environ):
         return self.isValidUser(realm, username, password, environ)
 
     def digest_authentication(self, realm, username, environ):
+        entry = self._get_user_entry(realm, username)
+        if not entry or not self._service:
+            return False
+        if entry.get("auth") in {"anonymous", "external"}:
+            return False
+        if not self._auth_manager:
+            return False
+        stored = self._auth_manager.db_adapter.get_user_credentials(username, purpose="webdav")
+        if not stored:
+            return False
+        digest_map = stored.get("digest_ha1")
+        if isinstance(digest_map, dict):
+            ha1 = digest_map.get(realm) or digest_map.get("/")
+            if ha1:
+                return ha1
+        password_plain = stored.get("password_plain")
+        if password_plain:
+            ha1 = hashlib.md5(f"{username}:{realm}:{password_plain}".encode("utf-8")).hexdigest()
+            return ha1
         return False
 
     def _resolve_realm(self, path_info):
