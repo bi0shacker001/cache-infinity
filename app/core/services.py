@@ -533,8 +533,27 @@ class WebDAVService(BaseService):
 
     def initialize(self, context: dict[str, Any]) -> None:
         app_service: ApplicationService = context["application"]
-        app = app_service.service.build_wsgi_app()
-        app_service.service.set_wsgi_app(app)
+        service = app_service.service
+        if not service:
+            raise ServiceInitializationError(self.name, "application service not initialized")
+        from wsgidav.wsgidav_app import WsgiDAVApp
+        from hosting.webdav import CacheInfinityDomainController, WebDAVProvider
+
+        provider = WebDAVProvider(service)
+        user_mapping = service._build_user_mapping()
+        config = {
+            "provider_mapping": {"/": provider},
+            "simple_dc": {"user_mapping": user_mapping},
+            "http_authenticator": {
+                "domain_controller": CacheInfinityDomainController,
+                "accept_basic": True,
+                "accept_digest": False,
+                "default_to_digest": False,
+            },
+            "cacheinfinity_service": service,
+        }
+        app = WsgiDAVApp(config)
+        service.set_wsgi_app(app)
 
     def start(self) -> None:
         return None
