@@ -16,11 +16,15 @@ import time
 import random
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import cheroot.wsgi as cheroot_wsgi
 from cheroot.ssl import pyopenssl
-from wsgidav.wsgidav_app import WsgiDAVApp
+
+if TYPE_CHECKING:  # pragma: no cover - optional dependency
+    from wsgidav.wsgidav_app import WsgiDAVApp
+else:  # pragma: no cover - fallback when WsgiDAV is not installed
+    WsgiDAVApp = Any
 
 from auth.credentials import AuthConfigManager
 from auth.tls import TLSAutomationService
@@ -288,7 +292,7 @@ class CacheInfinityService:
                 raise RuntimeError("WebUI app should be built by WebUIService")
             return self._webui_app
 
-    def set_wsgi_app(self, app: WsgiDAVApp) -> None:
+    def set_wsgi_app(self, app: Callable[[dict, Callable], Any]) -> None:
         with self._lock:
             self._wsgi_app = app
 
@@ -427,6 +431,14 @@ class CacheInfinityService:
         self._start_session_cleanup_task()
         # Start TLS automation background task
         self._start_tls_automation_task()
+        # Start progressive indexer background task
+        if self.indexer:
+            self._start_indexer_task()
+        # Start fetcher queue processor
+        if self.fetcher:
+            self._start_fetcher_task()
+        # Start periodic availability probe
+        self._start_availability_probe_task()
         _LOGGER.debug("Background tasks started successfully")
     
     def _start_session_cleanup_task(self) -> None:
@@ -496,14 +508,23 @@ class CacheInfinityService:
                     pending_downloads = self._get_pending_downloads()
                     if pending_downloads:
                         _LOGGER.debug("Processing %d pending downloads", len(pending_downloads))
-                        results = self.fetcher.batch_download(pending_downloads, max_concurrent=3)
+                        id_by_url = {job.get("url"): job.get("id") for job in pending_downloads}
+
+                        def _progress(url: str, progress) -> None:
+                            job_id = id_by_url.get(url)
+                            if job_id is None:
+                                return
+                            try:
+                                self._update_download_progress(job_id, progress.downloaded)
+                            except Exception:
+                                _LOGGER.debug("Progress update failed for job %s", job_id)
+
+                        results = self.fetcher.batch_download(
+                            pending_downloads, max_concurrent=3, progress_callback=_progress
+                        )
                         success_count = sum(1 for result in results.values() if result.success)
                         _LOGGER.debug("Download processing completed: %d/%d successful", success_count, len(pending_downloads))
-                        
-                        # Log failed downloads
-                        failed_downloads = [url for url, result in results.items() if not result.success]
-                        if failed_downloads:
-                            _LOGGER.warning("Download failed for URLs: %s", ", ".join(failed_downloads))
+                        self._update_pending_downloads(pending_downloads, results)
                     else:
                         _LOGGER.debug("No pending downloads to process")
                     
@@ -786,31 +807,87 @@ class CacheInfinityService:
         try:
             if not self.index_db:
                 return []
-            
-            # Get pending downloads from database
-            results = self.index_db.fetchall("""
-                SELECT url, destination, expected_checksum, priority
-                FROM pending_downloads
-                WHERE status = 'pending'
-                ORDER BY priority DESC, created_at ASC
-                LIMIT 10
-            """)
-            
+
+            jobs = self.index_db.claim_pending_downloads(limit=10)
             downloads = []
-            for row in results:
-                downloads.append({
-                    'url': row['url'],
-                    'destination': row['destination'],
-                    'checksum': row['expected_checksum'],
-                    'resume': True,
-                    'timeout': 300
-                })
-            
+            for job in jobs:
+                dest_rel = PurePosixPath(str(job.get("destination", "")).lstrip("/"))
+                dest_path = self.datadir_registry.primary.resolve(dest_rel)
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                downloads.append(
+                    {
+                        "id": job.get("id"),
+                        "url": job.get("url"),
+                        "destination": str(dest_path),
+                        "checksum": job.get("expected_checksum"),
+                        "resume": True,
+                        "timeout": 300,
+                        "relative_path": dest_rel,
+                    }
+                )
+
             return downloads
-            
+
         except Exception as exc:
             _LOGGER.error("Failed to get pending downloads: %s", exc)
             return []
+
+    def _update_pending_downloads(self, jobs: list[dict[str, Any]], results: dict[str, Any]) -> None:
+        if not self.index_db:
+            return
+
+        for job in jobs:
+            job_id = job.get("id")
+            url = job.get("url")
+            if job_id is None or not url:
+                continue
+
+            result = results.get(url)
+            if not result:
+                continue
+
+            if result.success and getattr(result, "verified", True):
+                rel = job.get("relative_path")
+                if isinstance(rel, PurePosixPath):
+                    datadir_path = self.datadir_registry.primary.resolve(rel)
+                    if datadir_path.exists():
+                        self._record_backend_checksum(datadir_path, rel)
+                self.index_db.update_download_status(
+                    job_id,
+                    status="completed",
+                    bytes_downloaded=getattr(result, "size", 0),
+                    error_message="",
+                    actual_checksum=getattr(result, "checksum", None),
+                    verified=getattr(result, "verified", None),
+                    completed_at=int(time.time()),
+                )
+            else:
+                message = getattr(result, "error_message", "") or "download failed"
+                if result.success and not getattr(result, "verified", True):
+                    message = "checksum verification failed"
+                self.index_db.update_download_status(
+                    job_id,
+                    status="failed",
+                    bytes_downloaded=getattr(result, "size", 0),
+                    error_message=message,
+                    actual_checksum=getattr(result, "checksum", None),
+                    verified=getattr(result, "verified", None),
+                    completed_at=int(time.time()),
+                )
+
+    def _update_download_progress(self, job_id: int, downloaded: int) -> None:
+        """Persist incremental download progress for visibility."""
+
+        if not self.index_db:
+            return
+
+        self.index_db.update_download_status(
+            job_id,
+            status="in_progress",
+            bytes_downloaded=max(0, int(downloaded)),
+            error_message="",
+            verified=None,
+        )
     
     def add_pending_download(self, url: str, destination: str,
                            expected_checksum: Optional[str] = None,
@@ -829,18 +906,17 @@ class CacheInfinityService:
         try:
             if not self.index_db:
                 return False
-            
-            # Add to pending downloads table
-            self.index_db.execute("""
-                INSERT INTO pending_downloads (
-                    url, destination, expected_checksum, priority, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (url, destination, expected_checksum, priority, 'pending', int(time.time())))
-            
-            self.index_db.commit()
-            _LOGGER.debug(f"Added pending download: {url} -> {destination}")
-            return True
-            
+
+            added = self.index_db.enqueue_download(
+                url,
+                destination,
+                expected_checksum=expected_checksum,
+                priority=priority,
+            )
+            if added:
+                _LOGGER.debug("Added pending download: %s -> %s", url, destination)
+            return added
+
         except Exception as exc:
             _LOGGER.error(f"Failed to add pending download: {exc}")
             return False
@@ -1819,6 +1895,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_UI_PORT,
         type=int,
         help=f"Web UI bind port (default {_DEFAULT_UI_PORT})",
+    )
+    parser.add_argument(
+        "--disable-webdav",
+        action="store_true",
+        help="Disable the WebDAV server (useful when WsgiDAV is not installed)",
     )
     parser.add_argument(
         "--disable-ui",

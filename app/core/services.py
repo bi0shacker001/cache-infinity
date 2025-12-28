@@ -536,7 +536,27 @@ class WebDAVService(BaseService):
         service = app_service.service
         if not service:
             raise ServiceInitializationError(self.name, "application service not initialized")
-        from wsgidav.wsgidav_app import WsgiDAVApp
+        args = context.get("args")
+        if getattr(args, "disable_webdav", False):
+            _LOGGER.info("WebDAV disabled via --disable-webdav")
+
+            def disabled_app(environ, start_response):
+                start_response(
+                    "503 Service Unavailable",
+                    [("Content-Type", "text/plain")],
+                )
+                return [b"WebDAV disabled via --disable-webdav"]
+
+            service.set_wsgi_app(disabled_app)
+            return
+        try:
+            from wsgidav.wsgidav_app import WsgiDAVApp
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise ServiceInitializationError(
+                self.name,
+                "WsgiDAV is not installed; install the 'wsgidav' extra to enable WebDAV",
+            ) from exc
+
         from hosting.webdav import CacheInfinityDomainController, WebDAVProvider
 
         provider = WebDAVProvider(service)
@@ -547,7 +567,7 @@ class WebDAVService(BaseService):
             "http_authenticator": {
                 "domain_controller": CacheInfinityDomainController,
                 "accept_basic": True,
-                "accept_digest": False,
+                "accept_digest": True,
                 "default_to_digest": False,
             },
             "cacheinfinity_service": service,

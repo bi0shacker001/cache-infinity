@@ -556,8 +556,13 @@ class Fetcher:
         lines = header + [line for line in cookie_list if line and not line.startswith("#")]
         return "\n".join(lines) + "\n"
     
-    def batch_download(self, downloads: List[Dict[str, Any]],
-                      max_concurrent: int = 3) -> Dict[str, DownloadResult]:
+    def batch_download(
+        self,
+        downloads: List[Dict[str, Any]],
+        *,
+        max_concurrent: int = 3,
+        progress_callback: Callable[[str, DownloadProgress], None] | None = None,
+    ) -> Dict[str, DownloadResult]:
         """Download multiple files concurrently with rate limiting.
         
         Args:
@@ -578,13 +583,21 @@ class Fetcher:
                 url = download_spec['url']
                 destination = Path(download_spec['destination'])
                 expected_checksum = download_spec.get('checksum')
-                
+
+                def _progress(progress: DownloadProgress) -> None:
+                    if progress_callback:
+                        try:
+                            progress_callback(url, progress)
+                        except Exception:
+                            pass
+
                 return url, self.download_file(
                     url, destination,
                     resume=download_spec.get('resume', True),
                     timeout=download_spec.get('timeout', 300),
                     expected_checksum=expected_checksum,
                     url_handler=download_spec.get("url_handler"),
+                    progress_callback=_progress,
                 )
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:

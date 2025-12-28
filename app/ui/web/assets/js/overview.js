@@ -122,9 +122,64 @@ async function refreshStatus() {
       ).join('') || '<li class="empty">No shares configured</li>';
     }
 
+    refreshShares();
+
   } catch (err) {
     log.error('Overview: Error in refreshStatus:', err);
     const statusStats = document.getElementById('status-stats');
     if (statusStats) statusStats.textContent = 'Error: ' + err.message;
   }
+}
+
+async function refreshShares() {
+  const container = document.getElementById('share-detail');
+  if (!container) return;
+  const log = window.CILog || console;
+  try {
+    const data = await fetchJSON('shares');
+    const shares = data.shares || [];
+    if (!shares.length) {
+      container.innerHTML = '<p class="empty">No shares configured.</p>';
+      return;
+    }
+
+    const rows = shares.map((share) => {
+      const userBadges = Object.entries(share.users || {}).map(([username, policy]) => {
+        const flags = [
+          policy.login ? 'Login' : null,
+          policy.read ? 'Read' : null,
+          policy.write ? 'Write' : null,
+          policy.cache ? 'Cache' : null,
+        ].filter(Boolean).join(', ');
+        return `<div class="pill">${escapeHtml(username)}<span class="pill-sub">${flags || 'No access'}</span></div>`;
+      }).join('');
+
+      return `<tr>
+        <td><strong>${escapeHtml(share.name)}</strong></td>
+        <td><code>${escapeHtml(share.frontend_folder)}</code></td>
+        <td><code>${escapeHtml(share.datadir_folder)}</code></td>
+        <td>${share.cachelink_overlay ? 'Visible' : 'Hidden'}</td>
+        <td>${share.writable ? 'Write enabled' : 'Read-only'}</td>
+        <td>${userBadges || '<span class="muted">No users</span>'}</td>
+      </tr>`;
+    }).join('');
+
+    container.innerHTML = `<table>
+      <thead><tr><th>Share</th><th>Frontend</th><th>Datadir</th><th>Overlay</th><th>Writes</th><th>Users</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (err) {
+    log.error('Overview: Error loading shares:', err);
+    container.textContent = err.message;
+  }
+}
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }

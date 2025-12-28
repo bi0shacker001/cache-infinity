@@ -249,6 +249,24 @@ class WebUIApp:
         if path == "/storage" and method == "GET":
             _LOGGER.debug("Serving storage utilization")
             return self._json_response(start_response, self.management.get_storage_utilization())
+        if path == "/shares" and method == "GET":
+            _LOGGER.debug("Serving share list")
+            return self._json_response(start_response, {"shares": self.management.list_shares()})
+        if path == "/downloads" and method == "GET":
+            _LOGGER.debug("Serving download queue view")
+            params = self._parse_query_params(environ)
+            status_param = params.get("status")
+            statuses: list[str] | None = None
+            if status_param:
+                statuses = [s.strip() for s in status_param.split(",") if s.strip()]
+            try:
+                limit = int(params.get("limit", "50"))
+            except ValueError:
+                limit = 50
+            return self._json_response(
+                start_response,
+                {"downloads": self.management.list_download_queue(statuses=statuses, limit=limit)},
+            )
         if path == "/settings/detail" and method == "GET":
             _LOGGER.debug("Serving settings detail")
             try:

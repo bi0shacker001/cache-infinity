@@ -153,6 +153,68 @@ class ManagementLayer:
             logger.error("Failed to get storage utilization: %s", e)
             raise
 
+    def list_shares(self) -> list[Dict[str, Any]]:
+        """Return configured WebDAV shares and user policies."""
+
+        shares = []
+        for share in self.service.settings.shares.values():
+            shares.append(
+                {
+                    "name": share.name,
+                    "datadir_folder": share.datadir_folder.as_posix(),
+                    "frontend_folder": share.frontend_folder.as_posix(),
+                    "writable": share.writable,
+                    "cachelink_overlay": share.cachelink_overlay,
+                    "users": {
+                        username: {
+                            "login": policy.login,
+                            "read": policy.read,
+                            "write": policy.write,
+                            "cache": policy.cache,
+                        }
+                        for username, policy in share.users.items()
+                    },
+                }
+            )
+        return shares
+
+    def list_download_queue(self, *, statuses: list[str] | None = None, limit: int = 50) -> list[Dict[str, Any]]:
+        """Expose queued and in-progress downloads for monitoring."""
+
+        return self.service.index_db.list_download_jobs(statuses=statuses, limit=limit)
+
+    def retry_download_job(self, job_id: int) -> bool:
+        """Reset a queued download to pending."""
+
+        return self.service.index_db.retry_download_job(int(job_id)) if self.service.index_db else False
+
+    def delete_download_job(self, job_id: int) -> bool:
+        """Remove a download job from the queue."""
+
+        return self.service.index_db.delete_download_job(int(job_id)) if self.service.index_db else False
+
+    def enqueue_download(
+        self,
+        *,
+        url: str,
+        destination: str,
+        expected_checksum: str | None = None,
+        priority: int = 1,
+    ) -> bool:
+        """Queue a remote download into the staging pipeline."""
+
+        destination = destination.strip()
+        if not destination.startswith("/"):
+            destination = "/" + destination
+        if ".." in destination:
+            raise ValueError("Destination path may not include '..'")
+        return self.service.add_pending_download(
+            url,
+            destination,
+            expected_checksum=expected_checksum,
+            priority=priority,
+        )
+
     def reload_service(self, allow_switch: bool = False, dump: bool = False) -> Dict[str, Any]:
         """Reload configuration and reinitialize the running service."""
         try:

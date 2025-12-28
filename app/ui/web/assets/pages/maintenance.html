@@ -24,3 +24,43 @@
   <div id="reload-status" class="status-msg"></div>
   <div id="reinit-status" class="status-msg"></div>
 </div>
+<div class="panel">
+  <h3>Download Queue</h3>
+  <p class="panel-subtitle">Queued and active remote fetches.</p>
+  <form id="download-form" class="stacked">
+    <label>Remote URL
+      <input id="download-url" type="url" placeholder="https://example.com/file.zip" required />
+    </label>
+    <label>Destination (datadir path)
+      <input id="download-destination" type="text" placeholder="/games/file.zip" required />
+    </label>
+    <label>Expected checksum (optional)
+      <input id="download-checksum" type="text" placeholder="SHA-256 checksum" />
+    </label>
+    <label>Priority
+      <input id="download-priority" type="number" min="1" max="10" step="1" value="1" />
+    </label>
+    <div class="btn-row">
+      <button class="btn" type="submit">Queue download</button>
+      <div id="download-submit-status" class="status-msg"></div>
+    </div>
+  </form>
+  <div class="check-row">
+    <label>
+      Status
+      <select id="download-status-filter">
+        <option value="">All</option>
+        <option value="pending">Pending</option>
+        <option value="in_progress">In progress</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+      </select>
+    </label>
+    <label>
+      Limit
+      <input type="number" id="download-limit" min="1" max="500" value="50" />
+    </label>
+    <button class="btn btn-secondary" id="download-refresh" type="button">Refresh</button>
+  </div>
+  <div id="download-table">Loading…</div>
+</div>
