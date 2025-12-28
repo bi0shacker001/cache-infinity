@@ -62,16 +62,24 @@ class TLSAutomationService:
             return False
     
     def get_certificate(self) -> Optional[TLSCertificate]:
-        """Obtain or renew a certificate based on TLS configuration."""
+        """Obtain or validate a certificate based on TLS configuration."""
+        mode = self.tls_settings.mode
+        if mode == "manual":
+            return self._load_manual_certificate()
+        if mode == "external":
+            _LOGGER.info("TLS mode set to external; skipping certificate automation")
+            return None
+
+        if mode not in {"http", "dns-01"}:
+            _LOGGER.warning("Unsupported TLS mode '%s'; skipping automation", mode)
+            return None
+
         if not self.ensure_certbot_installed():
             return None
-            
-        if self.tls_settings.mode == "http":
+
+        if mode == "http":
             return self._get_http_certificate()
-        elif self.tls_settings.mode == "dns-01":
-            return self._get_dns_certificate()
-        else:
-            raise ConfigError(f"Unsupported TLS automation mode: {self.tls_settings.mode}")
+        return self._get_dns_certificate()
     
     def _get_http_certificate(self) -> Optional[TLSCertificate]:
         """Obtain certificate using HTTP-01 challenge."""
@@ -237,6 +245,41 @@ class TLSAutomationService:
         except subprocess.TimeoutExpired:
             _LOGGER.error("Certificate renewal timed out")
             return False
+
+    def _load_manual_certificate(self) -> TLSCertificate:
+        """Validate manually provided certificate paths and parse metadata."""
+        cert_path = self.tls_settings.manual.cert_path
+        key_path = self.tls_settings.manual.key_path
+        if not cert_path or not key_path:
+            raise ConfigError("Manual TLS mode requires cert_path and key_path")
+        if not self.config_manager.path_exists(cert_path) or not self.config_manager.path_exists(key_path):
+            raise ConfigError("TLS certificate files do not exist at the provided paths")
+
+        domains: list[str] = []
+        expires_at: Optional[str] = None
+        issuer: Optional[str] = None
+
+        try:
+            result = subprocess.run(
+                ["openssl", "x509", "-in", str(cert_path), "-text", "-noout"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            domains = self._parse_certificate_domains(result.stdout)
+            expires_at = self._parse_certificate_expiry(result.stdout)
+            issuer = self._parse_certificate_issuer(result.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            _LOGGER.warning("Failed to parse manual certificate metadata; continuing without metadata")
+
+        return TLSCertificate(
+            cert_path=cert_path,
+            key_path=key_path,
+            domains=domains,
+            expires_at=expires_at,
+            issuer=issuer,
+        )
     
     def _get_existing_certificate(self, domains: list[str]) -> Optional[TLSCertificate]:
         """Get existing certificate for the given domains."""

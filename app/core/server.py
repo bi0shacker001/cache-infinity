@@ -404,12 +404,12 @@ class CacheInfinityService:
         if not self._auth_required(settings):
             return
         tls = settings.tls
-        if tls.mode == TLSMode.EXTERNAL:
+        if tls.mode == "external":
             return
         if not tls.enabled:
             raise ConfigError("Authenticated access requires TLS; enable TLS or set tls.mode: external")
-        if tls.mode not in (TLSMode.MANUAL, TLSMode.HTTP, TLSMode.DNS01):
-            raise ConfigError(f"TLS mode '{tls.mode.value}' is not supported for authenticated users in this build")
+        if tls.mode not in ("manual", "http", "dns-01"):
+            raise ConfigError(f"TLS mode '{tls.mode}' is not supported for authenticated users in this build")
 
     @staticmethod
     def _auth_required(settings: Settings) -> bool:
@@ -626,10 +626,13 @@ class CacheInfinityService:
 
     def _start_tls_automation_task(self) -> None:
         """Start a background thread to manage TLS certificates."""
+        if self.settings.tls.mode not in ("http", "dns-01"):
+            _LOGGER.debug("TLS automation not required for mode: %s", self.settings.tls.mode)
+            return
         if not self._tls_automation:
             _LOGGER.warning("TLS automation not available - skipping TLS automation task")
             return
-        
+
         _LOGGER.debug("Starting TLS automation task with mode: %s", self.settings.tls.mode)
         def tls_loop():
             while getattr(self, "_background_running", False):
@@ -2057,6 +2060,8 @@ def _run_server(server: cheroot_wsgi.Server, label: str = "CacheInfinity") -> No
 def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings, config_dir: Path) -> None:
     if not tls.enabled or tls.mode == "external":
         server.ssl_adapter = None
+        if tls.mode == "external":
+            _LOGGER.info("TLS termination expected to be handled externally; no server certificate configured")
         return
     if tls.mode == "manual":
         cert_path = tls.manual.cert_path
@@ -2071,6 +2076,7 @@ def _configure_tls(server: cheroot_wsgi.Server, tls: TLSSettings, config_dir: Pa
             private_key=str(key_path),
             certificate_chain=None,
         )
+        _LOGGER.info("TLS configured with manual certificate at %s", cert_path)
     elif tls.mode in ("http", "dns-01"):
         # For automated TLS, we'll handle certificate management separately
         # The server will be configured with certificates when they're available
