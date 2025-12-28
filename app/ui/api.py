@@ -130,6 +130,18 @@ class WebUIAPI:
                 _logger.error(f"Failed to list cachelinks: {exc}")
                 return jsonify({'error': str(exc)}), 500
 
+        @app.route('/api/shares', methods=['GET'])
+        def list_shares():
+            """List configured WebDAV shares and user policies."""
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify({'shares': self.management.list_shares()})
+            except Exception as exc:
+                _logger.error(f"Failed to list shares: {exc}")
+                return jsonify({'error': str(exc)}), 500
+
         @app.route('/api/users', methods=['GET'])
         def list_users():
             """List all users."""
@@ -141,6 +153,28 @@ class WebUIAPI:
                 return jsonify({'users': users})
             except Exception as exc:
                 _logger.error(f"Failed to list users: {exc}")
+                return jsonify({'error': str(exc)}), 500
+
+        @app.route('/api/downloads', methods=['GET'])
+        def list_download_queue():
+            """Inspect queued and in-progress downloads."""
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                statuses = request.args.get('status')
+                status_filters = None
+                if statuses:
+                    status_filters = [status.strip() for status in statuses.split(',') if status.strip()]
+                limit_param = request.args.get('limit')
+                try:
+                    limit = int(limit_param) if limit_param else 50
+                except ValueError:
+                    limit = 50
+                jobs = self.management.list_download_queue(statuses=status_filters, limit=limit)
+                return jsonify({'downloads': jobs})
+            except Exception as exc:
+                _logger.error(f"Failed to list downloads: {exc}")
                 return jsonify({'error': str(exc)}), 500
         
         @app.route('/api/users', methods=['POST'])
