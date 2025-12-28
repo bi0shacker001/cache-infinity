@@ -183,6 +183,38 @@ class ManagementLayer:
 
         return self.service.index_db.list_download_jobs(statuses=statuses, limit=limit)
 
+    def retry_download_job(self, job_id: int) -> bool:
+        """Reset a queued download to pending."""
+
+        return self.service.index_db.retry_download_job(int(job_id)) if self.service.index_db else False
+
+    def delete_download_job(self, job_id: int) -> bool:
+        """Remove a download job from the queue."""
+
+        return self.service.index_db.delete_download_job(int(job_id)) if self.service.index_db else False
+
+    def enqueue_download(
+        self,
+        *,
+        url: str,
+        destination: str,
+        expected_checksum: str | None = None,
+        priority: int = 1,
+    ) -> bool:
+        """Queue a remote download into the staging pipeline."""
+
+        destination = destination.strip()
+        if not destination.startswith("/"):
+            destination = "/" + destination
+        if ".." in destination:
+            raise ValueError("Destination path may not include '..'")
+        return self.service.add_pending_download(
+            url,
+            destination,
+            expected_checksum=expected_checksum,
+            priority=priority,
+        )
+
     def reload_service(self, allow_switch: bool = False, dump: bool = False) -> Dict[str, Any]:
         """Reload configuration and reinitialize the running service."""
         try:

@@ -452,6 +452,47 @@ def load_bootstrap_data(config_dir: Path, bootstrap_path: Path | None) -> dict:
             self.adapter.rollback()
             return False
 
+    def retry_download_job(self, job_id: int) -> bool:
+        """Reset a download job to pending for retry."""
+
+        now = int(datetime.now(timezone.utc).timestamp())
+        try:
+            updated = self.adapter.execute(
+                """
+                UPDATE pending_downloads
+                SET status = 'pending',
+                    error_message = '',
+                    bytes_downloaded = 0,
+                    actual_checksum = NULL,
+                    verified = NULL,
+                    completed_at = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id),
+            )
+            self.adapter.commit()
+            return bool(getattr(updated, "rowcount", 0))
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to retry download job %s: %s", job_id, exc)
+            self.adapter.rollback()
+            return False
+
+    def delete_download_job(self, job_id: int) -> bool:
+        """Remove a download job from the queue."""
+
+        try:
+            deleted = self.adapter.execute(
+                "DELETE FROM pending_downloads WHERE id = ?",
+                (job_id,),
+            )
+            self.adapter.commit()
+            return bool(getattr(deleted, "rowcount", 0))
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("Failed to delete download job %s: %s", job_id, exc)
+            self.adapter.rollback()
+            return False
+
     def list_pending_downloads(self, *, limit: int = 10) -> list[dict[str, Any]]:
         try:
             return self.adapter.fetchall(

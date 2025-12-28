@@ -176,6 +176,72 @@ class WebUIAPI:
             except Exception as exc:
                 _logger.error(f"Failed to list downloads: {exc}")
                 return jsonify({'error': str(exc)}), 500
+
+        @app.route('/api/downloads', methods=['POST'])
+        def enqueue_download():
+            """Queue a new download request."""
+
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+
+                payload = request.get_json(force=True, silent=True) or {}
+                url = (payload.get('url') or '').strip()
+                destination = (payload.get('destination') or '').strip()
+                checksum = (payload.get('expected_checksum') or '').strip() or None
+                try:
+                    priority = int(payload.get('priority') or 1)
+                except (TypeError, ValueError):
+                    priority = 1
+
+                if not url or not destination:
+                    return jsonify({'error': 'url and destination are required'}), 400
+
+                if self.management.enqueue_download(
+                    url=url,
+                    destination=destination,
+                    expected_checksum=checksum,
+                    priority=priority,
+                ):
+                    return jsonify({'status': 'queued'})
+                return jsonify({'error': 'failed to queue download'}), 500
+            except ValueError as exc:
+                _logger.error(f"Invalid download request: {exc}")
+                return jsonify({'error': str(exc)}), 400
+            except Exception as exc:
+                _logger.error(f"Failed to queue download: {exc}")
+                return jsonify({'error': str(exc)}), 500
+
+        @app.route('/api/downloads/<int:job_id>/retry', methods=['POST'])
+        def retry_download(job_id: int):
+            """Reset a failed download to pending."""
+
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                if self.management.retry_download_job(job_id):
+                    return jsonify({'status': 'reset'})
+                return jsonify({'error': 'job not found'}), 404
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.error("Failed to retry download %s: %s", job_id, exc)
+                return jsonify({'error': str(exc)}), 500
+
+        @app.route('/api/downloads/<int:job_id>', methods=['DELETE'])
+        def delete_download(job_id: int):
+            """Remove a queued download."""
+
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                if self.management.delete_download_job(job_id):
+                    return jsonify({'status': 'deleted'})
+                return jsonify({'error': 'job not found'}), 404
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.error("Failed to delete download %s: %s", job_id, exc)
+                return jsonify({'error': str(exc)}), 500
         
         @app.route('/api/users', methods=['POST'])
         def create_user():
