@@ -410,6 +410,11 @@ class Indexer:
         self.db_manager = db_manager
         self.cachelinks = cachelinks
         self._last_index_times: Dict[str, int] = {}
+        self._budget_state: dict[str, Any] = {
+            "date": datetime.now(timezone.utc).date(),
+            "full_used": 0,
+            "cheap_used": 0,
+        }
         self._fetcher = RemoteListingFetcher(
             rclone_config_path=rclone_config_path,
             rclone_enabled=rclone_enabled,
@@ -442,65 +447,155 @@ class Indexer:
             return False
         return False
     
-    def should_reindex_with_budget(self, target_id: str) -> bool:
-        """Determine if a target should be reindexed considering budget constraints.
-        
-        Args:
-            target_id: Identifier for the target
-            
-        Returns:
-            True if reindex should be performed, False otherwise
+    def _reset_daily_budgets(self, now: datetime) -> None:
+        if now.date() == self._budget_state.get("date"):
+            return
+
+        self._budget_state["date"] = now.date()
+        self._budget_state["full_used"] = 0
+        self._budget_state["cheap_used"] = 0
+
+        if not self.db_manager:
+            return
+
+        start_of_day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        try:
+            self._budget_state["full_used"] = self.db_manager.count_events_since("full", start_of_day)
+            self._budget_state["cheap_used"] = self.db_manager.count_events_since("cheap", start_of_day)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            _logger.debug("Failed to preload budget counts: %s", exc)
+
+    def _seconds_until_budget_reset(self, now: datetime) -> float:
+        tomorrow = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+        return max(0.0, (tomorrow - now).total_seconds())
+
+    def _budget_available(self, action: str, now: datetime | None = None) -> tuple[bool, float]:
+        now = now or datetime.now(timezone.utc)
+        self._reset_daily_budgets(now)
+
+        if action == "full":
+            available = self._budget_state["full_used"] < self.settings.daily_full_reindex_budget
+            return available, self._seconds_until_budget_reset(now)
+
+        cheap_cap = min(self.settings.daily_cheap_check_budget, self.settings.max_cheap_checks_per_day)
+        available = self._budget_state["cheap_used"] < cheap_cap
+        return available, self._seconds_until_budget_reset(now)
+
+    def _consume_budget(self, action: str) -> None:
+        now = datetime.now(timezone.utc)
+        self._reset_daily_budgets(now)
+        key = "full_used" if action == "full" else "cheap_used"
+        self._budget_state[key] = int(self._budget_state.get(key, 0)) + 1
+
+    def _compute_hotness_score(self, state) -> float:
+        if not state or not self.db_manager:
+            return 0.0
+
+        now = datetime.now(timezone.utc)
+        try:
+            hot_count = self.db_manager.hot_access_count(state.id, window_days=self.settings.hot_window_days)
+            last_access = self.db_manager.last_access_time(state.id)
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.debug("Failed to compute hotness for %s: %s", getattr(state, "id", "?"), exc)
+            return 0.0
+
+        if hot_count <= 0:
+            return 0.0
+
+        window_seconds = max(1, self.settings.hot_window_days * 24 * 3600)
+        decay = 1.0
+        if last_access:
+            age = (now - last_access).total_seconds()
+            decay = max(0.0, 1.0 - (age / window_seconds))
+
+        return float(hot_count) * decay
+
+    def should_reindex_with_budget(self, target_id: str, now: datetime | None = None):
+        """Determine if a target should be reindexed considering budget and cadence.
+
+        Returns a tuple of (decision, next_due_in_seconds). The decision is a dict
+        when work should be scheduled now and ``None`` otherwise. ``next_due`` always
+        reflects the earliest cheap/full due time (negative when overdue) or the
+        next budget reset when cadence is blocked by quotas.
         """
+        now = now or datetime.now(timezone.utc)
         state = self._get_target_state(target_id)
+        hotness = self._compute_hotness_score(state)
+
+        min_interval = max(timedelta(days=7), timedelta(days=self.settings.min_full_reindex_days))
+        max_interval = min(timedelta(days=60), timedelta(days=self.settings.max_full_reindex_days))
+        cheap_interval = timedelta(days=1)
+        next_due: float | None = None
+
+        if max_interval < min_interval:
+            max_interval = min_interval
+
         if not state:
-            return True
+            return {
+                "action": "full",
+                "hotness": hotness,
+                "due_in": float("-inf"),
+                "last_check": None,
+            }, float("-inf")
 
-        # Check daily budget
-        current_time = int(time.time())
-        
-        # Count successful reindexes performed today
-        if self.db_manager:
-            try:
-                reindex_count = self.db_manager.count_successful_indexing_today(current_time)
-                if reindex_count >= self.settings.daily_full_reindex_budget:
-                    _logger.debug(f"Daily reindex budget exceeded for {target_id}")
-                    return False
+        age = now - state.last_full_index_at if state.last_full_index_at else max_interval + timedelta(seconds=1)
+        cheap_age = now - state.last_check_at if state.last_check_at else cheap_interval + timedelta(seconds=1)
 
-                # Check 14-day budget
-                fourteen_days_ago = current_time - (14 * 24 * 3600)
-                reindex_count_14d = self.db_manager.count_successful_indexing_since(fourteen_days_ago)
-                if reindex_count_14d >= self.settings.max_full_reindex_per_14d:
-                    _logger.debug(f"14-day reindex budget exceeded for {target_id}")
-                    return False
+        full_due = False
+        full_due_in = (max_interval - age).total_seconds()
 
-                if state.last_full_index_at is not None:
-                    min_interval = timedelta(days=self.settings.min_full_reindex_days)
-                    age = datetime.now(timezone.utc) - state.last_full_index_at
-                    if age < min_interval and not self.settings.allow_early_full_on_change:
-                        return False
-                    if age < min_interval and self.settings.allow_early_full_on_change:
-                        if self.settings.early_full_requires_hot:
-                            hot_count = self.db_manager.hot_access_count(
-                                state.id, window_days=self.settings.hot_window_days
-                            )
-                            if hot_count <= 0:
-                                _logger.debug(
-                                    "Target %s: Skipping early reindex due to no hot access",
-                                    target_id,
-                                )
-                                return False
-
-            except Exception as exc:
-                _logger.error(f"Failed to check reindex budget for {target_id}: {exc}")
-                return False
-        
         if state.needs_full_reindex or state.last_full_index_at is None:
-            return True
-        max_interval = timedelta(days=self.settings.max_full_reindex_days)
-        age = datetime.now(timezone.utc) - state.last_full_index_at
-        return age >= max_interval
+            next_due = float("-inf") if not state.last_full_index_at else (min_interval - age).total_seconds()
+            if not state.last_full_index_at or age >= min_interval:
+                full_due = True
+                full_due_in = -abs(age.total_seconds())
+            elif self.settings.allow_early_full_on_change and (
+                not self.settings.early_full_requires_hot or hotness > 0
+            ):
+                full_due = True
+                full_due_in = -abs(age.total_seconds())
+        elif age >= max_interval:
+            full_due = True
+            full_due_in = -abs((age - max_interval).total_seconds())
+            next_due = full_due_in
+        elif age >= min_interval and self.settings.allow_early_full_on_change and hotness > 0:
+            full_due = True
+            full_due_in = -abs((age - min_interval).total_seconds())
+            next_due = full_due_in
+        else:
+            next_due = min(full_due_in, next_due) if next_due is not None else full_due_in
+
+        cheap_due = cheap_age >= cheap_interval
+        cheap_due_in = (cheap_interval - cheap_age).total_seconds()
+        next_due = min(next_due, cheap_due_in) if next_due is not None else cheap_due_in
+
+        if full_due:
+            budget_ok, reset_in = self._budget_available("full", now=now)
+            if not budget_ok:
+                next_due = reset_in if reset_in is not None else next_due
+                return None, next_due
+            return {
+                "action": "full",
+                "hotness": hotness,
+                "due_in": full_due_in,
+                "last_check": state.last_check_at,
+            }, next_due
+
+        if cheap_due:
+            budget_ok, reset_in = self._budget_available("cheap", now=now)
+            if not budget_ok:
+                next_due = reset_in if reset_in is not None else next_due
+                return None, next_due
+            return {
+                "action": "cheap",
+                "hotness": hotness,
+                "due_in": cheap_due_in,
+                "last_check": state.last_check_at,
+            }, next_due
+
+        return None, next_due
         
-    def index_target(self, target_id: str, url: str, subfolder: str) -> bool:
+    def index_target(self, target_id: str, url: str, subfolder: str, action: str | None = None) -> tuple[bool, str]:
         """Index a remote target.
         
         Args:
@@ -509,7 +604,7 @@ class Indexer:
             subfolder: Subfolder within the URL
             
         Returns:
-            True if indexing was successful, False otherwise
+            Tuple of (success, performed_action)
         """
         try:
             descriptor = self._get_cachelink_descriptor(target_id)
@@ -544,17 +639,22 @@ class Indexer:
                         listing_hash=state.listing_hash,
                         changed=False,
                     )
-                return True
+                return True, action or "cheap"
 
             status_code = metadata.get("status_code")
             if status_code and int(status_code) >= 400:
                 if state and self.db_manager:
                     self.db_manager.mark_failure(state.id, f"HTTP {status_code}")
-                return False
+                return False, action or "full"
 
             listing_hash = self._listing_hash(entries)
+            performed_action = "full"
             if state and self.db_manager:
-                if state.needs_full_reindex or state.last_full_index_at is None:
+                perform_full = action == "full" or (
+                    action is None and (state.needs_full_reindex or state.last_full_index_at is None)
+                )
+
+                if perform_full:
                     records = self._entries_to_records(entries, listing_url)
                     self.db_manager.update_listing(
                         state.id,
@@ -564,6 +664,7 @@ class Indexer:
                         listing_hash=listing_hash,
                     )
                 else:
+                    performed_action = "cheap"
                     changed = listing_hash != (state.listing_hash or "")
                     self.db_manager.record_cheap_check(
                         state.id,
@@ -583,13 +684,13 @@ class Indexer:
                 )
 
             _logger.debug("Indexed target %s (%d entries)", target_id, len(entries))
-            return True
-            
+            return True, performed_action
+
         except Exception as exc:
             _logger.error(f"Failed to index target {target_id}: {exc}")
             if self.db_manager:
                 self.db_manager.record_indexing_log(target_id, int(time.time()), False, 0, str(exc))
-            return False
+            return False, action or "full"
     
     def _update_entry_in_database(self, target_id: str, entry: Dict[str, Any]) -> None:
         """Update a single entry in the database."""
@@ -679,20 +780,25 @@ class Indexer:
         return records
 
     def index_all_targets(self, targets: List[Dict[str, str]]) -> Dict[str, bool]:
-        """Index multiple targets."""
+        """Index multiple targets, consuming budgets only on success."""
         results = {}
 
         for target in targets:
             target_id = target.get("id")
             url = target.get("url")
             subfolder = target.get("subfolder", "/")
+            requested_action = target.get("action")
 
             if not all([target_id, url]):
                 _logger.warning("Skipping invalid target: %s", target)
                 results[target_id] = False
                 continue
 
-            results[target_id] = self.index_target(target_id, url, subfolder)
+            success, performed_action = self.index_target(target_id, url, subfolder, requested_action)
+            results[target_id] = success
+
+            if success:
+                self._consume_budget(performed_action)
 
         return results
 
@@ -809,9 +915,55 @@ class Indexer:
             _logger.error("Failed to get hot files: %s", exc)
             return []
 
-    def get_targets_for_indexing(self) -> List[Dict[str, str]]:
+    def get_targets_for_indexing(self) -> tuple[list[dict[str, str]], float | None]:
         """Get list of targets that need indexing based on budgets and schedules."""
-        return []
+        now = datetime.now(timezone.utc)
+        self._reset_daily_budgets(now)
+
+        if not self.cachelinks:
+            return [], None
+
+        candidates: list[tuple[dict[str, Any], CachelinkDescriptor]] = []
+        soonest_due: float | None = None
+        for descriptor in self.cachelinks.cachelinks.values():
+            decision, next_due = self.should_reindex_with_budget(descriptor.canonical_id, now=now)
+            if next_due is not None:
+                soonest_due = next_due if soonest_due is None else min(soonest_due, next_due)
+            if decision:
+                candidates.append((decision, descriptor))
+
+        def _priority(item: tuple[dict[str, Any], CachelinkDescriptor]):
+            decision, desc = item
+            action_priority = 0 if decision["action"] == "full" else 1
+            return (
+                action_priority,
+                decision.get("due_in", 0.0),
+                -decision.get("hotness", 0.0),
+                desc.canonical_id,
+            )
+
+        candidates.sort(key=_priority)
+
+        targets: list[dict[str, str]] = []
+        for decision, descriptor in candidates:
+            action = decision.get("action", "cheap")
+            budget_ok, _ = self._budget_available(action)
+            if not budget_ok:
+                continue
+
+            targets.append(
+                {
+                    "id": descriptor.canonical_id,
+                    "url": descriptor.remote_listing_url,
+                    "subfolder": descriptor.subfolder,
+                    "action": action,
+                }
+            )
+
+            if len(targets) >= 1:
+                break
+
+        return targets, soonest_due
 
     def trigger_reindex(self, canonical_id: str) -> bool:
         """Trigger reindexing for a specific cachelink."""

@@ -729,6 +729,15 @@ class IndexDatabase:
             )
         return (full_row["count"] if full_row else 0, cheap_row["count"] if cheap_row else 0)
 
+    def count_events_since(self, event_type: str, since: datetime) -> int:
+        """Count indexing events of a specific type since the given timestamp."""
+        with self._lock:
+            row = self._db.fetchone(
+                "SELECT COUNT(*) AS count FROM indexing_events WHERE event_type = ? AND occurred_at >= ?",
+                (event_type, since.isoformat()),
+            )
+        return row["count"] if row else 0
+
     def hot_access_count(self, target_id: int, *, window_days: int) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
         with self._lock:
@@ -737,6 +746,16 @@ class IndexDatabase:
                 (target_id, cutoff),
             )
         return row["count"] if row else 0
+
+    def last_access_time(self, target_id: int) -> datetime | None:
+        """Return the most recent access timestamp for a target, if any."""
+        with self._lock:
+            row = self._db.fetchone(
+                "SELECT MAX(accessed_at) AS latest FROM indexing_access_events WHERE target_id = ?",
+                (target_id,),
+            )
+        latest = row["latest"] if row else None
+        return _parse_ts(latest) if latest else None
 
     def list_file_rows(self, target_id: int) -> list[dict]:
         with self._lock:

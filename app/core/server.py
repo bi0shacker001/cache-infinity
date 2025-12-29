@@ -3,7 +3,7 @@
 
 import argparse
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import importlib
 import json
 import logging
@@ -468,26 +468,47 @@ class CacheInfinityService:
         """Start a background thread for progressive indexing."""
         _LOGGER.debug("Starting indexer task")
         def indexer_loop():
+            accelerated_until: datetime | None = None
+            first_access_seen = False
             while getattr(self, "_background_running", False):
                 try:
                     # Check for targets that need reindexing
-                    targets = self._get_targets_for_indexing()
+                    targets, next_due = self._get_targets_for_indexing()
                     if targets:
                         _LOGGER.debug("Starting progressive indexing for %d targets", len(targets))
                         results = self.indexer.index_all_targets(targets)
                         success_count = sum(1 for success in results.values() if success)
                         _LOGGER.debug("Progressive indexing completed: %d/%d successful", success_count, len(targets))
-                        
+
                         # Log failed targets
                         failed_targets = [target_id for target_id, success in results.items() if not success]
                         if failed_targets:
                             _LOGGER.warning("Indexing failed for targets: %s", ", ".join(failed_targets))
                     else:
                         _LOGGER.debug("No targets need indexing at this time")
-                    
+                        next_due = next_due if next_due is not None else None
+
+                    # Adjust cadence based on first access to accelerate warm-up
+                    if self.index_db:
+                        access_stats = self.index_db.access_summary()
+                        if access_stats.get("total") and not first_access_seen:
+                            first_access_seen = True
+                            accelerated_until = datetime.now(timezone.utc) + timedelta(hours=1)
+                        if accelerated_until and accelerated_until < datetime.now(timezone.utc):
+                            accelerated_until = None
+
                     # Wait before next indexing cycle
-                    import time
-                    time.sleep(600)  # 10 minutes between indexing cycles
+                    base_interval = 60 if accelerated_until else 600
+                    sleep_for = base_interval
+                    if not targets and next_due is not None:
+                        if next_due > base_interval:
+                            sleep_for = next_due
+                        elif next_due <= 0:
+                            sleep_for = base_interval
+                        else:
+                            sleep_for = max(1.0, min(base_interval, next_due))
+
+                    time.sleep(sleep_for)
                 except Exception as exc:
                     _LOGGER.error("Indexer task failed: %s", exc, exc_info=True)
                     # Wait before retrying
@@ -782,25 +803,11 @@ class CacheInfinityService:
             except Exception as exc:
                 _LOGGER.error("Immediate reindex failed for %s: %s", canonical_id, exc)
 
-    def _get_targets_for_indexing(self) -> list[dict[str, str]]:
+    def _get_targets_for_indexing(self) -> tuple[list[dict[str, str]], float | None]:
         """Get list of targets that need indexing based on budgets and schedules."""
-        targets = []
-        
-        # Check each cachelink for reindexing needs
-        for descriptor in self.cachelinks.cachelinks.values():
-            # Check if target should be reindexed
-            if self.indexer.should_reindex_with_budget(descriptor.canonical_id):
-                targets.append({
-                    "id": descriptor.canonical_id,
-                    "url": descriptor.remote_listing_url,
-                    "subfolder": descriptor.subfolder
-                })
-                
-                # Stop if we've reached the daily budget
-                if len(targets) >= self.settings.indexing.daily_full_reindex_budget:
-                    break
-        
-        return targets
+        if not self.indexer:
+            return [], None
+        return self.indexer.get_targets_for_indexing()
     
     def _get_pending_downloads(self) -> list[dict[str, Any]]:
         """Get list of pending downloads from the database."""
