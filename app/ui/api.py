@@ -177,6 +177,19 @@ class WebUIAPI:
                 _logger.error(f"Failed to list downloads: {exc}")
                 return jsonify({'error': str(exc)}), 500
 
+        @app.route('/api/rclone/remotes', methods=['GET'])
+        def rclone_remotes():
+            """Expose configured rclone remotes via rclone rc."""
+
+            try:
+                auth_error = _require_admin_auth()
+                if auth_error:
+                    return auth_error
+                return jsonify(self.management.rclone_list_remotes())
+            except Exception as exc:
+                _logger.error("Failed to list rclone remotes: %s", exc)
+                return jsonify({'error': str(exc)}), 400
+
         @app.route('/api/downloads', methods=['POST'])
         def enqueue_download():
             """Queue a new download request."""

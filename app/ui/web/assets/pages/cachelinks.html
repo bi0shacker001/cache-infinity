@@ -34,6 +34,13 @@
       <option value="ftp">FTP/FTPS</option>
       <option value="rclone">Rclone</option>
     </select>
+    <div class="callout">
+      <div class="callout-title">Rclone helpers</div>
+      <p style="margin:0 0 0.5rem 0;">Use <code>rclone://&lt;remote&gt;:&lt;path&gt;</code> once rclone is configured in Settings. Remotes detected from the configured rclone rc are listed below.</p>
+      <div id="cachelink-rclone-remotes" class="tag-list">Loading…</div>
+      <button class="btn btn-secondary btn-small" type="button" id="cachelink-remotes-refresh">Refresh remotes</button>
+      <div id="cachelink-rclone-status" class="status-msg" style="margin-top:0.25rem;"></div>
+    </div>
     <div class="editor-actions">
       <button class="btn btn-primary" id="cachelink-save-btn" type="button">Save</button>
       <button class="btn btn-secondary" id="cachelink-revert-btn" type="button">Revert</button>

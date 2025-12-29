@@ -267,6 +267,13 @@ class WebUIApp:
                 start_response,
                 {"downloads": self.management.list_download_queue(statuses=statuses, limit=limit)},
             )
+        if path == "/rclone/remotes" and method == "GET":
+            _LOGGER.debug("Serving rclone remotes list")
+            try:
+                return self._json_response(start_response, self.management.rclone_list_remotes())
+            except Exception as exc:
+                _LOGGER.error("Failed to list rclone remotes: %s", exc, exc_info=True)
+                return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/settings/detail" and method == "GET":
             _LOGGER.debug("Serving settings detail")
             try:

@@ -9,6 +9,8 @@ let selectedCachelinkFolder = localStorage.getItem('ci_cachelink_folder') || '';
 let selectedCachelinkEntry = null;
 let editorMode = 'view';
 let originalEntry = null;
+let rcloneRemotes = [];
+let rcloneRemoteStatus = '';
 
 // Initialize cachelinks page
 export function initCachelinks() {
@@ -17,6 +19,7 @@ export function initCachelinks() {
   const topbar = document.getElementById('topbar-options');
   if (topbar) topbar.innerHTML = '';
   loadCachelinks();
+  loadRcloneRemotes();
   setupCachelinksEventListeners();
   bindCachelinksDelegatedEvents();
 }
@@ -47,6 +50,7 @@ function setupCachelinksEventListeners() {
   bindClick('cachelink-save-btn', saveCachelink);
   bindClick('cachelink-revert-btn', revertCachelink);
   bindClick('cachelink-delete-btn', deleteCachelink);
+  bindClick('cachelink-remotes-refresh', loadRcloneRemotes);
 }
 
 let cachelinksDelegatedBound = false;
@@ -207,6 +211,40 @@ function updateCachelinkEditor() {
   }
 
   preview.innerHTML = `<table><tbody><tr><td style="padding:0.5rem;color:var(--text-muted);">Run "Process" to preview listing.</td></tr></tbody></table>`;
+
+  renderRcloneRemotes();
+}
+
+async function loadRcloneRemotes() {
+  const statusEl = document.getElementById('cachelink-rclone-status');
+  if (statusEl) statusEl.textContent = 'Refreshing remotes…';
+  try {
+    const data = await fetchJSON('rclone/remotes');
+    const remotes = Array.isArray(data)
+      ? data
+      : data?.remotes || data?.Remotes || [];
+    rcloneRemotes = remotes;
+    rcloneRemoteStatus = remotes.length
+      ? 'Remotes loaded from rclone rc.'
+      : 'No remotes returned by rclone rc.';
+  } catch (err) {
+    rcloneRemotes = [];
+    rcloneRemoteStatus = `Error loading remotes: ${err.message}`;
+  }
+  renderRcloneRemotes();
+}
+
+function renderRcloneRemotes() {
+  const listEl = document.getElementById('cachelink-rclone-remotes');
+  const statusEl = document.getElementById('cachelink-rclone-status');
+  if (!listEl || !statusEl) return;
+  if (rcloneRemotes.length) {
+    listEl.innerHTML = rcloneRemotes.map((name) => `<span class="tag">${escapeHtml(name)}</span>`).join('');
+  } else {
+    listEl.innerHTML = '<span class="text-muted">No remotes detected.</span>';
+  }
+  statusEl.textContent = rcloneRemoteStatus || '';
+  statusEl.className = 'status-msg ' + (rcloneRemoteStatus?.startsWith('Error') ? 'error' : 'success');
 }
 
 async function saveCachelink() {

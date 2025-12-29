@@ -8,6 +8,8 @@ let settingsDetail = null;
 let settingsLoaded = false;
 let settingsListenersBound = false;
 let settingsDelegatedBound = false;
+let rcloneRemotes = [];
+let rcloneRemoteStatus = '';
 
 // Initialize settings page
 function initSettings() {
@@ -42,6 +44,7 @@ function setupSettingsEventListeners() {
   bindClick('settings-save-btn', saveSettingsDetail);
   bindClick('settings-export-btn', exportSettings);
   bindClick('settings-import-btn', triggerSettingsImport);
+  bindClick('rclone-remotes-refresh', loadRcloneRemotes);
 
   // Set up settings import input
   const importInput = document.getElementById('settings-import-input');
@@ -162,6 +165,12 @@ function renderSettingsDetail() {
         <label>RC Pass
           <input type="password" id="rclone-rc-pass" value="${esc(rclone.rc_pass || '')}">
         </label>
+      </div>
+      <div class="panel">
+        <div class="panel-subtitle">Detected remotes (via rclone rc)</div>
+        <div id="rclone-remote-list" class="tag-list">Loading…</div>
+        <button class="btn btn-secondary btn-small" type="button" id="rclone-remotes-refresh">Refresh remotes</button>
+        <div id="rclone-remote-status" class="status-msg" style="margin-top:0.25rem;"></div>
       </div>
     </div>
     <div class="settings-block">
@@ -364,17 +373,17 @@ function datadirBlockTemplate(data = {}) {
   const displayName = name === 'backend_1' ? 'datadir_1' : name;
   const removable = name && !isPrimary;
 
-  return `<div class="datadir-block">
-    <div class="form-grid">
-      <label>Name<input type="text" class="datadir-name" value="${esc(displayName)}" ${isPrimary ? 'readonly' : ''}></label>
-      <label>Cache Root<input type="text" class="datadir-cache" value="${esc(data.datadir_cache_root || '')}" placeholder="/datadir"></label>
-      <label>Mounted?<input type="checkbox" class="datadir-mounted" ${data.datadir_mounted ? 'checked' : ''}></label>
-      <label>Mount Root<input type="text" class="datadir-mount" value="${esc(data.datadir_mount_root || '')}" placeholder="/mnt/datadir"></label>
-    </div>
-    ${isPrimary ? '<p class="empty">For Docker, the default compose mounts to /datadir.</p>' : ''}
-    ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-datadir-remove">Remove</button></div>' : ''}
-  </div>`;
-}
+    return `<div class="datadir-block">
+      <div class="form-grid">
+        <label>Name<input type="text" class="datadir-name" value="${esc(displayName)}" ${isPrimary ? 'readonly' : ''}></label>
+        <label>Cache Root<input type="text" class="datadir-cache" value="${esc(data.datadir_cache_root || '')}" placeholder="/datadir"></label>
+        <label>Mounted?<input type="checkbox" class="datadir-mounted" ${data.datadir_mounted ? 'checked' : ''}></label>
+        <label>Mount Root<input type="text" class="datadir-mount" value="${esc(data.datadir_mount_root || '')}" placeholder="/mnt/datadir"></label>
+      </div>
+      ${isPrimary ? '<p class="empty">For Docker, the default compose mounts to /datadir.</p>' : ''}
+      ${removable ? '<div class="editor-actions"><button class="btn btn-text" type="button" data-action="settings-datadir-remove">Remove</button></div>' : ''}
+      </div>`;
+  }
 
 function populateDatadirList(list) {
   const container = document.getElementById('datadir-blocks');
@@ -458,6 +467,36 @@ function removeShareBlock(btn) {
   if (!document.querySelector('.share-config-block')) {
     document.getElementById('share-blocks').innerHTML = '<p class="empty">No shares defined.</p>';
   }
+}
+
+async function loadRcloneRemotes() {
+  const statusEl = document.getElementById('rclone-remote-status');
+  if (statusEl) statusEl.textContent = 'Refreshing remotes…';
+  try {
+    const data = await fetchJSON('rclone/remotes');
+    const remotes = Array.isArray(data) ? data : data?.remotes || data?.Remotes || [];
+    rcloneRemotes = remotes;
+    rcloneRemoteStatus = remotes.length
+      ? 'Remotes loaded from rclone rc. Save settings if you just updated credentials.'
+      : 'No remotes returned by rclone rc.';
+  } catch (err) {
+    rcloneRemotes = [];
+    rcloneRemoteStatus = `Error loading remotes: ${err.message}`;
+  }
+  renderRcloneRemotes();
+}
+
+function renderRcloneRemotes() {
+  const listEl = document.getElementById('rclone-remote-list');
+  const statusEl = document.getElementById('rclone-remote-status');
+  if (!listEl || !statusEl) return;
+  if (rcloneRemotes.length) {
+    listEl.innerHTML = rcloneRemotes.map((name) => `<span class="tag">${escapeHtml(name)}</span>`).join('');
+  } else {
+    listEl.innerHTML = '<span class="text-muted">No remotes detected.</span>';
+  }
+  statusEl.textContent = rcloneRemoteStatus || '';
+  statusEl.className = 'status-msg ' + (rcloneRemoteStatus?.startsWith('Error') ? 'error' : 'success');
 }
 
 function collectSettingsDetail() {

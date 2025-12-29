@@ -233,6 +233,11 @@ class WebUIApp:
             return self._json_response(start_response, self.management.describe_settings_detail())
         if path == "/api/settings/detail" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_settings_detail_update)
+        if path == "/api/rclone/remotes" and method == "GET":
+            try:
+                return self._json_response(start_response, self.management.rclone_list_remotes())
+            except Exception as exc:
+                return self._json_error(start_response, str(exc), status="400 Bad Request")
         if path == "/api/reindex" and method == "POST":
             return self._handle_json_request(environ, start_response, self._handle_reindex)
         if path == "/api/degraded" and method == "GET":
