@@ -1,0 +1,131 @@
+# CacheInfinity Bootstrap Configuration (bootstrap.yml)
+# This file contains all other configuration with higher priority
+# Loaded when --bootstrap flag is provided
+
+# Paths Configuration
+paths:
+  datadir_1:
+    datadir_mounted: false
+    datadir_cache_root: /datadir
+    datadir_mount_root: null
+  
+  staging:
+    staging_mounted: false
+    staging_mount_root: null
+    size_gb: 50
+
+# Limits Configuration
+limits:
+  max_zip_total_gb: 100
+  one_zip_cache_at_a_time: false
+
+# Indexing Configuration
+indexing:
+  min_full_reindex_days: 30
+  max_full_reindex_days: 90
+  hot_window_days: 7
+  hot_radius: 10
+  daily_full_reindex_budget: 5
+  daily_cheap_check_budget: 10
+  max_full_reindex_per_14d: 10
+  max_cheap_checks_per_day: 50
+  allow_early_full_on_change: true
+  early_full_requires_hot: true
+  score_weights:
+    due: 1.0
+    hot: 0.5
+    change: 0.3
+    penalty: 0.1
+
+# Authentication Configuration
+auth:
+  oidc:
+    enabled: false
+    issuer: https://your-oidc-provider.com
+    client_id: your-client-id
+    client_secret: your-client-secret
+    redirect_uri: https://your-domain.com/callback
+    scopes: ["openid", "profile", "email"]
+    allow_insecure_http: false
+  
+  ldap:
+    enabled: false
+    uri: ldap://your-ldap-server.com:389
+    bind_dn: cn=admin,dc=example,dc=com
+    bind_password: your-bind-password
+    user_base_dn: ou=users,dc=example,dc=com
+    user_filter: (uid=%s)
+    start_tls: false
+    ca_cert: /path/to/ca.crt
+  
+  proxy_header:
+    enabled: false
+    header_name: X-Forwarded-User
+    auto_create: false
+
+# TLS Configuration
+tls:
+  enabled: false
+  mode: manual  # manual, external, http, dns-01
+  manual:
+    cert_path: /path/to/cert.pem
+    key_path: /path/to/key.pem
+  http:
+    email: admin@your-domain.com
+    domains: ["your-domain.com"]
+    challenge: http-01
+    webroot_path: /var/www/html
+    staging: false
+  dns01:
+    email: admin@your-domain.com
+    domains: ["your-domain.com"]
+    provider: cloudflare
+    credentials_ini: /config/dns-cloudflare.ini
+    staging: false
+    propagation_seconds: 60
+
+# Cookies Configuration
+cookies:
+  example.org:
+    date: Wed Dec 17 15:47:55 EST 2025
+    cookie_data: IyBOZXRzY2FwZSBIVFRQIENvb2tpZSBGaWxlCiMgVGhpcyBpcyBhIGhhcm1sZXNzIGV4YW1wbGUgd2l0aCBmYWtlIHZhbHVlcy4KIyBGb3JtYXQ6IGRvbWFpbglpbmNsdWRlU3ViZG9tYWlucwlwYXRoCXNlY3VyZQlleHBpcnkJbmFtZQl2YWx1ZQoKLmV4YW1wbGUuY29tCVRSVUUJLwlGQUxTRQkxODkzNDU2MDAwCXNlc3Npb25pZAlub3QtYS1yZWFsLXNlc3Npb24KZXhhbXBsZS5vcmcJRkFMU0UJLwlUUlVFCTE4OTM0NTYwMDAJY3NyZnRva2VuCWZha2VfY3NyZl8xMjM0NTYK
+  the-eye.eu:
+    cookie_jar: /config/cookies/the_eye_eu.txt
+
+# WebDAV Shares Configuration
+webdav:
+  games:
+    datadir_folder: /games
+    frontend_folder: /games
+    writable: true
+    cachelink_overlay: true
+    users:
+      anonymous:
+        login: false
+        read: false
+        write: false
+        cache: false
+      admin:
+        login: true
+        read: true
+        write: true
+        cache: true
+
+# Bootstrap Configuration (for initial setup)
+users:
+  admin:
+    password_plain: "admin123"
+    is_admin: true
+    enabled: true
+
+cachelinks:
+  - parent_path: "/games"
+    name: "archive_games"
+    url: "https://archive.org/download/games"
+    subfolder: "/"
+
+settings:
+  limits:
+    max_zip_total_gb: 20
+  indexing:
+    daily_full_reindex_budget: 1

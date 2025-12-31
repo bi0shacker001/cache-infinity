@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.dylib
+*.dll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.venv/
+venv/
+testing/config/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

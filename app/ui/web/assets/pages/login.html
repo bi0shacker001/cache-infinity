@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Login</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            background: #0b1f38;
+            color: #e0e6ef;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background: #152442;
+            padding: 2rem;
+            border-radius: 12px;
+            width: 320px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+        }
+        h1 {
+            margin-top: 0;
+            font-size: 1.4rem;
+        }
+        label {
+            display: block;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            color: #a7b3cc;
+        }
+        input {
+            width: 100%;
+            padding: 0.65rem;
+            margin-top: 0.35rem;
+            border-radius: 6px;
+            border: 1px solid #2a3348;
+            background: #0f1729;
+            color: #fff;
+        }
+        button {
+            margin-top: 1.25rem;
+            width: 100%;
+            padding: 0.75rem;
+            border: none;
+            border-radius: 6px;
+            background: #1f8ceb;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        .error {
+            color: #f87171;
+            margin-top: 0.75rem;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <form class="card" method="POST" action="/login">
+        <h1>CacheInfinity</h1>
+        <label>Username</label>
+        <input type="text" name="username" autocomplete="username" autofocus required />
+        <label>Password</label>
+        <input type="password" name="password" autocomplete="current-password" required />
+        <button type="submit">Sign in</button>
+        <div id="error-message" class="error"></div>
+    </form>
+    
+    <script>
+        // Handle form submission and display errors
+        document.querySelector('form').addEventListener('submit', function(e) {
+            // Clear any previous error
+            document.getElementById('error-message').textContent = '';
+        });
+        
+        // Check if there's an error parameter in the URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const error = urlParams.get('error');
+        if (error) {
+            document.getElementById('error-message').textContent = decodeURIComponent(error);
+        }
+    </script>
+</body>
+</html>

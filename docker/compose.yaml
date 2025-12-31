@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  cacheinfinity:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    # image: siliconautomaton/cache-infinity:test # deploy test-tagged image (uncomment to use published image)
+    container_name: cacheinfinity
+    restart: unless-stopped
+    environment:
+      UID: "${UID:-1000}"                      # container runtime user id
+      GID: "${GID:-1000}"                      # container runtime group id
+      DB_USER: "${DB_USER:-cacheinfinity}"     # shared DB username
+      DB_PASS: "${DB_PASS:-cacheinfinity}"     # shared DB password
+      CACHEINFINITY_DATABASE_URL: "postgresql://${DB_USER:-cacheinfinity}:${DB_PASS:-cacheinfinity}@cacheinfinity-db/cacheinfinity"
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"                           # expose WebDAV service
+      - "8090:8090"                           # expose Web UI control plane
+    tmpfs:
+      - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
+    volumes:
+      - ./volumes/backend:/datadir            # persistent datadir storage mount
+      - ./volumes/staging:/staging            # staging workspace for downloads
+      - ./config:/config                      # configuration directory mounted to $CONFIG (default /config)
+    networks:
+      - default
+      - cacheinfinity-db-link
+
+  db:
+    image: postgres:18
+    container_name: cacheinfinity-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${DB_USER:-cacheinfinity}"
+      POSTGRES_PASSWORD: "${DB_PASS:-cacheinfinity}"
+      POSTGRES_DB: cacheinfinity
+    volumes:
+      - ./volumes/db:/var/lib/postgresql
+    networks:
+      - cacheinfinity-db-link
+
+networks:
+  cacheinfinity-db-link:
+    driver: bridge
+    internal: true

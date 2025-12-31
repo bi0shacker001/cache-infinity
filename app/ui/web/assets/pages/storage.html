@@ -1,0 +1,75 @@
+<div class="panel">
+  <h3>Backend Storage</h3>
+  <div id="storage-datadirs">Loading…</div>
+</div>
+<div class="panel">
+  <h3>Enhanced File Browser</h3>
+  <div class="enhanced-file-browser">
+    <div class="file-toolbar">
+      <div class="file-actions">
+        <button class="btn btn-secondary" id="enhanced-upload-btn" type="button" title="Upload File">
+          <span class="icon">⬆️</span> Upload
+        </button>
+        <button class="btn btn-secondary" id="enhanced-new-folder-btn" type="button" title="New Folder">
+          <span class="icon">📁</span> New Folder
+        </button>
+        <button class="btn btn-secondary" id="enhanced-select-all-btn" type="button" title="Select All">
+          <span class="icon">✓</span> Select All
+        </button>
+        <button class="btn btn-danger" id="enhanced-delete-selected-btn" type="button" title="Delete Selected" disabled>
+          <span class="icon">🗑️</span> Delete
+        </button>
+      </div>
+
+      <div class="file-search">
+        <input type="text" id="enhanced-search-input" placeholder="Search files and folders..." />
+        <button class="btn btn-secondary" id="enhanced-search-btn" type="button">Search</button>
+        <label class="checkbox-inline">
+          <input type="checkbox" id="enhanced-show-hidden" /> Show hidden files
+        </label>
+      </div>
+
+      <div class="file-view-options">
+        <select id="enhanced-sort-by">
+          <option value="name">Sort by: Name</option>
+          <option value="size">Sort by: Size</option>
+          <option value="modified">Sort by: Modified</option>
+          <option value="type">Sort by: Type</option>
+        </select>
+        <select id="enhanced-sort-order">
+          <option value="asc">Ascending</option>
+          <option value="desc">Descending</option>
+        </select>
+        <div class="view-mode-buttons">
+          <button class="btn btn-secondary" data-view="list" title="List View">
+            <span class="icon">📋</span>
+          </button>
+          <button class="btn btn-secondary" data-view="grid" title="Grid View">
+            <span class="icon">🔲</span>
+          </button>
+          <button class="btn btn-secondary" data-view="details" title="Details View">
+            <span class="icon">📊</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="file-breadcrumb" id="enhanced-breadcrumb"></div>
+
+    <div class="directory-stats" id="enhanced-stats"></div>
+
+    <div class="file-container" id="enhanced-file-container">
+      <div class="loading-spinner">Loading files...</div>
+    </div>
+
+    <div class="file-details-panel" id="enhanced-details-panel" style="display: none;">
+      <div class="details-header">
+        <h4>File Details</h4>
+        <button class="btn btn-secondary" id="enhanced-close-details-btn" type="button">✕</button>
+      </div>
+      <div class="details-content" id="enhanced-details-content"></div>
+    </div>
+  </div>
+
+  <input type="file" id="enhanced-upload-input" style="display: none" multiple />
+</div>

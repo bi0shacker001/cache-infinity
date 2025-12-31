@@ -1,0 +1,20 @@
+[Unit]
+Description=CacheInfinity WebDAV Service
+After=network.target
+
+[Service]
+Type=simple
+User=cache-infinite
+Group=cache-infinite
+ExecStart=/usr/bin/env cacheinfinity serve --config-dir /etc/cacheinfinity/config
+Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+# Hardening
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/cacheinfinity /var/log/cacheinfinity
+
+[Install]
+WantedBy=multi-user.target

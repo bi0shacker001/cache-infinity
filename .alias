@@ -1,0 +1,2 @@
+alias python=".venv/bin/python"
+alias docker-test="testing/build-and-push.sh && docker compose -f testing/compose.yml down && docker compose -f testing/compose.yml up -d"
