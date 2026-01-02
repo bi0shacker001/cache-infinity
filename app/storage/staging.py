@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List
+from contextlib import contextmanager
 
 from dataclasses import dataclass
 from pathlib import Path
+import logging
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -203,7 +209,8 @@ class StagingArea:
             if not self.check_space_available(file_size):
                 _logger.error(f"Insufficient space to stage file: {source_path}")
                 return None
-            
+    
+    
             # Create staging directory if needed
             self.ensure_ready()
             
@@ -231,3 +238,236 @@ class StagingArea:
             except:
                 pass
             return None
+    
+    def get_zip_cache_manager(self, limits: Dict[str, Any]) -> "StagingArea.ZipCacheManager":
+        """Get a zip cache manager for this staging area.
+        
+        Args:
+            limits: Configuration limits for zip caching
+            
+        Returns:
+            ZipCacheManager instance
+        """
+        return self.ZipCacheManager(self, limits)
+    
+    @dataclass
+    class ZipCacheManager:
+        """Manages zip file caching operations in the staging area."""
+        
+        staging_area: "StagingArea"
+        limits: Dict[str, Any]
+        
+        def __post_init__(self):
+            """Initialize the zip cache manager."""
+            self._global_lock = threading.Lock()
+            self._active_zip_operations = 0
+            _logger.debug("ZipCacheManager initialized")
+        
+        def can_cache_whole_zip(self, zip_size: int, uncompressed_size: int) -> bool:
+            """Check if whole-zip caching is allowed based on size limits.
+            
+            Args:
+                zip_size: Compressed size of the zip file in bytes
+                uncompressed_size: Uncompressed size of the zip file in bytes
+                
+            Returns:
+                True if whole-zip caching is allowed
+            """
+            max_bytes = self.limits.get("max_zip_total_gb", 100) * 1024**3
+            
+            if zip_size > max_bytes:
+                _logger.debug(f"Zip compressed size {zip_size} exceeds limit {max_bytes}")
+                return False
+                
+            if uncompressed_size > max_bytes:
+                _logger.debug(f"Zip uncompressed size {uncompressed_size} exceeds limit {max_bytes}")
+                return False
+                
+            return True
+        
+        def acquire_zip_lock(self) -> bool:
+            """Acquire global zip lock if one-zip-at-a-time is enabled.
+            
+            Returns:
+                True if lock was acquired or locking is disabled
+            """
+            if not self.limits.get("one_zip_cache_at_a_time", False):
+                return True
+                
+            if self._global_lock.acquire(blocking=False):
+                self._active_zip_operations += 1
+                _logger.debug(f"Acquired zip lock, active operations: {self._active_zip_operations}")
+                return True
+            else:
+                _logger.debug("Failed to acquire zip lock, another operation in progress")
+                return False
+        
+        def release_zip_lock(self):
+            """Release global zip lock."""
+            if self._active_zip_operations > 0:
+                self._active_zip_operations -= 1
+                self._global_lock.release()
+                _logger.debug(f"Released zip lock, active operations: {self._active_zip_operations}")
+        
+        def get_zip_sizes(self, zip_path: Path) -> tuple[int, int]:
+            """Get compressed and uncompressed sizes of a zip file.
+            
+            Args:
+                zip_path: Path to the zip file
+                
+            Returns:
+                Tuple of (compressed_size, uncompressed_size) in bytes
+            """
+            try:
+                compressed_size = zip_path.stat().st_size
+                uncompressed_size = 0
+                
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    for info in zf.infolist():
+                        if not info.is_dir():
+                            uncompressed_size += info.file_size
+                
+                return compressed_size, uncompressed_size
+                
+            except Exception as e:
+                _logger.error(f"Failed to get zip sizes for {zip_path}: {e}")
+                return 0, 0
+        
+        def handle_zip_file(self, zip_url: str, destination: Path,
+                           member_path: Optional[str] = None) -> Optional[Path]:
+            """Main zip handling method with automatic mode selection.
+            
+            Args:
+                zip_url: URL to download the zip file from
+                destination: Path where the extracted file should be stored
+                member_path: Optional specific file within the zip to extract
+                
+            Returns:
+                Path to the extracted file, or None if failed
+            """
+            try:
+                # Download zip to staging
+                staging_zip = self._download_zip_to_staging(zip_url)
+                if not staging_zip:
+                    return None
+                
+                # Check sizes and decide mode
+                zip_size, uncompressed_size = self.get_zip_sizes(staging_zip)
+                use_whole_zip = (self.can_cache_whole_zip(zip_size, uncompressed_size) and
+                               self.acquire_zip_lock())
+                
+                if use_whole_zip:
+                    _logger.debug(f"Using whole-zip mode for {zip_url}")
+                    result = self._handle_whole_zip(staging_zip, destination)
+                    self.release_zip_lock()
+                    return result
+                else:
+                    _logger.debug(f"Using individual-file mode for {zip_url}")
+                    return self._handle_individual_file(staging_zip, destination, member_path)
+                    
+            except Exception as e:
+                _logger.error(f"Failed to handle zip file {zip_url}: {e}")
+                return None
+            finally:
+                # Clean up staging zip file
+                try:
+                    if 'staging_zip' in locals() and staging_zip.exists():
+                        staging_zip.unlink()
+                except Exception as e:
+                    _logger.warning(f"Failed to clean up staging zip {staging_zip}: {e}")
+        
+        def _download_zip_to_staging(self, zip_url: str) -> Optional[Path]:
+            """Download zip file to staging area.
+            
+            Args:
+                zip_url: URL to download the zip file from
+                
+            Returns:
+                Path to the downloaded zip file, or None if failed
+            """
+            try:
+                _logger.debug(f"Downloading zip from {zip_url} to staging")
+                
+                # Reserve a temporary file in staging
+                staging_zip = self.staging_area.reserve_tempfile("zip")
+                
+                # TODO: Integrate with fetcher service to download the zip
+                # This is a placeholder - the actual implementation would use
+                # the fetcher service to download the file
+                _logger.warning("Zip download integration with fetcher not yet implemented")
+                
+                return staging_zip
+                
+            except Exception as e:
+                _logger.error(f"Failed to download zip from {zip_url}: {e}")
+                return None
+        
+        def _handle_whole_zip(self, staging_zip: Path, destination: Path) -> Optional[Path]:
+            """Handle whole-zip caching mode.
+            
+            Args:
+                staging_zip: Path to the downloaded zip file
+                destination: Path where files should be extracted
+                
+            Returns:
+                Path to the extracted file, or None if failed
+            """
+            try:
+                _logger.debug(f"Extracting whole zip {staging_zip} to {destination}")
+                
+                # Create destination directory
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Extract all files from zip
+                with zipfile.ZipFile(staging_zip, 'r') as zf:
+                    zf.extractall(destination.parent)
+                
+                # Return the destination path if it exists
+                if destination.exists():
+                    return destination
+                else:
+                    # If the specific file doesn't exist, return None
+                    return None
+                    
+            except Exception as e:
+                _logger.error(f"Failed to extract whole zip {staging_zip}: {e}")
+                return None
+        
+        def _handle_individual_file(self, staging_zip: Path, destination: Path,
+                                  member_path: Optional[str]) -> Optional[Path]:
+            """Handle individual file extraction mode.
+            
+            Args:
+                staging_zip: Path to the downloaded zip file
+                destination: Path where the extracted file should be stored
+                member_path: Specific file within the zip to extract
+                
+            Returns:
+                Path to the extracted file, or None if failed
+            """
+            try:
+                if not member_path:
+                    _logger.error("No member path specified for individual file extraction")
+                    return None
+                    
+                _logger.debug(f"Extracting individual file {member_path} from {staging_zip}")
+                
+                # Create destination directory
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Extract specific file from zip
+                with zipfile.ZipFile(staging_zip, 'r') as zf:
+                    with zf.open(member_path) as source, open(destination, 'wb') as target:
+                        import shutil
+                        shutil.copyfileobj(source, target)
+                
+                if destination.exists():
+                    return destination
+                else:
+                    return None
+                    
+            except Exception as e:
+                _logger.error(f"Failed to extract individual file {member_path} from {staging_zip}: {e}")
+                return None
+        
+            

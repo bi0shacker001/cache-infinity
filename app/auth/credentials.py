@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -10,7 +11,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any
+
+# Import necessary components for SSH key management
+# Note: We should not import db.adapter directly - use database management service instead
+# Use absolute imports as required by project standards
+from core.config import FTPConfig # Absolute import for config
+from db.dbmanage import DatabaseManager # Use database management service instead
 
 _logger = logging.getLogger(__name__)
 
@@ -95,6 +102,149 @@ class SessionToken:
         self.last_used = datetime.utcnow()
 
 
+# --- User SSH Key Management ---
+
+class UserSSHKeyManager:
+    """Manager for user SSH public keys stored in the database."""
+
+    def __init__(self, db_manager: IndexDatabaseManager):
+        """Initialize UserSSHKeyManager.
+
+        Args:
+            db_manager: Database management service for credential storage.
+        """
+        self.db_manager = db_manager
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Initialize database schema for user SSH public keys."""
+        try:
+            self.db_manager.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_ssh_public_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    key_type TEXT NOT NULL,
+                    key_data TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, key_type)
+                )
+                """
+            )
+            self.db_manager.commit()
+            _logger.info("User SSH public keys table initialized")
+        except Exception as e:
+            _logger.error(f"Failed to initialize user SSH public keys schema: {e}")
+            self.db_manager.rollback()
+
+    def save_user_ssh_key(self, user_id: str, key_type: str, key_data: str, fingerprint: str) -> bool:
+        """Save a user's SSH public key to the database.
+
+        Args:
+            user_id: The ID of the user.
+            key_type: Type of SSH key (e.g., 'rsa', 'ecdsa', 'ed25519').
+            key_data: The public key data in PEM format.
+            fingerprint: The fingerprint of the public key.
+
+        Returns:
+            True if the key was saved successfully, False otherwise.
+        """
+        try:
+            timestamp = datetime.now().isoformat()
+            self.db_manager.execute(
+                """
+                INSERT INTO user_ssh_public_keys
+                (user_id, key_type, key_data, fingerprint, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, key_type) DO UPDATE SET
+                    key_data = excluded.key_data,
+                    fingerprint = excluded.fingerprint,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, key_type, key_data, fingerprint, timestamp, timestamp)
+            )
+            self.db_manager.commit()
+            _logger.info(f"Saved SSH public key for user {user_id} ({key_type})")
+            return True
+        except Exception as e:
+            _logger.error(f"Failed to save SSH public key for user {user_id} ({key_type}): {e}")
+            self.db_manager.rollback()
+            return False
+
+    def get_user_ssh_keys(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all SSH public keys for a specific user.
+
+        Args:
+            user_id: The ID of the user.
+
+        Returns:
+            A list of dictionaries, where each dictionary contains key information.
+        """
+        try:
+            rows = self.db_manager.fetchall(
+                """
+                SELECT key_type, key_data, fingerprint, created_at, updated_at
+                FROM user_ssh_public_keys
+                WHERE user_id = ?
+                ORDER BY key_type
+                """,
+                (user_id,)
+            )
+            return rows if rows else []
+        except Exception as e:
+            _logger.error(f"Failed to get SSH public keys for user {user_id}: {e}")
+            return []
+
+    def delete_user_ssh_key(self, user_id: str, key_type: str) -> bool:
+        """Delete a specific SSH public key for a user.
+
+        Args:
+            user_id: The ID of the user.
+            key_type: The type of SSH key to delete.
+
+        Returns:
+            True if the key was deleted successfully, False otherwise.
+        """
+        try:
+            self.db_manager.execute(
+                "DELETE FROM user_ssh_public_keys WHERE user_id = ? AND key_type = ?",
+                (user_id, key_type)
+            )
+            self.db_manager.commit()
+            _logger.info(f"Deleted SSH public key for user {user_id} ({key_type})")
+            return True
+        except Exception as e:
+            _logger.error(f"Failed to delete SSH public key for user {user_id} ({key_type}): {e}")
+            self.db_manager.rollback()
+            return False
+
+    def delete_all_user_ssh_keys(self, user_id: str) -> bool:
+        """Delete all SSH public keys for a specific user.
+
+        Args:
+            user_id: The ID of the user.
+
+        Returns:
+            True if all keys were deleted successfully, False otherwise.
+        """
+        try:
+            self.db_manager.execute(
+                "DELETE FROM user_ssh_public_keys WHERE user_id = ?",
+                (user_id,)
+            )
+            self.db_manager.commit()
+            _logger.info(f"Deleted all SSH public keys for user {user_id}")
+            return True
+        except Exception as e:
+            _logger.error(f"Failed to delete all SSH public keys for user {user_id}: {e}")
+            self.db_manager.rollback()
+            return False
+
+
+# --- Authentication Manager ---
+
 class AuthenticationManager:
     """Authentication manager for WebUI and service authentication.
     
@@ -103,17 +253,21 @@ class AuthenticationManager:
     - Database-backed credential validation
     - Session token creation and validation
     - Periodic session cleanup
+    - User SSH public key management for SFTP/SSH access
     """
 
-    def __init__(self, db_adapter):
+    def __init__(self, db_manager: IndexDatabaseManager):
         """Initialize AuthenticationManager.
-        
+
         Args:
-            db_adapter: Database adapter for credential storage
+            db_manager: Database management service for credential storage
         """
-        self.db_adapter = db_adapter
-        self._sessions: dict[str, SessionToken] = {}
+        self.db_manager = db_manager
+        self._sessions: Dict[str, SessionToken] = {}
         self._lock = threading.RLock()
+        
+        # Initialize UserSSHKeyManager
+        self.user_ssh_key_manager = UserSSHKeyManager(db_manager)
         
         # Start session cleanup background thread
         self._start_session_cleanup()
@@ -135,12 +289,12 @@ class AuthenticationManager:
 
     def _validate_user_credentials(self, username: str, password: str, purpose: str) -> bool:
         """Validate user credentials against database.
-        
+
         Args:
             username: Username to validate
             password: Password to verify
             purpose: Authentication purpose
-            
+
         Returns:
             True if credentials are valid, False otherwise
         """
@@ -150,7 +304,7 @@ class AuthenticationManager:
                 FROM auth_users
                 WHERE username = ? AND purpose = ? AND enabled = 1
             """
-            result = self.db_adapter.fetchone(query, (username, purpose))
+            result = self.db_manager.fetchone(query, (username, purpose))
             
             if not result:
                 return False
@@ -163,11 +317,11 @@ class AuthenticationManager:
                 if not stored_hash:
                     stored_hash = _hash_password(password)
                     stored_plain = None
-                    self.db_adapter.execute(
+                    self.db_manager.execute(
                         "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ? AND purpose = ?",
                         (stored_plain, stored_hash, username, purpose),
                     )
-                    self.db_adapter.commit()
+                    self.db_manager.commit()
                 return True
             
             # Check hashed password
@@ -213,7 +367,7 @@ class AuthenticationManager:
         
         # Store session in database
         try:
-            success = self.db_adapter.create_session(
+            success = self.db_manager.create_session(
                 username=username,
                 token=token,
                 expires_at=expires_at
@@ -250,14 +404,14 @@ class AuthenticationManager:
         
         # Check database
         try:
-            session_data = self.db_adapter.get_session(token)
+            session_data = self.db_manager.get_session(token)
             if not session_data:
                 return None
             
             username = session_data['username']
             last_used = session_data['last_used']
             expires_at = session_data['expires_at']
-        
+            
             if isinstance(last_used, str):
                 try:
                     last_used = datetime.fromisoformat(last_used)
@@ -272,17 +426,17 @@ class AuthenticationManager:
             # Check if expired
             if datetime.utcnow() >= expires_at:
                 # Remove expired session from database
-                self.db_adapter.delete_session(token)
+                self.db_manager.delete_session(token)
                 return None
             
             # Update last used time
             new_last_used = datetime.utcnow()
-            success = self.db_adapter.execute(
+            success = self.db_manager.execute(
                 "UPDATE auth_sessions SET last_used = ? WHERE token = ?",
                 (new_last_used.isoformat(), token)
             )
             if success:
-                self.db_adapter.commit()
+                self.db_manager.commit()
             
             # Update in-memory cache
             with self._lock:
@@ -320,8 +474,8 @@ class AuthenticationManager:
         
         # Remove from database
         try:
-            self.db_adapter.execute("DELETE FROM auth_sessions WHERE username = ?", (username,))
-            self.db_adapter.commit()
+            self.db_manager.execute("DELETE FROM auth_sessions WHERE username = ?", (username,))
+            self.db_manager.commit()
         except Exception as exc:
             _logger.error("Failed to remove user sessions: %s", exc)
 
@@ -346,7 +500,7 @@ class AuthenticationManager:
                     self._cleanup_expired_sessions()
                     
                     # Clean up database sessions older than 24 hours
-                    cleaned = self.db_adapter.cleanup_expired_sessions(max_age_hours=24)
+                    cleaned = self.db_manager.cleanup_expired_sessions(max_age_hours=24)
                     if cleaned > 0:
                         _logger.debug("Cleaned up %d expired sessions", cleaned)
                 except Exception as exc:
@@ -360,7 +514,7 @@ class AuthenticationManager:
 
     def logout_user(self, token: str) -> None:
         """Logout a user by invalidating their session token.
-        
+
         Args:
             token: Session token to invalidate
         """
@@ -369,7 +523,7 @@ class AuthenticationManager:
                 del self._sessions[token]
         
         # Remove from database
-        self.db_adapter.delete_session(token)
+        self.db_manager.delete_session(token)
 
     def authenticate_request(self, username: str, password: str) -> dict:
         """Authenticate request and return session info.
@@ -403,6 +557,45 @@ class AuthenticationManager:
             }
         
         return {'authenticated': False, 'method': None, 'username': None, 'token': None}
+
+    # --- User Permissions ---
+    def get_user_permissions(self, username: str) -> Dict[str, bool]:
+        """Get user permissions from the database."""
+        try:
+            query = """
+                SELECT write_access, read_access, delete_access, modify_access
+                FROM auth_users
+                WHERE username = ? AND enabled = 1
+            """
+            result = self.db_manager.fetchone(query, (username,))
+            if not result:
+                return {'write': False, 'read': False, 'delete': False, 'modify': False}
+            
+            return {
+                'write': result.get('write_access', False),
+                'read': result.get('read_access', False),
+                'delete': result.get('delete_access', False),
+                'modify': result.get('modify_access', False),
+            }
+        except Exception as e:
+            _logger.error(f"Failed to get permissions for user {username}: {e}")
+            return {'write': False, 'read': False, 'delete': False, 'modify': False}
+
+    def get_all_users(self) -> Dict[str, Dict[str, Any]]:
+        """Get all users from the database."""
+        try:
+            query = "SELECT username, password_hash, enabled FROM auth_users"
+            results = self.db_manager.fetchall(query)
+            users = {}
+            for row in results:
+                users[row['username']] = {
+                    'password_hash': row['password_hash'],
+                    'enabled': row['enabled'],
+                }
+            return users
+        except Exception as e:
+            _logger.error(f"Failed to get all users: {e}")
+            return {}
 
 
 __all__ = [

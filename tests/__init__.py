@@ -1,0 +1,1 @@
+# CacheInfinity test suite

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from core.config import CookieJarDefinition
 from cache.checksum import ChecksumCalculator
+from storage.staging import StagingArea, StagingDefinition
 
 _logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ class Fetcher:
         max_concurrent: int = 3,
         rclone_config_path: Optional[Path] = None,
         rclone_enabled: bool = False,
+        staging_definition: Optional[StagingDefinition] = None,
+        zip_caching_limits: Optional[Dict[str, Any]] = None,
     ):
         """Initialize fetcher.
         
@@ -144,6 +147,10 @@ class Fetcher:
             retry_delay: Delay between retries in seconds
             verify_checksums: Whether to verify checksums after download
             max_concurrent: Maximum number of concurrent downloads
+            rclone_config_path: Optional path to rclone config file
+            rclone_enabled: Whether rclone support is enabled
+            staging_definition: Staging area configuration
+            zip_caching_limits: Zip caching configuration limits
         """
         self.cookie_jars = cookie_jars
         self.max_retries = max_retries
@@ -156,7 +163,19 @@ class Fetcher:
         self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
         self._rclone_config_path = rclone_config_path
         self._rclone_enabled = rclone_enabled
-        _logger.debug("Fetcher initialized")
+        
+        # Initialize staging area for zip caching
+        self.staging_definition = staging_definition or StagingDefinition()
+        self.staging_area = StagingArea(self.staging_definition)
+        
+        # Initialize zip cache manager
+        self.zip_caching_limits = zip_caching_limits or {
+            "max_zip_total_gb": 100,
+            "one_zip_cache_at_a_time": False
+        }
+        self.zip_cache_manager = self.staging_area.get_zip_cache_manager(self.zip_caching_limits)
+        
+        _logger.debug("Fetcher initialized with zip caching support")
         
     def add_progress_callback(self, callback: Callable[[str, DownloadProgress], None]) -> None:
         """Add a callback to receive download progress updates.
@@ -753,3 +772,185 @@ class Fetcher:
             # Restore original settings
             self.max_retries = original_max_retries
             self.retry_delay = original_retry_delay
+    
+    def download_zip_file(self, zip_url: str, destination: Path,
+                         member_path: Optional[str] = None,
+                         expected_checksum: Optional[str] = None) -> DownloadResult:
+        """Download and extract a zip file using the zip cache manager.
+        
+        This method handles the zip caching logic according to the SPEC requirements:
+        - Size limits for whole-zip vs individual-file mode
+        - One-zip-at-a-time locking when enabled
+        - Automatic mode selection based on file sizes
+        
+        Args:
+            zip_url: URL to the zip file
+            destination: Path where the extracted file should be stored
+            member_path: Specific file within the zip to extract (for individual-file mode)
+            expected_checksum: Expected SHA-256 checksum for verification
+            
+        Returns:
+            DownloadResult with operation status and checksum
+        """
+        start_time = time.time()
+        
+        try:
+            # Use the zip cache manager to handle the download and extraction
+            result_path = self.zip_cache_manager.handle_zip_file(
+                zip_url=zip_url,
+                destination=destination,
+                member_path=member_path
+            )
+            
+            if result_path and result_path.exists():
+                size = result_path.stat().st_size
+                duration = time.time() - start_time
+                
+                # Verify checksum if required
+                checksum = None
+                verified = False
+                if self.verify_checksums and size > 0:
+                    try:
+                        checksum = self.checksum_calc.calculate_sha256(result_path)
+                        if expected_checksum:
+                            verified = checksum.lower() == expected_checksum.lower()
+                            if not verified:
+                                _logger.warning(
+                                    "Checksum verification failed for %s: expected %s, got %s",
+                                    result_path, expected_checksum, checksum
+                                )
+                        else:
+                            _logger.debug("Calculated checksum for %s: %s", result_path, checksum)
+                    except Exception as exc:
+                        _logger.warning("Failed to calculate checksum for %s: %s", result_path, exc)
+                
+                _logger.debug("Zip file download successful: %s (%d bytes)", result_path, size)
+                return DownloadResult(
+                    success=True,
+                    file_path=result_path,
+                    size=size,
+                    duration=duration,
+                    checksum=checksum,
+                    verified=verified if expected_checksum else True,
+                )
+            else:
+                duration = time.time() - start_time
+                return DownloadResult(
+                    success=False,
+                    file_path=None,
+                    size=0,
+                    duration=duration,
+                    error_message="Failed to extract zip file",
+                )
+                
+        except Exception as exc:
+            duration = time.time() - start_time
+            _logger.error(f"Zip file download failed for {zip_url}: {exc}")
+            return DownloadResult(
+                success=False,
+                file_path=None,
+                size=0,
+                duration=duration,
+                error_message=str(exc),
+            )
+    
+    def is_zip_file_url(self, url: str) -> bool:
+        """Check if a URL points to a zip file.
+        
+        Args:
+            url: URL to check
+            
+        Returns:
+            True if the URL appears to point to a zip file
+        """
+        url_lower = url.lower()
+        # Check if URL ends with .zip or contains .zip in the path
+        return url_lower.endswith('.zip') or '.zip/' in url_lower
+    
+    def get_zip_member_path(self, subfolder: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract zip path and member path from subfolder specification.
+        
+        For zip-folder mode, the subfolder contains a directory segment ending in `.zip`,
+        followed by an internal prefix.
+        
+        Example: "shareware_apps_r.zip/shareware_apps_r/"
+        
+        Args:
+            subfolder: Subfolder specification from cachelink
+            
+        Returns:
+            Tuple of (zip_path, member_path) or (None, None) if not a zip folder
+        """
+        if not subfolder or not isinstance(subfolder, str):
+            return None, None
+        
+        # Split the subfolder into components
+        parts = subfolder.strip('/').split('/')
+        
+        # Look for a part that ends with .zip
+        for i, part in enumerate(parts):
+            if part.endswith('.zip'):
+                # Found zip file, the rest is the member path
+                zip_path = '/'.join(parts[:i+1])
+                member_path = '/'.join(parts[i+1:]) if i+1 < len(parts) else ""
+                # Preserve trailing slash if present in original
+                if subfolder.endswith('/') and member_path:
+                    member_path += '/'
+                return zip_path, member_path
+        
+        return None, None
+    
+    def should_use_zip_caching(self, url: str, subfolder: str) -> bool:
+        """Determine if zip caching should be used for this URL and subfolder.
+        
+        Args:
+            url: URL to check
+            subfolder: Subfolder specification from cachelink
+            
+        Returns:
+            True if zip caching should be used
+        """
+        # Check if URL points to a zip file
+        if self.is_zip_file_url(url):
+            return True
+        
+        # Check if subfolder contains zip-folder mode
+        zip_path, member_path = self.get_zip_member_path(subfolder)
+        return zip_path is not None
+    
+    def download_with_zip_caching(self, url: str, destination: Path,
+                                 subfolder: str = "/",
+                                 member_path: Optional[str] = None,
+                                 expected_checksum: Optional[str] = None) -> DownloadResult:
+        """Download file with automatic zip caching support.
+        
+        This method automatically detects if zip caching should be used and
+        delegates to the appropriate download method.
+        
+        Args:
+            url: URL to download from
+            destination: Path where the file should be stored
+            subfolder: Subfolder specification from cachelink
+            member_path: Specific file within zip to extract
+            expected_checksum: Expected SHA-256 checksum for verification
+            
+        Returns:
+            DownloadResult with operation status and checksum
+        """
+        # Check if this should use zip caching
+        if self.should_use_zip_caching(url, subfolder):
+            _logger.debug(f"Using zip caching for {url}")
+            return self.download_zip_file(
+                zip_url=url,
+                destination=destination,
+                member_path=member_path,
+                expected_checksum=expected_checksum
+            )
+        else:
+            # Use regular download
+            _logger.debug(f"Using regular download for {url}")
+            return self.download_file(
+                url=url,
+                destination=destination,
+                expected_checksum=expected_checksum
+            )

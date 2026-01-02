@@ -319,6 +319,35 @@ class IndexDatabase:
                 self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_user TEXT")
             if "rc_pass" not in rclone_columns:
                 self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_pass TEXT")
+
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_ftp (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enabled BOOLEAN NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    root_directory TEXT NOT NULL,
+                    allow_anonymous BOOLEAN NOT NULL,
+                    anonymous_directory TEXT,
+                    anonymous_permissions TEXT,
+                    banner TEXT,
+                    masquerade_address TEXT,
+                    passive_ports TEXT,
+                    tls_enabled BOOLEAN NOT NULL,
+                    tls_certfile TEXT,
+                    tls_keyfile TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            rclone_columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_rclone)")}
+            if "rc_url" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_url TEXT")
+            if "rc_user" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_user TEXT")
+            if "rc_pass" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_pass TEXT")
             
             self._db.execute(
                 """
@@ -1850,6 +1879,85 @@ class IndexDatabase:
                     rclone.get("rc_url"),
                     rclone.get("rc_user"),
                     rclone.get("rc_pass"),
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_ftp(self) -> dict | None:
+        """Get FTP configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT enabled, host, port, root_directory, allow_anonymous, anonymous_directory,
+                       anonymous_permissions, banner, masquerade_address, passive_ports,
+                       tls_enabled, tls_certfile, tls_keyfile, updated_at
+                FROM config_ftp
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "enabled": bool(row["enabled"]),
+            "host": row["host"],
+            "port": row["port"],
+            "root_directory": row["root_directory"],
+            "allow_anonymous": bool(row["allow_anonymous"]),
+            "anonymous_directory": row["anonymous_directory"],
+            "anonymous_permissions": row["anonymous_permissions"],
+            "banner": row["banner"],
+            "masquerade_address": row["masquerade_address"],
+            "passive_ports": row["passive_ports"],
+            "tls_enabled": bool(row["tls_enabled"]),
+            "tls_certfile": row["tls_certfile"],
+            "tls_keyfile": row["tls_keyfile"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_ftp(self, ftp: dict) -> None:
+        """Save FTP configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_ftp (
+                    enabled, host, port, root_directory, allow_anonymous, anonymous_directory,
+                    anonymous_permissions, banner, masquerade_address, passive_ports,
+                    tls_enabled, tls_certfile, tls_keyfile, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    host = excluded.host,
+                    port = excluded.port,
+                    root_directory = excluded.root_directory,
+                    allow_anonymous = excluded.allow_anonymous,
+                    anonymous_directory = excluded.anonymous_directory,
+                    anonymous_permissions = excluded.anonymous_permissions,
+                    banner = excluded.banner,
+                    masquerade_address = excluded.masquerade_address,
+                    passive_ports = excluded.passive_ports,
+                    tls_enabled = excluded.tls_enabled,
+                    tls_certfile = excluded.tls_certfile,
+                    tls_keyfile = excluded.tls_keyfile,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    ftp["enabled"],
+                    ftp["host"],
+                    ftp["port"],
+                    ftp["root_directory"],
+                    ftp["allow_anonymous"],
+                    ftp.get("anonymous_directory"),
+                    ftp.get("anonymous_permissions"),
+                    ftp.get("banner"),
+                    ftp.get("masquerade_address"),
+                    ftp.get("passive_ports"),
+                    ftp["tls_enabled"],
+                    ftp.get("tls_certfile"),
+                    ftp.get("tls_keyfile"),
                     now,
                 ),
             )

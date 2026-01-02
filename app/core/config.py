@@ -23,6 +23,32 @@ _LOGGER = logging.getLogger(__name__)
 
 _CONFIG_ENV = "CACHEINFINITY_CONFIG_DIR"
 
+@dataclass
+class FTPConfig:
+    """FTP/FTPS configuration."""
+    
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 2121
+    root_directory: str = "/"
+    allow_anonymous: bool = False
+    anonymous_directory: Optional[str] = None
+    anonymous_permissions: str = "elr"
+    banner: Optional[str] = None
+    masquerade_address: Optional[str] = None
+    passive_ports: Optional[tuple[int, int]] = None
+    tls: Optional[dict] = None
+    
+    def validate(self) -> None:
+        """Validate FTP configuration."""
+        if self.enabled:
+            if not self.root_directory:
+                raise ConfigError("FTP root_directory must be specified when enabled")
+            if self.port < 1 or self.port > 65535:
+                raise ConfigError("FTP port must be between 1 and 65535")
+            if self.tls and not isinstance(self.tls, dict):
+                raise ConfigError("FTP TLS configuration must be a dictionary")
+
 # Configuration Service Classes
 class ConfigService:
     """Configuration service backed by the database."""
@@ -524,6 +550,19 @@ class ConfigService:
                     "propagation_seconds": settings.tls.dns01.propagation_seconds,
                 },
             },
+            "ftp": {
+                "enabled": settings.ftp.enabled,
+                "host": settings.ftp.host,
+                "port": settings.ftp.port,
+                "root_directory": settings.ftp.root_directory,
+                "allow_anonymous": settings.ftp.allow_anonymous,
+                "anonymous_directory": settings.ftp.anonymous_directory,
+                "anonymous_permissions": settings.ftp.anonymous_permissions,
+                "banner": settings.ftp.banner,
+                "masquerade_address": settings.ftp.masquerade_address,
+                "passive_ports": list(settings.ftp.passive_ports) if settings.ftp.passive_ports else None,
+                "tls": settings.ftp.tls,
+            },
             "cookies": cookies,
             "shares": shares,
         }
@@ -774,6 +813,25 @@ class ConfigMigration:
             "dns01_config": json.dumps(tls_raw.get("dns01", {}))
         }
         self.index_db.save_tls(tls)
+        
+        # Migrate FTP
+        ftp_raw = bootstrap_data.get("ftp", {})
+        if ftp_raw:
+            tls_config = ftp_raw.get("tls")
+            ftp = {
+                "enabled": bool(ftp_raw.get("enabled", False)),
+                "host": ftp_raw.get("host", "0.0.0.0"),
+                "port": int(ftp_raw.get("port", 2121)),
+                "root_directory": ftp_raw.get("root_directory", "/"),
+                "allow_anonymous": bool(ftp_raw.get("allow_anonymous", False)),
+                "anonymous_directory": ftp_raw.get("anonymous_directory"),
+                "anonymous_permissions": ftp_raw.get("anonymous_permissions", "elr"),
+                "banner": ftp_raw.get("banner"),
+                "masquerade_address": ftp_raw.get("masquerade_address"),
+                "passive_ports": json.dumps(ftp_raw.get("passive_ports")) if ftp_raw.get("passive_ports") else None,
+                "tls_config": json.dumps(tls_config) if tls_config else None
+            }
+            self.index_db.save_ftp(ftp)
 
         # Migrate rclone
         rclone_raw = bootstrap_data.get("rclone", {})
@@ -1324,6 +1382,26 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         )
     else:
         tls = TLSSettings()
+    
+    # Load FTP from database
+    ftp_raw = index_db.get_ftp()
+    if ftp_raw:
+        tls_config = json.loads(ftp_raw["tls_config"]) if ftp_raw["tls_config"] else None
+        ftp = FTPConfig(
+            enabled=ftp_raw["enabled"],
+            host=ftp_raw["host"],
+            port=ftp_raw["port"],
+            root_directory=ftp_raw["root_directory"],
+            allow_anonymous=ftp_raw["allow_anonymous"],
+            anonymous_directory=ftp_raw["anonymous_directory"],
+            anonymous_permissions=ftp_raw["anonymous_permissions"],
+            banner=ftp_raw["banner"],
+            masquerade_address=ftp_raw["masquerade_address"],
+            passive_ports=tuple(ftp_raw["passive_ports"]) if ftp_raw["passive_ports"] else None,
+            tls=tls_config
+        )
+    else:
+        ftp = FTPConfig()
 
     rclone_raw = index_db.get_rclone()
     if rclone_raw:
@@ -1641,6 +1719,7 @@ class Settings:
     staging: StagingDefinition = field(default_factory=StagingDefinition)
     cookies: dict[str, CookieJarDefinition] = field(default_factory=dict)
     shares: dict[str, ShareDefinition] = field(default_factory=dict)
+    ftp: FTPConfig = field(default_factory=FTPConfig)
     bootstrap_path: Optional[Path] = None  # bootstrap.yml
     inline_cachelinks: dict[str, Any] = field(default_factory=dict)
     mount_tree_paths: list[Path] = field(default_factory=list)
@@ -1666,6 +1745,7 @@ class Settings:
         self.indexing.validate()
         self.database.validate()
         self.auth.validate()
+        self.ftp.validate()
 
 
 __all__ = [
@@ -1684,6 +1764,7 @@ __all__ = [
     "TLSDNS01Settings",
     "TLSManualSettings",
     "TLSSettings",
+    "FTPConfig",
     "IndexingSettings",
     "load_database_backed_settings",
     "load_database_backed_settings_from_manager",
@@ -1693,3 +1774,9 @@ __all__ = [
     "ConfigMigration",
     "Settings",
 ]
+
+@dataclass
+class CookieJarDefinition:
+    """Definition for a cookie jar containing Base64 encoded Netscape style cookies.txt content."""
+    domain: str
+    cookie_content: str = ""
