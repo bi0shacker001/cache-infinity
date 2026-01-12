@@ -16,6 +16,7 @@ dependencies = [
     "watchdog>=4.0",
     "psycopg[binary]>=3.2",
     "pycurl>=7.45.0",
+    "Flask>=3.0",
 ]
 
 [project.optional-dependencies]

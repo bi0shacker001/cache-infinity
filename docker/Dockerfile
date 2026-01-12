@@ -35,7 +35,8 @@ RUN pip install --no-cache-dir \
         pytest>=8.0 \
         requests>=2.0 \
         beautifulsoup4>=4.0 \
-        pycurl>=7.45.7 && \
+        pycurl>=7.45.7 \
+        Flask>=3.0 && \
     mkdir -p /datadir /staging /config && \
     chown -R cacheinfinity:cacheinfinity /app /datadir /staging /config
 

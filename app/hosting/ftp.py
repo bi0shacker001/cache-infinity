@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import itertools
 import logging
 import os
+import shlex
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List
 
-from pyftpdlib.authorizers import DummyAuthorizer
+from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
@@ -22,10 +28,20 @@ try:
 except ImportError:
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
+    class SSHServer:  # type: ignore[no-redef]
+        """Fallback SSHServer base when asyncssh is unavailable."""
+        pass
+
+    class SFTPServer:  # type: ignore[no-redef]
+        """Fallback SFTPServer base when asyncssh is unavailable."""
+        pass
+
+    class ChannelOpenError(Exception):  # type: ignore[no-redef]
+        """Fallback ChannelOpenError when asyncssh is unavailable."""
+        pass
 
 from core.config import FTPConfig
-from auth.credentials import AuthenticationManager
-from auth.ssh_keys import UserSSHKeyManager
+from auth.credentials import AuthenticationManager, UserSSHKeyManager
 from storage.datadir import DatadirRegistry
 from storage.vfs import VirtualFilesystem
 
