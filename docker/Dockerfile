@@ -36,12 +36,8 @@ RUN pip install --no-cache-dir \
         requests>=2.0 \
         beautifulsoup4>=4.0 \
         pycurl>=7.45.7 \
-<<<<<<< HEAD
         Flask>=3.0 \
         rclone-python>=1.0 && \
-=======
-        Flask>=3.0 && \
->>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
     mkdir -p /datadir /staging /config && \
     chown -R cacheinfinity:cacheinfinity /app /datadir /staging /config
 

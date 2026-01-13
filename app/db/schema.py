@@ -1429,7 +1429,7 @@ class IndexDatabase:
                 """
                 SELECT username, api_key
                 FROM auth_users
-                WHERE purpose = 'webui' AND is_admin = 1
+                WHERE purpose = 'webui' AND is_admin = TRUE
                 ORDER BY username
                 """
             )
@@ -1465,14 +1465,14 @@ class IndexDatabase:
     def any_admin_users(self) -> bool:
         with self._lock:
             row = self._db.fetchone(
-                "SELECT 1 AS present FROM auth_users WHERE enabled = 1 AND is_admin = 1 AND purpose = 'webui' LIMIT 1"
+                "SELECT 1 AS present FROM auth_users WHERE enabled = TRUE AND is_admin = TRUE AND purpose = 'webui' LIMIT 1"
             )
             if row:
                 return True
 
             # No enabled admins; if the admin set is empty, recreate the default credentials
             has_any_admin = self._db.fetchone(
-                "SELECT 1 AS present FROM auth_users WHERE is_admin = 1 AND purpose = 'webui' LIMIT 1"
+                "SELECT 1 AS present FROM auth_users WHERE is_admin = TRUE AND purpose = 'webui' LIMIT 1"
             )
             if has_any_admin:
                 return False
