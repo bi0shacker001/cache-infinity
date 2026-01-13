@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import secrets
+import shlex
 import threading
 import time
 from dataclasses import dataclass
@@ -55,6 +56,79 @@ def start_session_cleanup_thread(
 _HASH_SCHEME_PBKDF2 = "pbkdf2_sha256"
 _HASH_SCHEME_SHA256 = "sha256"
 _HASH_DEFAULT_ITERATIONS = 200_000
+
+
+def render_authorized_keys(entries: List[Dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for key in entries:
+        key_data = (key.get("key_data") or "").strip()
+        key_type = (key.get("key_type") or "").strip()
+        if not key_data:
+            continue
+        comment = f"CacheInfinity {key.get('key_type', 'unknown')} key"
+        if key_type:
+            lines.append(f"{key_type} {key_data} {comment}")
+        else:
+            lines.append(f"{key_data} {comment}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def parse_authorized_keys_content(content: str) -> List[Dict[str, str]]:
+    keys: list[dict[str, str]] = []
+    lines = content.strip().split("\n")
+    valid_key_types = {
+        "ssh-rsa",
+        "ssh-dss",
+        "ssh-ed25519",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+    }
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parts = shlex.split(line, posix=True)
+        except ValueError:
+            continue
+        key_type = None
+        key_data = None
+        comment = ""
+        for idx, part in enumerate(parts):
+            if part in valid_key_types:
+                if idx + 1 < len(parts):
+                    key_type = part
+                    key_data = parts[idx + 1]
+                    comment = " ".join(parts[idx + 2:]) if idx + 2 < len(parts) else ""
+                break
+        if key_type and key_data:
+            keys.append({"key_type": key_type, "key_data": key_data, "comment": comment})
+    return keys
+
+
+def validate_authorized_keys_content(content: str) -> tuple[bool, List[Dict[str, str]]]:
+    if not content.strip():
+        return True, []
+    raw_lines = [
+        line for line in content.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    parsed_keys = parse_authorized_keys_content(content)
+    if not parsed_keys or len(parsed_keys) != len(raw_lines):
+        return False, []
+    if not ASYNCSSH_AVAILABLE:
+        return False, []
+    for key in parsed_keys:
+        key_type = key.get("key_type", "")
+        key_data = key.get("key_data", "")
+        if not key_type or not key_data:
+            return False, []
+        try:
+            asyncssh.import_public_key(f"{key_type} {key_data}")
+        except Exception:
+            return False, []
+    return True, parsed_keys
 
 
 def _hash_password(password: str, *, iterations: int = _HASH_DEFAULT_ITERATIONS) -> str:
@@ -873,6 +947,74 @@ class AuthenticationManager:
             _logger.error(f"Failed to get all users: {e}")
             return {}
 
+    def get_authorized_keys_text(self, username: str) -> str:
+        if not username:
+            return ""
+        try:
+            keys = self.user_ssh_key_manager.get_user_ssh_keys(username)
+            return render_authorized_keys(keys)
+        except Exception as exc:
+            _logger.error("Failed to load authorized_keys for %s: %s", username, exc)
+            return ""
+
+    def update_authorized_keys_text(self, username: str, content: str) -> bool:
+        if not username:
+            return False
+        is_valid, keys = validate_authorized_keys_content(content)
+        if not is_valid:
+            _logger.warning("Rejected invalid authorized_keys update for %s", username)
+            return False
+        try:
+            self.user_ssh_key_manager.delete_all_user_ssh_keys(username)
+            for key in keys:
+                fingerprint = f"SHA256:{hash(key['key_data']) % 1000000:06d}"
+                if ASYNCSSH_AVAILABLE:
+                    try:
+                        parsed_key = asyncssh.import_public_key(f"{key['key_type']} {key['key_data']}")
+                        fingerprint = parsed_key.get_fingerprint()
+                    except Exception:
+                        pass
+                self.user_ssh_key_manager.save_user_ssh_key(
+                    username,
+                    key["key_type"],
+                    key["key_data"],
+                    fingerprint,
+                )
+            return True
+        except Exception as exc:
+            _logger.error("Failed to update authorized_keys for %s: %s", username, exc)
+            return False
+
+    def get_authorized_keys_editable(self, username: str, *, purpose: str = "webdav") -> bool:
+        if not username:
+            return False
+        try:
+            row = self.db_manager.fetchone(
+                "SELECT ssh_keys_editable FROM auth_users WHERE username = ? AND purpose = ?",
+                (username, purpose),
+            )
+            if not row:
+                return False
+            return bool(row.get("ssh_keys_editable", True))
+        except Exception as exc:
+            _logger.error("Failed to read ssh_keys_editable for %s: %s", username, exc)
+            return False
+
+    def set_authorized_keys_editable(self, username: str, enabled: bool, *, purpose: str = "webdav") -> bool:
+        if not username:
+            return False
+        try:
+            self.db_manager.execute(
+                "UPDATE auth_users SET ssh_keys_editable = ? WHERE username = ? AND purpose = ?",
+                (1 if enabled else 0, username, purpose),
+            )
+            self.db_manager.commit()
+            return True
+        except Exception as exc:
+            _logger.error("Failed to update ssh_keys_editable for %s: %s", username, exc)
+            self.db_manager.rollback()
+            return False
+
 
 __all__ = [
     "ASYNCSSH_AVAILABLE",
@@ -881,6 +1023,9 @@ __all__ = [
     "SSHHostKeyManager",
     "SessionToken",
     "UserSSHKeyManager",
+    "parse_authorized_keys_content",
+    "render_authorized_keys",
+    "validate_authorized_keys_content",
     "_hash_password",
     "_verify_password_hash",
 ]

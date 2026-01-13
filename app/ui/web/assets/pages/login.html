@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Login</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <main class="page" style="min-height:100vh; align-items:center; justify-content:center;">
+      <section class="section" style="max-width:480px; width:100%;">
+        <div class="stack">
+          <div>
+            <h1>CacheInfinity Admin</h1>
+            <p>Sign in to manage cachelinks, storage, and system operations.</p>
+          </div>
+          {% if error %}
+          <div class="notice warn">{{ error }}</div>
+          {% endif %}
+          <form method="post" class="stack">
+            <div class="field">
+              <label class="label" for="username">Username</label>
+              <input class="input" id="username" name="username" autocomplete="username" required>
+            </div>
+            <div class="field">
+              <label class="label" for="password">Password</label>
+              <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+            </div>
+            <button class="button primary" type="submit">Sign In</button>
+          </form>
+          <p class="help">Admin actions require a secure network boundary. Keep this port private.</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

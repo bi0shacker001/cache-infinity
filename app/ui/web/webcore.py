@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import time
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, request, stream_with_context
 
 from ui.backend import ManagementContext, ManagementLayer
 
@@ -68,13 +70,20 @@ class WebUIApp:
     def _require_auth(self):
         user = self._current_user()
         if not user:
-            if request.method == "GET" and request.path == "/":
+            if (
+                request.method == "GET"
+                and request.accept_mimetypes["text/html"] >= request.accept_mimetypes["application/json"]
+            ):
                 return redirect("/login")
             return jsonify({"error": "Authentication required"}), 401
         return None
 
     def _configure_routes(self) -> None:
         app = self.app
+
+        @app.context_processor
+        def _theme_context():
+            return {"theme": self._resolve_theme()}
 
         @app.before_request
         def _auth_guard():
@@ -89,6 +98,73 @@ class WebUIApp:
         @app.route("/", methods=["GET"])
         def index():
             return render_template("index.html")
+
+        @app.route("/overview", methods=["GET"])
+        def overview():
+            return render_template("overview.html")
+
+        @app.route("/storage", methods=["GET"])
+        def storage_page():
+            if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
+                return jsonify(self.management.system("storage"))
+            return render_template("storage.html")
+
+        @app.route("/cachelinks", methods=["GET", "POST"])
+        def cachelinks_create():
+            if request.method == "GET":
+                if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
+                    return jsonify(self.management.cachelinks("list"))
+                return render_template("cachelinks.html")
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.cachelinks(
+                    "create",
+                    parent_path=payload.get("parent_path"),
+                    name=payload.get("name"),
+                    url=payload.get("url"),
+                    subfolder=payload.get("subfolder", "/"),
+                    url_handler=payload.get("url_handler"),
+                    rclone_remote=payload.get("rclone_remote"),
+                    rclone_path=payload.get("rclone_path"),
+                    bandwidth_limit=payload.get("bandwidth_limit"),
+                    transfer_concurrency=payload.get("transfer_concurrency"),
+                    checkers=payload.get("checkers"),
+                    timeout=payload.get("timeout"),
+                    retries=payload.get("retries"),
+                )
+            )
+
+        @app.route("/settings", methods=["GET"])
+        def settings_page():
+            return render_template("settings.html")
+
+        @app.route("/users", methods=["GET", "POST"])
+        def users_admin():
+            if request.method == "GET":
+                if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
+                    return jsonify(self.management.users("admin", "list"))
+                return render_template("users.html")
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.users(
+                    "admin",
+                    "manage",
+                    username=payload.get("username"),
+                    password=payload.get("password"),
+                    enabled=payload.get("enabled", True),
+                    admin=payload.get("admin", True),
+                )
+            )
+
+        @app.route("/cookies", methods=["GET"])
+        def cookies_page():
+            if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
+                return jsonify(self.management.cookies("list"))
+            return render_template("cookies.html")
+
+        @app.route("/maintenance", methods=["GET"])
+        def maintenance_page():
+            return render_template("maintenance.html")
 
         @app.route("/login", methods=["GET", "POST"])
         def login():
@@ -131,13 +207,13 @@ class WebUIApp:
         def status():
             return jsonify(self.management.system("status"))
 
+        @app.route("/events/overview", methods=["GET"])
+        def overview_events():
+            return self._stream_overview_events()
+
         @app.route("/shares", methods=["GET"])
         def shares():
             return jsonify(self.management.shares("list"))
-
-        @app.route("/storage", methods=["GET"])
-        def storage_overview():
-            return jsonify(self.management.system("storage"))
 
         @app.route("/storage/entries", methods=["GET", "DELETE"])
         def storage_entries():
@@ -190,20 +266,6 @@ class WebUIApp:
                 )
             )
 
-        @app.route("/cachelinks", methods=["POST"])
-        def cachelinks_create():
-            payload = request.get_json(silent=True) or {}
-            return jsonify(
-                self.management.cachelinks(
-                    "create",
-                    parent_path=payload.get("parent_path"),
-                    name=payload.get("name"),
-                    url=payload.get("url"),
-                    subfolder=payload.get("subfolder", "/"),
-                    url_handler=payload.get("url_handler"),
-                )
-            )
-
         @app.route("/cachelinks/tree", methods=["GET"])
         def cachelinks_tree():
             return jsonify(self.management.cachelinks("tree"))
@@ -218,6 +280,13 @@ class WebUIApp:
                     url=payload.get("url"),
                     subfolder=payload.get("subfolder"),
                     url_handler=payload.get("url_handler"),
+                    rclone_remote=payload.get("rclone_remote"),
+                    rclone_path=payload.get("rclone_path"),
+                    bandwidth_limit=payload.get("bandwidth_limit"),
+                    transfer_concurrency=payload.get("transfer_concurrency"),
+                    checkers=payload.get("checkers"),
+                    timeout=payload.get("timeout"),
+                    retries=payload.get("retries"),
                 )
             )
 
@@ -245,10 +314,6 @@ class WebUIApp:
         def cachelinks_delete(canonical_id: str):
             return jsonify(self.management.cachelinks("delete", canonical_id=canonical_id))
 
-        @app.route("/cookies", methods=["GET"])
-        def cookies_list():
-            return jsonify(self.management.cookies("list"))
-
         @app.route("/cookies/upload", methods=["POST"])
         def cookies_upload():
             domain = request.form.get("domain", "")
@@ -274,22 +339,6 @@ class WebUIApp:
                     "refresh",
                     domain=payload.get("domain"),
                     cookie_jar=payload.get("cookie_jar"),
-                )
-            )
-
-        @app.route("/users", methods=["GET", "POST"])
-        def users_admin():
-            if request.method == "GET":
-                return jsonify(self.management.users("admin", "list"))
-            payload = request.get_json(silent=True) or {}
-            return jsonify(
-                self.management.users(
-                    "admin",
-                    "manage",
-                    username=payload.get("username"),
-                    password=payload.get("password"),
-                    enabled=payload.get("enabled", True),
-                    admin=payload.get("admin", True),
                 )
             )
 
@@ -338,6 +387,34 @@ class WebUIApp:
                 return jsonify(self.management.settings("detail"))
             payload = request.get_json(silent=True) or {}
             return jsonify(self.management.settings("update", payload=payload))
+
+        @app.route("/settings/ssh-keys/users", methods=["GET"])
+        def settings_ssh_users():
+            return jsonify(self.management.ssh_user_keys("list"))
+
+        @app.route("/settings/ssh-keys/<username>", methods=["GET", "POST"])
+        def settings_ssh_user_keys(username: str):
+            if request.method == "GET":
+                return jsonify(self.management.ssh_user_keys("get", username=username))
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.ssh_user_keys(
+                    "update",
+                    username=username,
+                    authorized_keys=payload.get("authorized_keys", ""),
+                )
+            )
+
+        @app.route("/settings/ssh-keys/<username>/editable", methods=["POST"])
+        def settings_ssh_user_editable(username: str):
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.ssh_user_keys(
+                    "set_editable",
+                    username=username,
+                    enabled=bool(payload.get("enabled", True)),
+                )
+            )
 
         @app.route("/settings/config", methods=["GET", "POST"])
         def settings_config():
@@ -403,6 +480,10 @@ class WebUIApp:
         def reinit():
             return jsonify(self.management.system("reinit"))
 
+        @app.route("/shutdown", methods=["POST"])
+        def shutdown():
+            return jsonify(self.management.system("shutdown"))
+
         @app.route("/ssh-host-keys", methods=["GET"])
         def ssh_host_keys():
             return jsonify(self.management.ssh_host_keys("list"))
@@ -423,3 +504,65 @@ class WebUIApp:
         @app.route("/rclone/remotes", methods=["GET"])
         def rclone_remotes():
             return jsonify(self.management.rclone("remotes"))
+
+        @app.route("/rclone/test", methods=["POST"])
+        def rclone_test():
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.rclone(
+                    "test",
+                    remote=payload.get("remote"),
+                    path=payload.get("path"),
+                )
+            )
+
+    def _resolve_theme(self) -> str | None:
+        notheme = request.args.get("notheme", "").lower()
+        if notheme in ("1", "true", "yes", "on"):
+            return None
+        theme = getattr(self.management.ctx.settings, "ui", None)
+        value = theme.theme if theme else "lavender"
+        return value or "lavender"
+
+    def _overview_payload(self) -> dict:
+        status = self.management.system("status")
+        downloads = self.management.downloads("list", statuses=None, limit=8)
+        return {
+            "status": status,
+            "downloads": downloads.get("downloads", []),
+        }
+
+    @staticmethod
+    def _format_sse(payload: dict, *, event: str | None = None) -> str:
+        line = f"data: {json.dumps(payload, separators=(',', ':'))}"
+        if event:
+            line = f"event: {event}\n{line}"
+        return f"{line}\n\n"
+
+    def _stream_overview_events(self) -> Response:
+        interval = request.args.get("interval", "4")
+        try:
+            interval_value = max(1.0, min(float(interval), 60.0))
+        except ValueError:
+            interval_value = 4.0
+
+        def _generate():
+            try:
+                while True:
+                    try:
+                        payload = self._overview_payload()
+                    except Exception as exc:
+                        payload = {"error": str(exc), "status": None, "downloads": []}
+                    yield self._format_sse(payload)
+                    time.sleep(interval_value)
+            except GeneratorExit:
+                return
+
+        return Response(
+            stream_with_context(_generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )

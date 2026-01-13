@@ -6,8 +6,8 @@ This file tracks all known compliance issues with the current SPEC.md requiremen
 
 **Current Compliance Status: 85% Complete**
 
-- **Resolved Issues**: 7 of 10 (70%)
-- **Open Issues**: 3 of 10 (30%)
+- **Resolved Issues**: 8 of 11 (73%)
+- **Open Issues**: 3 of 11 (27%)
 - **Overall Progress**: Good progress, but SFTP virtual authorized_keys not implemented
 
 ## Resolved Compliance Issues ✅
@@ -126,6 +126,17 @@ This file tracks all known compliance issues with the current SPEC.md requiremen
 **Dependencies:** None
 **Assigned:** Unassigned
 **Target Resolution:** Phase 4 - Low Priority
+
+### ISSUE-011: Incomplete Rclone WebUI Management ❌
+**Status:** Resolved
+**Severity:** Medium
+**SPEC Section:** 8.7 Rclone-python Configuration in Cachelinks WebUI
+**Description:** WebUI lacks connectivity testing and persistence of rclone-specific cachelink fields (rclone_remote, rclone_path, bandwidth/transfer settings). Remote CRUD is only partially represented via settings payloads.
+**Impact:** Rclone remotes cannot be validated from the UI and cachelink metadata is incomplete.
+**Resolution:** ✅ Added rclone remote connectivity test endpoint + UI button, persisted rclone-specific cachelink fields in schema/config, and propagated them into WebUI forms.
+**Dependencies:** None
+**Assigned:** Unassigned
+**Target Resolution:** Phase 2 - Medium Priority
 
 ## Issue Tracking Conventions
 

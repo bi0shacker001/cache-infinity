@@ -119,6 +119,12 @@ class DatabaseBackupManager:
                 valid_data_found = True
             warnings.extend(limits_warnings)
 
+        if 'ui' in bootstrap_data:
+            ui_valid, ui_warnings = self._process_ui(bootstrap_data['ui'])
+            if ui_valid:
+                valid_data_found = True
+            warnings.extend(ui_warnings)
+
         if 'indexing' in bootstrap_data:
             indexing_valid, indexing_warnings = self._process_indexing(bootstrap_data['indexing'])
             if indexing_valid:
@@ -253,6 +259,12 @@ class DatabaseBackupManager:
                 'one_zip_cache_at_a_time': limits['one_zip_cache_at_a_time']
             }
 
+        ui = self.index_db.get_ui()
+        if ui:
+            bootstrap_data['ui'] = {
+                'theme': ui.get('theme', 'lavender')
+            }
+
         # Collect indexing settings
         indexing = self.index_db.get_indexing()
         if indexing:
@@ -350,6 +362,13 @@ class DatabaseBackupManager:
                 'subfolder': cachelink['subfolder'],
                 'mode': cachelink['mode'],
                 'url_handler': cachelink.get('url_handler'),
+                'rclone_remote': cachelink.get('rclone_remote'),
+                'rclone_path': cachelink.get('rclone_path'),
+                'bandwidth_limit': cachelink.get('bandwidth_limit'),
+                'transfer_concurrency': cachelink.get('transfer_concurrency'),
+                'checkers': cachelink.get('checkers'),
+                'timeout': cachelink.get('timeout'),
+                'retries': cachelink.get('retries'),
                 'source_file': cachelink['source_file']
             })
 
@@ -452,6 +471,34 @@ class DatabaseBackupManager:
         except Exception as exc:
             warnings.append(f"Failed to process limits: {exc}")
             self._logger.warning(f"Failed to process limits: {exc}")
+            return False, warnings
+
+    def _process_ui(self, ui_data: dict) -> Tuple[bool, List[str]]:
+        """Process UI configuration section.
+
+        Args:
+            ui_data: UI configuration data
+
+        Returns:
+            Tuple of (success: bool, warnings: list[str])
+        """
+        warnings = []
+
+        if not isinstance(ui_data, dict):
+            warnings.append("UI section must be a dictionary")
+            return False, warnings
+
+        theme = ui_data.get("theme", "lavender")
+        if not isinstance(theme, str) or not theme.strip():
+            warnings.append("UI theme must be a non-empty string")
+            return False, warnings
+
+        try:
+            self.index_db.save_ui({"theme": theme.strip()})
+            return True, warnings
+        except Exception as exc:
+            warnings.append(f"Failed to process UI settings: {exc}")
+            self._logger.warning(f"Failed to process UI settings: {exc}")
             return False, warnings
 
     def _process_indexing(self, indexing_data: dict) -> Tuple[bool, List[str]]:
@@ -756,6 +803,13 @@ class DatabaseBackupManager:
                     'subfolder': cachelink_data.get('subfolder'),
                     'mode': cachelink_data.get('mode'),
                     'url_handler': cachelink_data.get('url_handler') or cachelink_data.get('handler'),
+                    'rclone_remote': cachelink_data.get('rclone_remote'),
+                    'rclone_path': cachelink_data.get('rclone_path'),
+                    'bandwidth_limit': cachelink_data.get('bandwidth_limit'),
+                    'transfer_concurrency': cachelink_data.get('transfer_concurrency'),
+                    'checkers': cachelink_data.get('checkers'),
+                    'timeout': cachelink_data.get('timeout'),
+                    'retries': cachelink_data.get('retries'),
                     'source_file': cachelink_data.get('source_file')
                 }
 

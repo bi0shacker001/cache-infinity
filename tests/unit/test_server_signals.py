@@ -7,7 +7,7 @@ import pytest
 import core.server as server_module
 
 
-def test_shutdown_signal_handler_raises(monkeypatch):
+def test_shutdown_signal_handler_invokes_callback(monkeypatch):
     recorded = {}
 
     def fake_signal(sig, handler):
@@ -28,7 +28,6 @@ def test_shutdown_signal_handler_raises(monkeypatch):
     handler = recorded.get(sigint)
     assert handler is not None
 
-    with pytest.raises(KeyboardInterrupt):
-        handler(sigint, None)
+    handler(sigint, None)
 
     assert calls == [server_module.signal.Signals(sigint).name]

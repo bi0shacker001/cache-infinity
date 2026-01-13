@@ -71,6 +71,59 @@ class ConfigurationManager:
         logs_dir.mkdir(parents=True, exist_ok=True)
         return logs_dir
 
+    def ensure_runtime_dir(self) -> Path:
+        """Ensure runtime directory exists and return its path."""
+        runtime_dir = self.config_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        return runtime_dir
+
+    def write_rclone_config(self, remotes: dict[str, dict]) -> Optional[Path]:
+        """Write rclone configuration to a runtime file for rclone-python usage."""
+        if not remotes:
+            runtime_dir = self.ensure_runtime_dir()
+            candidate = runtime_dir / "rclone.conf"
+            if candidate.exists():
+                candidate.unlink()
+            return None
+        runtime_dir = self.ensure_runtime_dir()
+        config_path = runtime_dir / "rclone.conf"
+        self.write_text(config_path, self._render_rclone_config(remotes))
+        return config_path
+
+    def _render_rclone_config(self, remotes: dict[str, dict]) -> str:
+        lines: list[str] = []
+        for name in sorted(remotes.keys()):
+            if not name:
+                continue
+            remote = remotes.get(name)
+            if not isinstance(remote, dict):
+                continue
+            lines.append(f"[{name}]")
+            keys = list(remote.keys())
+            if "type" in keys:
+                keys.remove("type")
+                keys = ["type"] + sorted(keys)
+            else:
+                keys = sorted(keys)
+            for key in keys:
+                if key.startswith("ci_"):
+                    continue
+                value = remote.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, (list, tuple)):
+                    joined = ",".join(str(item) for item in value if item is not None)
+                    if joined:
+                        lines.append(f"{key} = {joined}")
+                    continue
+                if isinstance(value, bool):
+                    lines.append(f"{key} = {'true' if value else 'false'}")
+                    continue
+                lines.append(f"{key} = {value}")
+            lines.append("")
+        rendered = "\n".join(lines).strip()
+        return f"{rendered}\n" if rendered else ""
+
     def read_text(self, path: Path) -> str:
         """Read a UTF-8 text file."""
         return path.read_text(encoding="utf-8")

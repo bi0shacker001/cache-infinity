@@ -127,6 +127,11 @@ class ConfigService:
                 }
             )
 
+        if "ui" in payload:
+            ui = payload.get("ui") or {}
+            theme = ui.get("theme") or "lavender"
+            index_db.save_ui({"theme": str(theme)})
+
         if "rclone" in payload:
             rclone = payload.get("rclone") or {}
             existing_rclone = index_db.get_rclone() or {}
@@ -358,16 +363,37 @@ class ConfigService:
             source_url = leaf.get("url", descriptor.source_url)
             subfolder = leaf.get("subfolder", descriptor.subfolder)
             url_handler = leaf.get("url_handler", descriptor.url_handler)
+            rclone_remote = leaf.get("rclone_remote", descriptor.rclone_remote)
+            rclone_path = leaf.get("rclone_path", descriptor.rclone_path)
+            bandwidth_limit = leaf.get("bandwidth_limit", descriptor.bandwidth_limit)
+            transfer_concurrency = leaf.get("transfer_concurrency", descriptor.transfer_concurrency)
+            checkers = leaf.get("checkers", descriptor.checkers)
+            timeout = leaf.get("timeout", descriptor.timeout)
+            retries = leaf.get("retries", descriptor.retries)
         except ConfigError:
             source_url = descriptor.source_url
             subfolder = descriptor.subfolder
             url_handler = descriptor.url_handler
+            rclone_remote = descriptor.rclone_remote
+            rclone_path = descriptor.rclone_path
+            bandwidth_limit = descriptor.bandwidth_limit
+            transfer_concurrency = descriptor.transfer_concurrency
+            checkers = descriptor.checkers
+            timeout = descriptor.timeout
+            retries = descriptor.retries
         return {
             "canonical_id": descriptor.canonical_id,
             "name": descriptor.path_segments[-1],
             "url": source_url,
             "subfolder": subfolder,
             "url_handler": url_handler,
+            "rclone_remote": rclone_remote,
+            "rclone_path": rclone_path,
+            "bandwidth_limit": bandwidth_limit,
+            "transfer_concurrency": transfer_concurrency,
+            "checkers": checkers,
+            "timeout": timeout,
+            "retries": retries,
             "mode": snapshot["mode"],
             "files_total": snapshot["files_total"],
             "cached_files": snapshot["cached_files"],
@@ -400,6 +426,13 @@ class ConfigService:
             "download_root": descriptor.download_root,
             "identifier": descriptor.identifier,
             "url_handler": descriptor.url_handler,
+            "rclone_remote": descriptor.rclone_remote,
+            "rclone_path": descriptor.rclone_path,
+            "bandwidth_limit": descriptor.bandwidth_limit,
+            "transfer_concurrency": descriptor.transfer_concurrency,
+            "checkers": descriptor.checkers,
+            "timeout": descriptor.timeout,
+            "retries": descriptor.retries,
             "mode": descriptor.mode.value,
             "entries_total": counts["entries_total"],
             "files_total": counts["files_total"],
@@ -524,6 +557,9 @@ class ConfigService:
             "limits": {
                 "max_zip_total_gb": settings.limits.max_zip_total_gb,
                 "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
+            },
+            "ui": {
+                "theme": settings.ui.theme,
             },
             "rclone": {
                 "remotes": settings.rclone.remotes,
@@ -1522,6 +1558,13 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         rclone = _parse_rclone(rclone_raw, config_dir)
     else:
         rclone = RcloneSettings()
+
+    ui_raw = index_db.get_ui()
+    if ui_raw:
+        theme = ui_raw.get("theme") or "lavender"
+        ui = UISettings(theme=str(theme))
+    else:
+        ui = UISettings()
     
     cachelinks_data = index_db.get_cachelinks() or []
     mount_tree_paths: list[Path] = []
@@ -1542,6 +1585,7 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
         auth=auth,
         tls=tls,
         rclone=rclone,
+        ui=ui,
         indexing=indexing,
         limits=limits,
         datadirs=datadirs,
@@ -1577,6 +1621,20 @@ def _build_cachelinks_tree(cachelinks_data: list[dict]) -> dict:
             "mode": cachelink.get("mode") or _detect_mode(cachelink.get("subfolder") or "/").value,
             "url_handler": cachelink.get("url_handler"),
         }
+        if cachelink.get("rclone_remote"):
+            current[leaf_name]["rclone_remote"] = cachelink.get("rclone_remote")
+        if cachelink.get("rclone_path"):
+            current[leaf_name]["rclone_path"] = cachelink.get("rclone_path")
+        if cachelink.get("bandwidth_limit") is not None:
+            current[leaf_name]["bandwidth_limit"] = cachelink.get("bandwidth_limit")
+        if cachelink.get("transfer_concurrency") is not None:
+            current[leaf_name]["transfer_concurrency"] = cachelink.get("transfer_concurrency")
+        if cachelink.get("checkers") is not None:
+            current[leaf_name]["checkers"] = cachelink.get("checkers")
+        if cachelink.get("timeout") is not None:
+            current[leaf_name]["timeout"] = cachelink.get("timeout")
+        if cachelink.get("retries") is not None:
+            current[leaf_name]["retries"] = cachelink.get("retries")
     return cachelinks_dict
 
 
@@ -1832,6 +1890,13 @@ class BootstrapSettings:
 
 
 @dataclass
+class UISettings:
+    """WebUI configuration settings."""
+
+    theme: str = "lavender"
+
+
+@dataclass
 class Settings:
     """Runtime configuration loaded from the database and optional bootstrap."""
     config_dir: Path
@@ -1840,6 +1905,7 @@ class Settings:
     auth: AuthSettings = field(default_factory=AuthSettings)
     tls: TLSSettings = field(default_factory=TLSSettings)
     rclone: RcloneSettings = field(default_factory=RcloneSettings)
+    ui: UISettings = field(default_factory=UISettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     limits: LimitsDefinition = field(default_factory=LimitsDefinition)
     datadirs: dict[str, DatadirDefinition] = field(default_factory=dict)
@@ -1868,6 +1934,8 @@ class Settings:
             datadir.validate()
         for share in self.shares.values():
             share.validate()
+        if not isinstance(self.ui.theme, str):
+            raise ConfigError("UI theme must be a string")
         self.tls.validate()
         self.indexing.validate()
         self.database.validate()
@@ -1900,6 +1968,7 @@ __all__ = [
     "BootstrapSettings",
     "ConfigMigration",
     "Settings",
+    "UISettings",
 ]
 
 @dataclass

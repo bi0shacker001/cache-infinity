@@ -212,6 +212,16 @@ class IndexDatabase:
                 )
                 """
             )
+
+            self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_ui (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    theme TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             
             self._db.execute(
                 """
@@ -431,6 +441,13 @@ class IndexDatabase:
                     subfolder TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     url_handler TEXT,
+                    rclone_remote TEXT,
+                    rclone_path TEXT,
+                    bandwidth_limit TEXT,
+                    transfer_concurrency INTEGER,
+                    checkers INTEGER,
+                    timeout INTEGER,
+                    retries INTEGER,
                     source_file TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -441,6 +458,22 @@ class IndexDatabase:
             columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_cachelinks)")}
             if "url_handler" not in columns:
                 self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN url_handler TEXT")
+            if "rclone_remote" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN rclone_remote TEXT")
+            if "rclone_path" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN rclone_path TEXT")
+            if "bandwidth_limit" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN bandwidth_limit TEXT")
+            if "transfer_concurrency" not in columns:
+                self._db.execute(
+                    "ALTER TABLE config_cachelinks ADD COLUMN transfer_concurrency INTEGER"
+                )
+            if "checkers" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN checkers INTEGER")
+            if "timeout" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN timeout INTEGER")
+            if "retries" not in columns:
+                self._db.execute("ALTER TABLE config_cachelinks ADD COLUMN retries INTEGER")
             
             self._db.execute(
                 """
@@ -558,6 +591,13 @@ class IndexDatabase:
                     subfolder TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     url_handler TEXT,
+                    rclone_remote TEXT,
+                    rclone_path TEXT,
+                    bandwidth_limit TEXT,
+                    transfer_concurrency INTEGER,
+                    checkers INTEGER,
+                    timeout INTEGER,
+                    retries INTEGER,
                     source_file TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -580,6 +620,7 @@ class IndexDatabase:
                     api_key TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     is_admin INTEGER NOT NULL DEFAULT 1,
+                    ssh_keys_editable INTEGER NOT NULL DEFAULT 1,
                     purpose TEXT NOT NULL DEFAULT 'webui'
                 )
                 """
@@ -605,6 +646,13 @@ class IndexDatabase:
                 self._db.rollback()
             try:
                 self._db.execute("ALTER TABLE auth_users ADD COLUMN api_key TEXT")
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+            try:
+                self._db.execute(
+                    "ALTER TABLE auth_users ADD COLUMN ssh_keys_editable INTEGER NOT NULL DEFAULT 1"
+                )
                 self._db.commit()
             except Exception:
                 self._db.rollback()
@@ -932,6 +980,13 @@ class IndexDatabase:
                 descriptor.subfolder,
                 descriptor.mode.value,
                 descriptor.url_handler,
+                descriptor.rclone_remote,
+                descriptor.rclone_path,
+                descriptor.bandwidth_limit,
+                descriptor.transfer_concurrency,
+                descriptor.checkers,
+                descriptor.timeout,
+                descriptor.retries,
                 str(descriptor.source_file),
                 now,
                 now,
@@ -944,8 +999,25 @@ class IndexDatabase:
                 self._db.executemany(
                     """
                     INSERT INTO config_cachelinks
-                    (canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (
+                        canonical_id,
+                        backend_path,
+                        url,
+                        subfolder,
+                        mode,
+                        url_handler,
+                        rclone_remote,
+                        rclone_path,
+                        bandwidth_limit,
+                        transfer_concurrency,
+                        checkers,
+                        timeout,
+                        retries,
+                        source_file,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -955,7 +1027,9 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, updated_at
+                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler,
+                       rclone_remote, rclone_path, bandwidth_limit, transfer_concurrency,
+                       checkers, timeout, retries, source_file, updated_at
                 FROM config_cachelinks
                 ORDER BY backend_path, canonical_id
                 """
@@ -1269,38 +1343,57 @@ class IndexDatabase:
         password_hash: str | None = None,
         enabled: bool = True,
         is_admin: bool = True,
+        ssh_keys_editable: bool | None = None,
         purpose: str = "webui",
     ) -> None:
         with self._lock:
             existing = self._db.fetchone(
-                "SELECT password_plain, password_hash FROM auth_users WHERE username = ? AND purpose = ?",
+                "SELECT password_plain, password_hash, ssh_keys_editable FROM auth_users WHERE username = ? AND purpose = ?",
                 (username, purpose),
             )
             plain = password_plain if password_plain is not None else (existing["password_plain"] if existing else None)
             hashed = password_hash if password_hash is not None else (existing["password_hash"] if existing else None)
+            keys_editable = (
+                ssh_keys_editable
+                if ssh_keys_editable is not None
+                else (bool(existing["ssh_keys_editable"]) if existing else True)
+            )
             if existing:
                 self._db.execute(
                     """
                     UPDATE auth_users
-                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?
+                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, ssh_keys_editable = ?
                     WHERE username = ? AND purpose = ?
                     """,
-                    (plain, hashed, enabled, is_admin, username, purpose),
+                    (plain, hashed, enabled, is_admin, 1 if keys_editable else 0, username, purpose),
                 )
             else:
                 self._db.execute(
                     """
-                    INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO auth_users (
+                        username,
+                        password_plain,
+                        password_hash,
+                        enabled,
+                        is_admin,
+                        ssh_keys_editable,
+                        purpose
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (username, plain, hashed, enabled, is_admin, purpose),
+                    (username, plain, hashed, enabled, is_admin, 1 if keys_editable else 0, purpose),
                 )
             self._db.commit()
 
     def list_users(self, *, purpose: str = "webui") -> list[dict[str, object]]:
         with self._lock:
             rows = self._db.fetchall(
-                "SELECT username, enabled, is_admin FROM auth_users WHERE purpose = ? ORDER BY username",
+                """
+                SELECT username, enabled, is_admin, ssh_keys_editable
+                FROM auth_users
+                WHERE purpose = ?
+                ORDER BY username
+                """,
                 (purpose,),
             )
         return [
@@ -1308,6 +1401,7 @@ class IndexDatabase:
                 "username": row["username"],
                 "enabled": bool(row["enabled"]),
                 "is_admin": bool(row["is_admin"]),
+                "ssh_keys_editable": bool(row.get("ssh_keys_editable", 1)),
             }
             for row in rows
         ]
@@ -1315,7 +1409,11 @@ class IndexDatabase:
     def get_auth_user(self, username: str, *, purpose: str = "webui") -> dict | None:
         with self._lock:
             row = self._db.fetchone(
-                "SELECT username, password_plain, password_hash, enabled, is_admin FROM auth_users WHERE username = ? AND purpose = ?",
+                """
+                SELECT username, password_plain, password_hash, enabled, is_admin, ssh_keys_editable
+                FROM auth_users
+                WHERE username = ? AND purpose = ?
+                """,
                 (username, purpose),
             )
         return row
@@ -1580,6 +1678,43 @@ class IndexDatabase:
                 (
                     limits["max_zip_total_gb"],
                     limits["one_zip_cache_at_a_time"],
+                    now,
+                ),
+            )
+            self._db.commit()
+
+    def get_ui(self) -> dict | None:
+        """Get UI configuration."""
+        with self._lock:
+            row = self._db.fetchone(
+                """
+                SELECT theme, updated_at
+                FROM config_ui
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        return {
+            "theme": row["theme"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_ui(self, ui: dict) -> None:
+        """Save UI configuration."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO config_ui (theme, updated_at)
+                VALUES (?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    theme = excluded.theme,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    ui["theme"],
                     now,
                 ),
             )
@@ -2170,7 +2305,10 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at
+                SELECT canonical_id, backend_path, url, subfolder, mode, url_handler,
+                       rclone_remote, rclone_path, bandwidth_limit, transfer_concurrency,
+                       checkers, timeout, retries,
+                       source_file, created_at, updated_at
                 FROM config_cachelinks
                 ORDER BY backend_path, canonical_id
                 """
@@ -2183,6 +2321,13 @@ class IndexDatabase:
                 "subfolder": row["subfolder"],
                 "mode": row["mode"],
                 "url_handler": row.get("url_handler"),
+                "rclone_remote": row.get("rclone_remote"),
+                "rclone_path": row.get("rclone_path"),
+                "bandwidth_limit": row.get("bandwidth_limit"),
+                "transfer_concurrency": row.get("transfer_concurrency"),
+                "checkers": row.get("checkers"),
+                "timeout": row.get("timeout"),
+                "retries": row.get("retries"),
                 "source_file": row["source_file"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -2198,8 +2343,25 @@ class IndexDatabase:
             if cachelinks:
                 self._db.executemany(
                     """
-                    INSERT INTO config_cachelinks (canonical_id, backend_path, url, subfolder, mode, url_handler, source_file, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO config_cachelinks (
+                        canonical_id,
+                        backend_path,
+                        url,
+                        subfolder,
+                        mode,
+                        url_handler,
+                        rclone_remote,
+                        rclone_path,
+                        bandwidth_limit,
+                        transfer_concurrency,
+                        checkers,
+                        timeout,
+                        retries,
+                        source_file,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -2209,6 +2371,13 @@ class IndexDatabase:
                             c["subfolder"],
                             c["mode"],
                             c.get("url_handler"),
+                            c.get("rclone_remote"),
+                            c.get("rclone_path"),
+                            c.get("bandwidth_limit"),
+                            c.get("transfer_concurrency"),
+                            c.get("checkers"),
+                            c.get("timeout"),
+                            c.get("retries"),
                             c["source_file"],
                             now,
                             now,

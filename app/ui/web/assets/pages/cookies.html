@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Cookies</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="cookies"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Cookie Vault</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Cookies</h1>
+          <p>Upload and refresh per-domain cookie jars for authenticated downloads.</p>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.05s;">
+        <div class="section-header">
+          <h2>Domains</h2>
+        </div>
+        <div id="cookie-list" class="list"></div>
+      </section>
+
+      <section class="split">
+        <div class="section" style="--delay:0.1s;">
+          <div class="section-header">
+            <h2>Add Domain</h2>
+          </div>
+          <form id="cookie-add-form" class="stack">
+            <div class="field">
+              <label class="label">Domain</label>
+              <input class="input" id="cookie-domain" placeholder="archive.org">
+            </div>
+            <div class="field">
+              <label class="label">Cookie Jar (optional)</label>
+              <textarea class="textarea" id="cookie-jar"></textarea>
+            </div>
+            <button class="button primary" type="submit">Add Domain</button>
+          </form>
+        </div>
+        <div class="section" style="--delay:0.15s;">
+          <div class="section-header">
+            <h2>Upload Cookie File</h2>
+          </div>
+          <form id="cookie-upload-form" class="stack">
+            <div class="field">
+              <label class="label">Domain</label>
+              <input class="input" id="cookie-upload-domain" placeholder="archive.org">
+            </div>
+            <div class="field">
+              <label class="label">cookies.txt content</label>
+              <textarea class="textarea" id="cookie-upload-content"></textarea>
+            </div>
+            <button class="button secondary" type="submit">Upload</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.2s;">
+        <div class="section-header">
+          <h2>Refresh Cookies</h2>
+        </div>
+        <form id="cookie-refresh-form" class="stack">
+          <div class="form-grid">
+            <div class="field">
+              <label class="label">Domain</label>
+              <input class="input" id="cookie-refresh-domain" placeholder="archive.org">
+            </div>
+            <div class="field">
+              <label class="label">Manual Cookie Content (optional)</label>
+              <textarea class="textarea" id="cookie-refresh-content"></textarea>
+            </div>
+          </div>
+          <button class="button" type="submit">Refresh</button>
+        </form>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/cookies.js"></script>
+  </body>
+</html>

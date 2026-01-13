@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Dashboard</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="dashboard"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Admin Dashboard</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>System pulse</h1>
+          <p>Keep CacheInfinity healthy: monitor indexing, tune storage, and manage access in one place.</p>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.05s;">
+        <div class="section-header">
+          <h2>Key Metrics</h2>
+          <span class="badge">Live</span>
+        </div>
+        <div class="grid">
+          <div class="kpi">
+            <span>Cachelinks</span>
+            <strong id="stat-cachelinks">0</strong>
+          </div>
+          <div class="kpi">
+            <span>Shares</span>
+            <strong id="stat-shares">0</strong>
+          </div>
+          <div class="kpi">
+            <span>Indexed Targets</span>
+            <strong id="stat-indexed">0</strong>
+          </div>
+          <div class="kpi">
+            <span>Degraded</span>
+            <strong id="stat-degraded">0</strong>
+          </div>
+          <div class="kpi">
+            <span>Last Access</span>
+            <strong id="stat-last-access">Never</strong>
+          </div>
+          <div class="kpi">
+            <span>Cache Hits</span>
+            <strong id="stat-hits">0</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="section" style="--delay:0.1s;">
+          <div class="section-header">
+            <h2>Shares</h2>
+            <a class="button ghost" href="/users">Manage Users</a>
+          </div>
+          <div id="shares-table" class="list"></div>
+        </div>
+        <div class="section" style="--delay:0.15s;">
+          <div class="section-header">
+            <h2>Storage Snapshot</h2>
+            <a class="button ghost" href="/storage">Browse Storage</a>
+          </div>
+          <div id="storage-list" class="list"></div>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.2s;">
+        <div class="section-header">
+          <h2>Indexing Metrics</h2>
+          <a class="button ghost" href="/overview">Full Overview</a>
+        </div>
+        <div id="indexing-metrics" class="grid"></div>
+      </section>
+
+      <section class="section" style="--delay:0.25s;">
+        <div class="section-header">
+          <h2>Quick Actions</h2>
+        </div>
+        <div class="row">
+          <a class="button primary" href="/cachelinks">Add Cachelink</a>
+          <a class="button" href="/settings">Update Settings</a>
+          <a class="button" href="/maintenance">Maintenance Tools</a>
+          <a class="button" href="/cookies">Cookies</a>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/overview.js"></script>
+  </body>
+</html>

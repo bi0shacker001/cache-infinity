@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Maintenance</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="maintenance"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Maintenance</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Maintenance</h1>
+          <p>Manage degraded targets, download queue, SSH host keys, and server lifecycle.</p>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="section" style="--delay:0.05s;">
+          <div class="section-header">
+            <h2>Degraded Targets</h2>
+          </div>
+          <div id="degraded-list" class="list"></div>
+          <form id="reindex-form" class="stack" style="margin-top:12px;">
+            <div class="field">
+              <label class="label">Reindex Cachelink ID</label>
+              <input class="input" id="reindex-id" placeholder="games/psx/cachelink_...">
+            </div>
+            <button class="button" type="submit">Trigger Reindex</button>
+          </form>
+        </div>
+
+        <div class="section" style="--delay:0.1s;">
+          <div class="section-header">
+            <h2>System Controls</h2>
+          </div>
+          <div class="row">
+            <button class="button" id="reload-button">Reload</button>
+            <button class="button secondary" id="reinit-button">Reinit</button>
+            <button class="button ghost" id="shutdown-button">Shutdown</button>
+          </div>
+          <p class="help">Reload applies configuration changes; reinit restarts internal services.</p>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.15s;">
+        <div class="section-header">
+          <h2>Download Queue</h2>
+        </div>
+        <div id="downloads-list" class="list"></div>
+        <form id="download-form" class="stack" style="margin-top:12px;">
+          <div class="form-grid">
+            <div class="field"><label class="label">URL</label><input class="input" id="download-url"></div>
+            <div class="field"><label class="label">Destination</label><input class="input" id="download-dest" placeholder="/path/file.iso"></div>
+            <div class="field"><label class="label">Expected Checksum</label><input class="input" id="download-checksum"></div>
+            <div class="field"><label class="label">Priority</label><input class="input" id="download-priority" type="number" min="1" max="10" value="1"></div>
+          </div>
+          <button class="button primary" type="submit">Queue Download</button>
+        </form>
+      </section>
+
+      <section class="section" style="--delay:0.2s;">
+        <div class="section-header">
+          <h2>SSH Host Keys</h2>
+          <span id="ssh-availability" class="badge">Checking...</span>
+        </div>
+        <div class="row">
+          <form id="ssh-generate-form" class="row">
+            <select class="select" id="ssh-key-type">
+              <option value="ed25519">ed25519</option>
+              <option value="rsa">rsa</option>
+              <option value="ecdsa">ecdsa</option>
+            </select>
+            <button class="button secondary" type="submit">Generate</button>
+          </form>
+          <button class="button" id="ssh-rotate">Rotate All</button>
+        </div>
+        <div id="ssh-keys" class="list" style="margin-top:12px;"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/maintenance.js"></script>
+  </body>
+</html>

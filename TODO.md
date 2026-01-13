@@ -67,6 +67,10 @@ This file contains the actionable task list for achieving full SPEC compliance, 
 - [x] **TASK-045:** Test zip caching scenarios
 - [ ] **TASK-046:** Update documentation for zip features
 
+### Rclone WebUI Compliance 🟡 (MEDIUM PRIORITY)
+- [x] **TASK-120:** Add rclone remote connectivity test/validation in management layer + WebUI
+- [x] **TASK-121:** Persist rclone cachelink fields (rclone_remote, rclone_path, bandwidth_limit, transfer_concurrency, checkers, timeout, retries) and expose in WebUI
+
 ## Phase 3: Testing and Robustness (Medium Priority)
 
 ### Comprehensive Testing 🔴 (CRITICAL PRIORITY)

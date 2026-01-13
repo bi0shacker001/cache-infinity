@@ -883,6 +883,13 @@ class CachelinkFileResource(DAVNonCollection):
                 remote_url,
                 staging_path,
                 url_handler=self.descriptor.url_handler,
+                rclone_options={
+                    "bandwidth_limit": self.descriptor.bandwidth_limit,
+                    "transfer_concurrency": self.descriptor.transfer_concurrency,
+                    "checkers": self.descriptor.checkers,
+                    "timeout": self.descriptor.timeout,
+                    "retries": self.descriptor.retries,
+                },
             )
             if not result.success:
                 _logger.error("Failed to download %s: %s", self.path, result.error_message)
@@ -1059,6 +1066,13 @@ class CachelinkFileResource(DAVNonCollection):
             remote_zip_url,
             staging_zip,
             url_handler=self.descriptor.url_handler,
+            rclone_options={
+                "bandwidth_limit": self.descriptor.bandwidth_limit,
+                "transfer_concurrency": self.descriptor.transfer_concurrency,
+                "checkers": self.descriptor.checkers,
+                "timeout": self.descriptor.timeout,
+                "retries": self.descriptor.retries,
+            },
         )
         if not result.success:
             if acquired:
@@ -1163,6 +1177,13 @@ class CachelinkFileResource(DAVNonCollection):
             remote_url,
             staging_path,
             url_handler=self.descriptor.url_handler,
+            rclone_options={
+                "bandwidth_limit": self.descriptor.bandwidth_limit,
+                "transfer_concurrency": self.descriptor.transfer_concurrency,
+                "checkers": self.descriptor.checkers,
+                "timeout": self.descriptor.timeout,
+                "retries": self.descriptor.retries,
+            },
         )
         if not result.success:
             _logger.error("Failed to download %s: %s", self.path, result.error_message)

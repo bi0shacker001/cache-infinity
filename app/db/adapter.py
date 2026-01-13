@@ -196,6 +196,7 @@ class DBAdapter:
                     password_hash TEXT,
                     enabled BOOLEAN DEFAULT 1,
                     is_admin BOOLEAN DEFAULT 0,
+                    ssh_keys_editable BOOLEAN DEFAULT 1,
                     purpose TEXT DEFAULT 'webui',
                     created_at TEXT,
                     updated_at TEXT
@@ -224,7 +225,8 @@ class DBAdapter:
     
     def upsert_auth_user(self, username: str, password_plain: str = None,
                         password_hash: str = None, enabled: bool = True,
-                        is_admin: bool = False, purpose: str = None) -> bool:
+                        is_admin: bool = False, ssh_keys_editable: bool = True,
+                        purpose: str = None) -> bool:
         """Create or update user in database."""
         try:
             # Check if user exists
@@ -242,14 +244,41 @@ class DBAdapter:
             if existing:
                 # Update existing user
                 self.execute(
-                    "UPDATE auth_users SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, purpose = ?, updated_at = ? WHERE username = ?",
-                    (password_plain, normalized_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), username)
+                    """
+                    UPDATE auth_users
+                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, ssh_keys_editable = ?, purpose = ?, updated_at = ?
+                    WHERE username = ?
+                    """,
+                    (
+                        password_plain,
+                        normalized_hash,
+                        enabled,
+                        is_admin,
+                        ssh_keys_editable,
+                        purpose,
+                        datetime.utcnow().isoformat(),
+                        username,
+                    )
                 )
             else:
                 # Create new user
                 self.execute(
-                    "INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (username, password_plain, normalized_hash, enabled, is_admin, purpose, datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+                    """
+                    INSERT INTO auth_users
+                    (username, password_plain, password_hash, enabled, is_admin, ssh_keys_editable, purpose, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username,
+                        password_plain,
+                        normalized_hash,
+                        enabled,
+                        is_admin,
+                        ssh_keys_editable,
+                        purpose,
+                        datetime.utcnow().isoformat(),
+                        datetime.utcnow().isoformat(),
+                    )
                 )
             
             self.commit()

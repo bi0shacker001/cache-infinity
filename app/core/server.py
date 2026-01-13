@@ -370,6 +370,51 @@ def _install_ctrl_r_handler(callback: Callable[[str], None]) -> None:
         _LOGGER.debug("SIGUSR2 signal already registered")
 
 
+def _start_ctrl_r_monitor(callback: Callable[[str], None], stop_event: threading.Event) -> threading.Thread | None:
+    if os.name != "posix":
+        return None
+    if not sys.stdin or not sys.stdin.isatty():
+        return None
+    try:
+        import termios
+    except Exception:
+        return None
+    fd = sys.stdin.fileno()
+    try:
+        original = termios.tcgetattr(fd)
+    except Exception:
+        return None
+    modified = termios.tcgetattr(fd)
+    modified[3] = modified[3] & ~termios.ICANON
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, modified)
+    except Exception:
+        return None
+
+    def _restore() -> None:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, original)
+        except Exception:
+            return
+
+    atexit.register(_restore)
+
+    def _watch() -> None:
+        while not stop_event.is_set():
+            try:
+                data = os.read(fd, 1)
+            except OSError:
+                break
+            if not data:
+                break
+            if data == b"\x12":
+                callback("CTRL+R")
+
+    thread = threading.Thread(target=_watch, daemon=True)
+    thread.start()
+    return thread
+
+
 def _install_shutdown_signal(callback: Callable[[str], None]) -> None:
     for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
         if sig is None:
@@ -377,7 +422,6 @@ def _install_shutdown_signal(callback: Callable[[str], None]) -> None:
         try:
             def _handler(signum, frame):
                 callback(signal.Signals(signum).name)
-                raise KeyboardInterrupt
 
             signal.signal(sig, _handler)
         except (AttributeError, ValueError):
@@ -433,17 +477,33 @@ def run_server(args) -> None:
     reinit_callback = lambda reason: _trigger_reinit(reason, restart_argv, os.environ)
     _install_reinit_signal(reinit_callback)
     _install_ctrl_r_handler(reinit_callback)  # Tie Ctrl+R to reinit
+    ui_server = None
+    ui_thread = None
+    ctrl_r_thread = None
+    shutdown_event = threading.Event()
+
     def shutdown_callback(reason: str) -> None:
+        if shutdown_event.is_set():
+            _LOGGER.warning("Forcing shutdown after repeated signal")
+            os._exit(1)
+        shutdown_event.set()
         _LOGGER.info("Shutdown requested: %s", reason)
-        server.stop()
-        if ui_server:
-            ui_server.stop()
+
+        def _stop_servers() -> None:
+            try:
+                server.stop()
+            except Exception:
+                return
+            if ui_server:
+                try:
+                    ui_server.stop()
+                except Exception:
+                    return
+        threading.Thread(target=_stop_servers, daemon=True).start()
 
     _install_shutdown_signal(shutdown_callback)
     
     # Start Web UI if enabled
-    ui_server = None
-    ui_thread = None
     if not args.disable_ui:
         ui_host = args.ui_host or args.host
         ui_app = _UIReloadableApp(service_manager)
@@ -451,6 +511,8 @@ def run_server(args) -> None:
         ui_thread = _start_server_async(ui_server, label="CacheInfinity WebUI")
     else:
         _LOGGER.info("Web UI disabled via flag")
+
+    ctrl_r_thread = _start_ctrl_r_monitor(reinit_callback, shutdown_event)
 
     _LOGGER.info("Starting CacheInfinity WebDAV on %s:%s (config dir: %s)", args.host, args.port, config_dir)
     try:
@@ -460,6 +522,8 @@ def run_server(args) -> None:
             ui_server.stop()
         if ui_thread:
             ui_thread.join(timeout=5)
+        if ctrl_r_thread:
+            ctrl_r_thread.join(timeout=1)
         service_manager.stop_all()
 
 

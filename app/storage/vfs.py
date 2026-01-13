@@ -363,7 +363,15 @@ class VirtualFilesystem:
                 url=remote_url,
                 destination=destination,
                 resume=True,
-                timeout=300
+                timeout=300,
+                url_handler=cachelink.url_handler,
+                rclone_options={
+                    "bandwidth_limit": cachelink.bandwidth_limit,
+                    "transfer_concurrency": cachelink.transfer_concurrency,
+                    "checkers": cachelink.checkers,
+                    "timeout": cachelink.timeout,
+                    "retries": cachelink.retries,
+                },
             )
             
             if result.success and result.file_path and result.file_path.exists():

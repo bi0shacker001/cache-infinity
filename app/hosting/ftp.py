@@ -3,25 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-<<<<<<< HEAD
 import itertools
 import json
-=======
-import base64
-import binascii
-import hashlib
-import itertools
->>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
 import logging
 import os
-import shlex
 import threading
 from datetime import datetime
-<<<<<<< HEAD
 from pathlib import Path, PurePosixPath
-=======
->>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
-from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List
 
 from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
@@ -37,20 +25,6 @@ try:
 except ImportError:
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
-<<<<<<< HEAD
-    class SSHServer:  # type: ignore[misc]
-        pass
-
-    class SFTPServer:  # type: ignore[misc]
-        pass
-
-    class ChannelOpenError(Exception):  # type: ignore[misc]
-        pass
-
-from core.config import FTPConfig
-from auth.credentials import AuthenticationManager
-from auth.credentials import SSHHostKeyAdmin, SSHHostKeyManager
-=======
     class SSHServer:  # type: ignore[no-redef]
         """Fallback SSHServer base when asyncssh is unavailable."""
         pass
@@ -64,8 +38,15 @@ from auth.credentials import SSHHostKeyAdmin, SSHHostKeyManager
         pass
 
 from core.config import FTPConfig
-from auth.credentials import AuthenticationManager, UserSSHKeyManager
->>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
+from auth.credentials import (
+    AuthenticationManager,
+    SSHHostKeyAdmin,
+    SSHHostKeyManager,
+    UserSSHKeyManager,
+    parse_authorized_keys_content,
+    render_authorized_keys,
+    validate_authorized_keys_content,
+)
 from storage.datadir import DatadirRegistry
 from storage.vfs import VirtualFilesystem
 
@@ -463,7 +444,11 @@ class CacheInfinitySFTPHandler(SFTPServer):
         self._share_lookup = {}
         
         # Initialize SSH key manager for virtual authorized_keys
-        self.ssh_key_manager = getattr(self.auth_manager, "user_ssh_key_manager", None)
+        self.ssh_key_manager: UserSSHKeyManager | None = getattr(
+            self.auth_manager,
+            "user_ssh_key_manager",
+            None,
+        )
 
     def begin_session(self, username: str = None, *args, **kwargs) -> None:
         """Begin SFTP session for authenticated user."""
@@ -994,6 +979,8 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _check_write_permission(self, path: str) -> bool:
         """Check if user has write permission for a path."""
         try:
+            if self._is_virtual_ssh_path(path) and path.endswith("authorized_keys"):
+                return self._authorized_keys_editable()
             share_ctx = self._resolve_share_path(path)
             if share_ctx and share_ctx.get("root_virtual"):
                 return False
@@ -1007,6 +994,14 @@ class CacheInfinitySFTPHandler(SFTPServer):
         except Exception as e:
             self._logger.error("Error checking write permission for %s: %s", path, e)
             return False
+
+    def _authorized_keys_editable(self) -> bool:
+        if not self.auth_manager or not self.username:
+            return True
+        getter = getattr(self.auth_manager, "get_authorized_keys_editable", None)
+        if not getter:
+            return True
+        return bool(getter(self.username, purpose="webdav"))
 
     def _check_read_permission(self, path: str) -> bool:
         """Check if user has read permission for a path."""
@@ -1067,97 +1062,21 @@ class CacheInfinitySFTPHandler(SFTPServer):
             return ""
         
         try:
-            # Get all SSH keys for the user
             keys = self.ssh_key_manager.get_user_ssh_keys(self.username)
-            
-            # Format as OpenSSH authorized_keys format
-            content_lines = []
-            for key in keys:
-                key_data = key.get('key_data', '').strip()
-                key_type = key.get('key_type', '').strip()
-                if key_data:
-                    # Add comment with key type and timestamp
-                    comment = f"CacheInfinity {key.get('key_type', 'unknown')} key"
-                    if key_type:
-                        content_lines.append(f"{key_type} {key_data} {comment}")
-                    else:
-                        content_lines.append(f"{key_data} {comment}")
-            
-            return '\n'.join(content_lines) + '\n'
-            
+            return render_authorized_keys(keys)
         except Exception as e:
             self._logger.error("Error getting authorized_keys content: %s", e)
             return ""
 
     def _parse_authorized_keys_content(self, content: str) -> List[Dict[str, str]]:
         """Parse authorized_keys content and extract key information."""
-        keys = []
-        lines = content.strip().split('\n')
-        valid_key_types = {
-            'ssh-rsa',
-            'ssh-dss',
-            'ssh-ed25519',
-            'ecdsa-sha2-nistp256',
-            'ecdsa-sha2-nistp384',
-            'ecdsa-sha2-nistp521',
-        }
-        
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
-            # Parse OpenSSH authorized_keys format with optional options
-            try:
-                parts = shlex.split(line, posix=True)
-            except ValueError:
-                continue
-
-            key_type = None
-            key_data = None
-            comment = ""
-            for idx, part in enumerate(parts):
-                if part in valid_key_types:
-                    if idx + 1 < len(parts):
-                        key_type = part
-                        key_data = parts[idx + 1]
-                        comment = " ".join(parts[idx + 2:]) if idx + 2 < len(parts) else ""
-                    break
-
-            if key_type and key_data:
-                keys.append({
-                    'key_type': key_type,
-                    'key_data': key_data,
-                    'comment': comment
-                })
-        
-        return keys
+        return parse_authorized_keys_content(content)
 
     def _validate_authorized_keys_content(self, content: str) -> Tuple[bool, List[Dict[str, str]]]:
         """Validate authorized_keys content and return parsed keys."""
-        if not content.strip():
-            return True, []
-
-        raw_lines = [
-            line for line in content.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        parsed_keys = self._parse_authorized_keys_content(content)
-        if not parsed_keys or len(parsed_keys) != len(raw_lines):
+        is_valid, parsed_keys = validate_authorized_keys_content(content)
+        if not is_valid:
             return False, []
-        if not ASYNCSSH_AVAILABLE:
-            return False, []
-
-        for key in parsed_keys:
-            key_type = key.get("key_type", "")
-            key_data = key.get("key_data", "")
-            if not key_type or not key_data:
-                return False, []
-            try:
-                asyncssh.import_public_key(f"{key_type} {key_data}")
-            except Exception as exc:
-                self._logger.error("Invalid authorized_keys entry: %s", exc)
-                return False, []
         return True, parsed_keys
 
     def _update_authorized_keys_from_content(self, content: str) -> bool:
@@ -1390,6 +1309,7 @@ __all__ = [
     'CacheInfinityFTPSHandler',
     'CacheInfinityFTPAuthorizer',
     'CacheInfinitySFTPHandler',
+    'UserSSHKeyManager',
     'SSHHostKeyManager',
     'SSHHostKeyAdmin',
     'FileServiceError',

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Cachelinks</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="cachelinks"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Cachelink Manager</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Cachelinks</h1>
+          <p>Define remote sources, preview listings, and organize the virtual tree.</p>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.05s;">
+        <div class="tabs">
+          <button class="tab active" data-tab="cachelinks">Cachelinks</button>
+          <button class="tab" data-tab="rclone">Rclone</button>
+        </div>
+
+        <div data-panel="cachelinks">
+          <div class="split">
+            <div class="section" style="--delay:0.1s;">
+              <div class="section-header">
+                <h2>Tree</h2>
+              </div>
+              <div id="cachelink-tree" class="list"></div>
+            </div>
+            <div class="stack">
+              <div class="section" style="--delay:0.15s;">
+                <div class="section-header">
+                  <h2>Create Cachelink</h2>
+                </div>
+                <form id="cachelink-create-form" class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label class="label">Parent path</label>
+                      <input class="input" id="create-parent" placeholder="games/psx">
+                    </div>
+                    <div class="field">
+                      <label class="label">Name</label>
+                      <input class="input" id="create-name" placeholder="(auto)">
+                    </div>
+                    <div class="field">
+                      <label class="label">URL</label>
+                      <input class="input" id="create-url" placeholder="https://archive.org/download/...">
+                    </div>
+                    <div class="field">
+                      <label class="label">Subfolder</label>
+                      <input class="input" id="create-subfolder" value="/">
+                    </div>
+                    <div class="field">
+                      <label class="label">Handler</label>
+                      <select class="select" id="create-handler">
+                        <option value="auto">auto</option>
+                        <option value="http">http</option>
+                        <option value="ftp">ftp</option>
+                        <option value="rclone">rclone</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div id="rclone-helper" class="notice hidden">
+                    <div class="form-grid">
+                      <div class="field">
+                        <label class="label">Rclone Remote</label>
+                        <select class="select" id="rclone-select"></select>
+                      </div>
+                      <div class="field">
+                        <label class="label">Rclone Path</label>
+                        <input class="input" id="rclone-path" placeholder="/bucket/path">
+                      </div>
+                    </div>
+                    <div class="form-grid" style="margin-top:12px;">
+                      <div class="field">
+                        <label class="label">Bandwidth Limit</label>
+                        <input class="input" id="create-rclone-bandwidth" placeholder="10M">
+                      </div>
+                      <div class="field">
+                        <label class="label">Transfer Concurrency</label>
+                        <input class="input" id="create-rclone-transfers" type="number" min="1" max="16">
+                      </div>
+                      <div class="field">
+                        <label class="label">Checkers</label>
+                        <input class="input" id="create-rclone-checkers" type="number" min="1" max="32">
+                      </div>
+                      <div class="field">
+                        <label class="label">Timeout (seconds)</label>
+                        <input class="input" id="create-rclone-timeout" type="number" min="30" max="600">
+                      </div>
+                      <div class="field">
+                        <label class="label">Retries</label>
+                        <input class="input" id="create-rclone-retries" type="number" min="0" max="10">
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="row">
+                    <button class="button primary" type="submit">Create</button>
+                    <button class="button" type="button" id="cachelink-preview">Preview Listing</button>
+                  </div>
+                </form>
+              </div>
+
+              <div class="section" style="--delay:0.2s;">
+                <div class="section-header">
+                  <h2>Preview Results</h2>
+                </div>
+                <div id="cachelink-preview-list" class="list"></div>
+              </div>
+
+              <div class="section" style="--delay:0.25s;">
+                <div class="section-header">
+                  <h2>Update Cachelink</h2>
+                </div>
+                <form id="cachelink-update-form" class="stack">
+                  <div class="field">
+                    <label class="label">Canonical ID</label>
+                    <input class="input" id="update-canonical" placeholder="games/psx/cachelink_...">
+                  </div>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label class="label">URL</label>
+                      <input class="input" id="update-url">
+                    </div>
+                    <div class="field">
+                      <label class="label">Subfolder</label>
+                      <input class="input" id="update-subfolder" value="/">
+                    </div>
+                    <div class="field">
+                      <label class="label">Handler</label>
+                      <select class="select" id="update-handler">
+                        <option value="auto">auto</option>
+                        <option value="http">http</option>
+                        <option value="ftp">ftp</option>
+                        <option value="rclone">rclone</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div id="update-rclone-fields" class="form-grid hidden">
+                    <div class="field">
+                      <label class="label">Rclone Remote</label>
+                      <input class="input" id="update-rclone-remote" placeholder="remote-name">
+                    </div>
+                    <div class="field">
+                      <label class="label">Rclone Path</label>
+                      <input class="input" id="update-rclone-path" placeholder="/bucket/path">
+                    </div>
+                    <div class="field">
+                      <label class="label">Bandwidth Limit</label>
+                      <input class="input" id="update-rclone-bandwidth" placeholder="10M">
+                    </div>
+                    <div class="field">
+                      <label class="label">Transfer Concurrency</label>
+                      <input class="input" id="update-rclone-transfers" type="number" min="1" max="16">
+                    </div>
+                    <div class="field">
+                      <label class="label">Checkers</label>
+                      <input class="input" id="update-rclone-checkers" type="number" min="1" max="32">
+                    </div>
+                    <div class="field">
+                      <label class="label">Timeout (seconds)</label>
+                      <input class="input" id="update-rclone-timeout" type="number" min="30" max="600">
+                    </div>
+                    <div class="field">
+                      <label class="label">Retries</label>
+                      <input class="input" id="update-rclone-retries" type="number" min="0" max="10">
+                    </div>
+                  </div>
+                  <button class="button secondary" type="submit">Save Update</button>
+                </form>
+              </div>
+
+              <div class="section" style="--delay:0.3s;">
+                <div class="section-header">
+                  <h2>Folders</h2>
+                </div>
+                <form id="cachelink-folder-form" class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label class="label">Parent path</label>
+                      <input class="input" id="folder-path" placeholder="games">
+                    </div>
+                    <div class="field">
+                      <label class="label">Folder name</label>
+                      <input class="input" id="folder-name" placeholder="psx">
+                    </div>
+                  </div>
+                  <button class="button" type="submit">Add Folder</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div data-panel="rclone" class="hidden">
+          <div class="split">
+            <div class="section" style="--delay:0.1s;">
+              <div class="section-header">
+                <h2>Global Settings</h2>
+              </div>
+              <form id="rclone-settings-form" class="stack">
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Bandwidth Limit</label>
+                    <input class="input" id="rclone-bandwidth" placeholder="10M">
+                  </div>
+                  <div class="field">
+                    <label class="label">Transfer Concurrency</label>
+                    <input class="input" id="rclone-transfers" type="number" min="1" max="16">
+                  </div>
+                  <div class="field">
+                    <label class="label">Checkers</label>
+                    <input class="input" id="rclone-checkers" type="number" min="1" max="32">
+                  </div>
+                  <div class="field">
+                    <label class="label">Timeout (seconds)</label>
+                    <input class="input" id="rclone-timeout" type="number" min="30" max="600">
+                  </div>
+                  <div class="field">
+                    <label class="label">Retries</label>
+                    <input class="input" id="rclone-retries" type="number" min="0" max="10">
+                  </div>
+                </div>
+                <button class="button secondary" type="submit">Save Settings</button>
+              </form>
+            </div>
+
+            <div class="section" style="--delay:0.15s;">
+              <div class="section-header">
+                <h2>Remotes</h2>
+              </div>
+              <div id="rclone-remote-list" class="list"></div>
+            </div>
+          </div>
+
+          <div class="section" style="--delay:0.2s;">
+            <div class="section-header">
+              <h2>Add / Edit Remote</h2>
+            </div>
+            <form id="rclone-remote-form" class="stack">
+              <div class="form-grid">
+                <div class="field">
+                  <label class="label">Remote Name</label>
+                  <input class="input" id="rclone-remote-name" placeholder="my-remote">
+                </div>
+                <div class="field">
+                  <label class="label">Remote Type</label>
+                  <select class="select" id="rclone-remote-type">
+                    <option value="s3">s3</option>
+                    <option value="gdrive">gdrive</option>
+                    <option value="dropbox">dropbox</option>
+                    <option value="azureblob">azureblob</option>
+                    <option value="onedrive">onedrive</option>
+                    <option value="swift">swift</option>
+                    <option value="other">other</option>
+                  </select>
+                </div>
+                <div class="field" style="grid-column:1/-1;">
+                  <label class="label">Configuration (JSON)</label>
+                  <textarea class="textarea" id="rclone-remote-config" placeholder='{"key":"value"}'></textarea>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label class="label">Bandwidth Limit</label>
+                  <input class="input" id="rclone-remote-bandwidth" placeholder="10M">
+                </div>
+                <div class="field">
+                  <label class="label">Transfer Concurrency</label>
+                  <input class="input" id="rclone-remote-transfers" type="number" min="1" max="16">
+                </div>
+                <div class="field">
+                  <label class="label">Checkers</label>
+                  <input class="input" id="rclone-remote-checkers" type="number" min="1" max="32">
+                </div>
+                <div class="field">
+                  <label class="label">Timeout (seconds)</label>
+                  <input class="input" id="rclone-remote-timeout" type="number" min="30" max="600">
+                </div>
+                <div class="field">
+                  <label class="label">Retries</label>
+                  <input class="input" id="rclone-remote-retries" type="number" min="0" max="10">
+                </div>
+              </div>
+              <button class="button primary" type="submit">Save Remote</button>
+              <div class="notice">Use the test button in the remote list to verify connectivity.</div>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/cachelinks.js"></script>
+  </body>
+</html>

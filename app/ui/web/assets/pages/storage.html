@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Storage</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="storage"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Storage Manager</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Storage Explorer</h1>
+          <p>Inspect datadirs and staging areas. Upload content and manage directories.</p>
+        </div>
+      </section>
+
+      <section class="section" style="--delay:0.05s;">
+        <div class="section-header">
+          <h2>Storage Summary</h2>
+        </div>
+        <div id="storage-summary"></div>
+      </section>
+
+      <section class="section" style="--delay:0.1s;">
+        <div class="section-header">
+          <h2>Browse</h2>
+        </div>
+        <div class="stack">
+          <div class="row">
+            <select class="select" id="storage-location">
+              <option value="datadir">Datadir</option>
+              <option value="staging">Staging</option>
+            </select>
+            <input class="input" id="storage-path" value="/">
+            <input class="input" id="storage-search" placeholder="Search">
+            <label class="field inline">
+              <input type="checkbox" id="storage-hidden">
+              <span>Show hidden</span>
+            </label>
+            <button class="button" id="storage-load">Load</button>
+          </div>
+          <div id="storage-breadcrumbs" class="help"></div>
+          <div id="storage-entries"></div>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="section" style="--delay:0.15s;">
+          <div class="section-header">
+            <h2>Create Folder</h2>
+          </div>
+          <form id="storage-create-form" class="stack">
+            <div class="field">
+              <label class="label">Folder name</label>
+              <input class="input" id="storage-folder-name" placeholder="New folder">
+            </div>
+            <button class="button primary" type="submit">Create Folder</button>
+          </form>
+        </div>
+        <div class="section" style="--delay:0.2s;">
+          <div class="section-header">
+            <h2>Upload File</h2>
+          </div>
+          <form id="storage-upload-form" class="stack">
+            <div class="field">
+              <label class="label">Select file</label>
+              <input class="input" id="storage-file" type="file">
+            </div>
+            <button class="button secondary" type="submit">Upload</button>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/storage.js"></script>
+  </body>
+</html>

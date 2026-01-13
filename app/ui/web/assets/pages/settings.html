@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Settings</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="settings"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>Configuration</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Settings</h1>
+          <p>Adjust core configuration, indexing policy, and authentication controls.</p>
+        </div>
+      </section>
+
+      <form id="settings-form" class="stack">
+        <section class="section" style="--delay:0.05s;">
+          <div class="section-header">
+            <h2>Datadirs</h2>
+            <button class="button" type="button" id="add-datadir">Add Datadir</button>
+          </div>
+          <div id="datadir-list" class="stack"></div>
+        </section>
+
+        <section class="section" style="--delay:0.1s;">
+          <div class="section-header">
+            <h2>Shares</h2>
+            <button class="button" type="button" id="add-share">Add Share</button>
+          </div>
+          <div id="share-list" class="stack"></div>
+        </section>
+
+        <section class="section" style="--delay:0.15s;">
+          <div class="section-header">
+            <h2>Staging & Limits</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label">Staging Mounted</label>
+              <select class="select" id="staging-mounted">
+                <option value="true">True</option>
+                <option value="false">False</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">Staging Root</label>
+              <input class="input" id="staging-root" placeholder="/mnt/staging">
+            </div>
+            <div class="field">
+              <label class="label">Staging Size (GB)</label>
+              <input class="input" id="staging-size" type="number" min="1" max="10240">
+            </div>
+            <div class="field">
+              <label class="label">Max Zip Total (GB)</label>
+              <input class="input" id="limit-zip-size" type="number" min="1" max="2048">
+            </div>
+            <div class="field">
+              <label class="label">One Zip At A Time</label>
+              <select class="select" id="limit-zip-lock">
+                <option value="true">True</option>
+                <option value="false">False</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.2s;">
+          <div class="section-header">
+            <h2>Indexing Policy</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label class="label">Min Full Reindex (days)</label><input class="input" id="indexing-min-full" type="number"></div>
+            <div class="field"><label class="label">Max Full Reindex (days)</label><input class="input" id="indexing-max-full" type="number"></div>
+            <div class="field"><label class="label">Hot Window (days)</label><input class="input" id="indexing-hot-window" type="number"></div>
+            <div class="field"><label class="label">Hot Radius</label><input class="input" id="indexing-hot-radius" type="number"></div>
+            <div class="field"><label class="label">Daily Full Budget</label><input class="input" id="indexing-full-budget" type="number"></div>
+            <div class="field"><label class="label">Daily Cheap Budget</label><input class="input" id="indexing-cheap-budget" type="number"></div>
+            <div class="field"><label class="label">Full / 14d</label><input class="input" id="indexing-full-14d" type="number"></div>
+            <div class="field"><label class="label">Cheap / Day</label><input class="input" id="indexing-cheap-day" type="number"></div>
+            <div class="field"><label class="label">Allow Early Full</label><select class="select" id="indexing-early-full"><option value="true">True</option><option value="false">False</option></select></div>
+            <div class="field"><label class="label">Early Full Requires Hot</label><select class="select" id="indexing-early-hot"><option value="true">True</option><option value="false">False</option></select></div>
+            <div class="field"><label class="label">Domain Concurrency</label><input class="input" id="indexing-domain-concurrency" type="number"></div>
+            <div class="field"><label class="label">Rate Limit / Minute</label><input class="input" id="indexing-domain-rate" type="number"></div>
+            <div class="field"><label class="label">Backoff Base (s)</label><input class="input" id="indexing-domain-backoff" type="number"></div>
+            <div class="field"><label class="label">Backoff Max (s)</label><input class="input" id="indexing-domain-backoff-max" type="number"></div>
+            <div class="field"><label class="label">Giant Dir Limit</label><input class="input" id="indexing-giant-limit" type="number"></div>
+            <div class="field"><label class="label">Giant Cooldown (min)</label><input class="input" id="indexing-giant-cooldown" type="number"></div>
+            <div class="field"><label class="label">Partition Hint Max</label><input class="input" id="indexing-partition-hint" type="number"></div>
+          </div>
+          <div class="field" style="margin-top:12px;">
+            <label class="label">Score Weights (JSON)</label>
+            <textarea class="textarea" id="indexing-weights"></textarea>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.25s;">
+          <div class="section-header">
+            <h2>TLS</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label">Enabled</label>
+              <select class="select" id="tls-enabled">
+                <option value="true">True</option>
+                <option value="false">False</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">Mode</label>
+              <select class="select" id="tls-mode">
+                <option value="manual">manual</option>
+                <option value="http">http</option>
+                <option value="dns-01">dns-01</option>
+                <option value="external">external</option>
+              </select>
+            </div>
+          </div>
+          <div class="stack" style="margin-top:12px;">
+            <div data-tls-panel="manual" class="stack">
+              <div class="form-grid">
+                <div class="field"><label class="label">Manual Cert Path</label><input class="input" id="tls-cert"></div>
+                <div class="field"><label class="label">Manual Key Path</label><input class="input" id="tls-key"></div>
+              </div>
+            </div>
+            <div data-tls-panel="http" class="stack">
+              <div class="form-grid">
+                <div class="field"><label class="label">HTTP Email</label><input class="input" id="tls-http-email"></div>
+                <div class="field"><label class="label">HTTP Domains</label><input class="input" id="tls-http-domains" placeholder="dav.example.com"></div>
+                <div class="field"><label class="label">HTTP Challenge</label><select class="select" id="tls-http-challenge"><option value="standalone">standalone</option><option value="webroot">webroot</option></select></div>
+                <div class="field"><label class="label">HTTP Webroot</label><input class="input" id="tls-http-webroot"></div>
+                <div class="field"><label class="label">HTTP Staging</label><select class="select" id="tls-http-staging"><option value="true">True</option><option value="false">False</option></select></div>
+              </div>
+            </div>
+            <div data-tls-panel="dns-01" class="stack">
+              <div class="form-grid">
+                <div class="field"><label class="label">DNS Email</label><input class="input" id="tls-dns-email"></div>
+                <div class="field"><label class="label">DNS Domains</label><input class="input" id="tls-dns-domains"></div>
+                <div class="field"><label class="label">DNS Provider</label><input class="input" id="tls-dns-provider"></div>
+                <div class="field"><label class="label">DNS Credentials INI</label><input class="input" id="tls-dns-credentials"></div>
+                <div class="field"><label class="label">DNS Staging</label><select class="select" id="tls-dns-staging"><option value="true">True</option><option value="false">False</option></select></div>
+                <div class="field"><label class="label">DNS Propagation (s)</label><input class="input" id="tls-dns-propagation" type="number"></div>
+              </div>
+            </div>
+            <div data-tls-panel="external" class="notice">
+              TLS is terminated upstream (reverse proxy). CacheInfinity serves plain HTTP.
+            </div>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.28s;">
+          <div class="section-header">
+            <h2>Appearance</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label">Theme</label>
+              <select class="select" id="theme-select">
+                <option value="lavender">Lavender (default)</option>
+                <option value="ember">Ember</option>
+                <option value="coast">Coast</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.3s;">
+          <div class="section-header">
+            <h2>Rclone (Global)</h2>
+            <a class="button ghost" href="/cachelinks">Manage Remotes</a>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label class="label">Bandwidth Limit</label><input class="input" id="rclone-bandwidth"></div>
+            <div class="field"><label class="label">Transfer Concurrency</label><input class="input" id="rclone-transfers" type="number"></div>
+            <div class="field"><label class="label">Checkers</label><input class="input" id="rclone-checkers" type="number"></div>
+            <div class="field"><label class="label">Timeout (seconds)</label><input class="input" id="rclone-timeout" type="number"></div>
+            <div class="field"><label class="label">Retries</label><input class="input" id="rclone-retries" type="number"></div>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.35s;">
+          <div class="section-header">
+            <h2>Authentication</h2>
+          </div>
+          <div class="stack">
+            <div class="field">
+              <label class="label">Auth Mode</label>
+              <select class="select" id="auth-mode">
+                <option value="local">Local (username/password)</option>
+                <option value="oidc">OIDC</option>
+                <option value="ldap">LDAP</option>
+                <option value="proxy">Proxy Header</option>
+              </select>
+              <div class="help">Only one admin auth method should be active for the WebUI.</div>
+            </div>
+
+            <div data-auth-panel="local" class="notice">
+              Local auth uses admin users stored in the CacheInfinity database.
+            </div>
+
+            <div data-auth-panel="oidc" class="stack">
+              <h3>OIDC</h3>
+              <div class="form-grid">
+                <div class="field"><label class="label">Issuer</label><input class="input" id="auth-oidc-issuer"></div>
+                <div class="field"><label class="label">Client ID</label><input class="input" id="auth-oidc-client"></div>
+                <div class="field"><label class="label">Client Secret</label><input class="input" id="auth-oidc-secret"></div>
+                <div class="field"><label class="label">Redirect URI</label><input class="input" id="auth-oidc-redirect"></div>
+                <div class="field"><label class="label">Scopes</label><input class="input" id="auth-oidc-scopes" placeholder="openid, profile"></div>
+                <div class="field"><label class="label">Allow Insecure HTTP</label><select class="select" id="auth-oidc-insecure"><option value="true">True</option><option value="false">False</option></select></div>
+              </div>
+            </div>
+
+            <div data-auth-panel="ldap" class="stack">
+              <h3>LDAP</h3>
+              <div class="form-grid">
+                <div class="field"><label class="label">URI</label><input class="input" id="auth-ldap-uri"></div>
+                <div class="field"><label class="label">Bind DN</label><input class="input" id="auth-ldap-bind"></div>
+                <div class="field"><label class="label">Bind Password</label><input class="input" id="auth-ldap-password" type="password"></div>
+                <div class="field"><label class="label">User Base DN</label><input class="input" id="auth-ldap-base"></div>
+                <div class="field"><label class="label">User Filter</label><input class="input" id="auth-ldap-filter"></div>
+                <div class="field"><label class="label">Start TLS</label><select class="select" id="auth-ldap-starttls"><option value="true">True</option><option value="false">False</option></select></div>
+                <div class="field"><label class="label">CA Cert Path</label><input class="input" id="auth-ldap-ca"></div>
+              </div>
+            </div>
+
+            <div data-auth-panel="proxy" class="stack">
+              <h3>Proxy Header</h3>
+              <div class="form-grid">
+                <div class="field"><label class="label">Header Name</label><input class="input" id="auth-proxy-header"></div>
+                <div class="field"><label class="label">Auto Create</label><select class="select" id="auth-proxy-auto"><option value="true">True</option><option value="false">False</option></select></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section" style="--delay:0.4s;">
+          <div class="section-header">
+            <h2>SSH Authorized Keys</h2>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label">WebDAV User</label>
+              <select class="select" id="ssh-user"></select>
+            </div>
+            <div class="field">
+              <label class="label">SFTP Edit Allowed</label>
+              <select class="select" id="ssh-keys-editable">
+                <option value="true">True</option>
+                <option value="false">False</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">Key Count</label>
+              <input class="input" id="ssh-key-count" readonly>
+            </div>
+          </div>
+          <div class="field" style="margin-top:12px;">
+            <label class="label">authorized_keys</label>
+            <textarea class="textarea" id="ssh-authorized-keys" placeholder="ssh-ed25519 AAAA..."></textarea>
+            <div class="help">Admin edits apply immediately; SFTP writes can be disabled per user.</div>
+          </div>
+          <div class="row" style="margin-top:12px;">
+            <button class="button" type="button" id="ssh-keys-reload">Reload</button>
+            <button class="button primary" type="button" id="ssh-keys-save">Save Keys</button>
+          </div>
+        </section>
+
+        <button class="button primary" type="submit">Save Settings</button>
+      </form>
+
+      <section class="section" style="--delay:0.4s;">
+        <div class="section-header">
+          <h2>Config (YAML)</h2>
+          <div class="row">
+            <button class="button" id="config-load" type="button">Load</button>
+            <button class="button secondary" id="config-save" type="button">Apply</button>
+          </div>
+        </div>
+        <textarea class="textarea" id="config-text" placeholder="Load configuration YAML..."></textarea>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/settings.js"></script>
+  </body>
+</html>

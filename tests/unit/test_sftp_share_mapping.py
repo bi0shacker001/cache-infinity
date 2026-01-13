@@ -25,11 +25,15 @@ class FakeAdapter:
 class FakeAuthManager:
     """Authentication manager stub."""
 
-    def __init__(self, adapter):
+    def __init__(self, adapter, ssh_keys_editable=True):
         self.db_adapter = adapter
+        self.ssh_keys_editable = ssh_keys_editable
 
     def get_user_permissions(self, _username):
         return {"read": True, "write": True, "delete": True, "modify": True}
+
+    def get_authorized_keys_editable(self, _username, purpose="webdav"):
+        return self.ssh_keys_editable
 
 
 class FakeSSHKeyManager:
@@ -223,3 +227,10 @@ def test_authorized_keys_validation_non_empty_without_asyncssh():
 
     assert valid is False
     assert parsed == []
+
+
+def test_authorized_keys_editable_blocks_write():
+    handler = _build_handler([], username="alice")
+    handler.auth_manager.ssh_keys_editable = False
+
+    assert handler._check_write_permission(".ssh/authorized_keys") is False

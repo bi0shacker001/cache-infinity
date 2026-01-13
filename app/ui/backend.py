@@ -554,6 +554,13 @@ class ManagementLayer:
                     url=kwargs.get("url"),
                     subfolder=kwargs.get("subfolder", "/"),
                     url_handler=kwargs.get("url_handler"),
+                    rclone_remote=kwargs.get("rclone_remote"),
+                    rclone_path=kwargs.get("rclone_path"),
+                    bandwidth_limit=kwargs.get("bandwidth_limit"),
+                    transfer_concurrency=kwargs.get("transfer_concurrency"),
+                    checkers=kwargs.get("checkers"),
+                    timeout=kwargs.get("timeout"),
+                    retries=kwargs.get("retries"),
                 )
             elif action == "update":
                 self._update_cachelink(
@@ -561,6 +568,13 @@ class ManagementLayer:
                     url=kwargs.get("url"),
                     subfolder=kwargs.get("subfolder"),
                     url_handler=kwargs.get("url_handler"),
+                    rclone_remote=kwargs.get("rclone_remote"),
+                    rclone_path=kwargs.get("rclone_path"),
+                    bandwidth_limit=kwargs.get("bandwidth_limit"),
+                    transfer_concurrency=kwargs.get("transfer_concurrency"),
+                    checkers=kwargs.get("checkers"),
+                    timeout=kwargs.get("timeout"),
+                    retries=kwargs.get("retries"),
                 )
                 return {"status": "ok"}
             elif action == "delete":
@@ -656,6 +670,13 @@ class ManagementLayer:
         url: str,
         subfolder: str = "/",
         url_handler: Optional[str] = None,
+        rclone_remote: Optional[str] = None,
+        rclone_path: Optional[str] = None,
+        bandwidth_limit: Optional[str] = None,
+        transfer_concurrency: Optional[int] = None,
+        checkers: Optional[int] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Create a new cachelink."""
         if not url:
@@ -670,6 +691,9 @@ class ManagementLayer:
         if any(item.get("canonical_id") == canonical_id for item in cachelinks):
             raise ValueError(f"Cachelink {canonical_id} already exists")
 
+        normalized_remote = (rclone_remote or "").strip() or None
+        normalized_path = (rclone_path or "").strip() or None
+        normalized_bandwidth = (bandwidth_limit or "").strip() or None
         cachelinks.append(
             {
                 "canonical_id": canonical_id,
@@ -678,6 +702,13 @@ class ManagementLayer:
                 "subfolder": subfolder or "/",
                 "mode": _detect_mode(subfolder or "/").value,
                 "url_handler": url_handler or "auto",
+                "rclone_remote": normalized_remote,
+                "rclone_path": normalized_path,
+                "bandwidth_limit": normalized_bandwidth,
+                "transfer_concurrency": transfer_concurrency,
+                "checkers": checkers,
+                "timeout": timeout,
+                "retries": retries,
                 "source_file": str(self.ctx.settings.config_dir / "bootstrap.yml"),
             }
         )
@@ -691,6 +722,13 @@ class ManagementLayer:
         url: Optional[str] = None,
         subfolder: Optional[str] = None,
         url_handler: Optional[str] = None,
+        rclone_remote: Optional[str] = None,
+        rclone_path: Optional[str] = None,
+        bandwidth_limit: Optional[str] = None,
+        transfer_concurrency: Optional[int] = None,
+        checkers: Optional[int] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Update an existing cachelink."""
         index_db = self.ctx.index_db.index_db
@@ -706,6 +744,20 @@ class ManagementLayer:
                 item["mode"] = _detect_mode(item["subfolder"]).value
             if url_handler is not None:
                 item["url_handler"] = url_handler
+            if rclone_remote is not None:
+                item["rclone_remote"] = (rclone_remote or "").strip() or None
+            if rclone_path is not None:
+                item["rclone_path"] = (rclone_path or "").strip() or None
+            if bandwidth_limit is not None:
+                item["bandwidth_limit"] = (bandwidth_limit or "").strip() or None
+            if transfer_concurrency is not None:
+                item["transfer_concurrency"] = transfer_concurrency
+            if checkers is not None:
+                item["checkers"] = checkers
+            if timeout is not None:
+                item["timeout"] = timeout
+            if retries is not None:
+                item["retries"] = retries
             updated = True
             break
         if not updated:
@@ -1276,6 +1328,9 @@ class ManagementLayer:
                 "max_zip_total_gb": settings.limits.max_zip_total_gb,
                 "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
             },
+            "ui": {
+                "theme": settings.ui.theme,
+            },
             "tls": {
                 "enabled": tls.enabled,
                 "mode": tls.mode,
@@ -1421,6 +1476,27 @@ class ManagementLayer:
             logger.error("SSH host key operation '%s' failed: %s", action, exc)
             raise
 
+    def ssh_user_keys(self, action: str, **kwargs) -> Dict[str, Any]:
+        try:
+            if action == "list":
+                return {"users": self._list_ssh_users()}
+            if action == "get":
+                return self._get_ssh_user_keys(kwargs.get("username"))
+            if action == "update":
+                return self._update_ssh_user_keys(
+                    kwargs.get("username"),
+                    kwargs.get("authorized_keys", ""),
+                )
+            if action == "set_editable":
+                return self._set_ssh_user_keys_editable(
+                    kwargs.get("username"),
+                    bool(kwargs.get("enabled", True)),
+                )
+            raise ValueError(f"Unknown ssh_user_keys action: {action}")
+        except Exception as exc:
+            logger.error("SSH user keys operation '%s' failed: %s", action, exc)
+            raise
+
     def _get_ssh_host_key_admin(self) -> SSHHostKeyAdmin:
         adapter = getattr(self.ctx.index_db, "adapter", None)
         if not adapter:
@@ -1462,6 +1538,61 @@ class ManagementLayer:
             raise RuntimeError(f"Failed to delete {key_type} host key")
         return {"status": "ok"}
 
+    def _list_ssh_users(self) -> List[Dict[str, Any]]:
+        users = self.ctx.index_db.index_db.list_users(purpose="webdav")
+        key_manager = getattr(self.ctx.auth_manager, "user_ssh_key_manager", None)
+        for entry in users:
+            username = entry.get("username")
+            if not username or not key_manager:
+                entry["key_count"] = 0
+                continue
+            try:
+                entry["key_count"] = len(key_manager.get_user_ssh_keys(username))
+            except Exception:
+                entry["key_count"] = 0
+        return users
+
+    def _get_ssh_user_keys(self, username: str | None) -> Dict[str, Any]:
+        if not username:
+            raise ValueError("username is required")
+        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        if not user:
+            raise ValueError("user not found")
+        return {
+            "username": username,
+            "authorized_keys": self.ctx.auth_manager.get_authorized_keys_text(username),
+            "ssh_keys_editable": self.ctx.auth_manager.get_authorized_keys_editable(
+                username,
+                purpose="webdav",
+            ),
+        }
+
+    def _update_ssh_user_keys(self, username: str | None, content: str) -> Dict[str, Any]:
+        if not username:
+            raise ValueError("username is required")
+        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        if not user:
+            raise ValueError("user not found")
+        ok = self.ctx.auth_manager.update_authorized_keys_text(username, content or "")
+        if not ok:
+            raise ValueError("Invalid authorized_keys content")
+        return {"status": "ok"}
+
+    def _set_ssh_user_keys_editable(self, username: str | None, enabled: bool) -> Dict[str, Any]:
+        if not username:
+            raise ValueError("username is required")
+        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        if not user:
+            raise ValueError("user not found")
+        ok = self.ctx.auth_manager.set_authorized_keys_editable(
+            username,
+            enabled,
+            purpose="webdav",
+        )
+        if not ok:
+            raise RuntimeError("Failed to update ssh_keys_editable")
+        return {"status": "ok"}
+
     def _list_degraded_targets(self) -> List[Dict[str, Any]]:
         """List degraded targets that need attention."""
         if not self.ctx.index_db:
@@ -1482,6 +1613,11 @@ class ManagementLayer:
         try:
             if action == "remotes":
                 return self._rclone_list_remotes()
+            if action == "test":
+                return self._rclone_test_remote(
+                    remote=kwargs.get("remote"),
+                    path=kwargs.get("path"),
+                )
             else:
                 raise ValueError(f"Unknown rclone action: {action}")
         except Exception as e:
@@ -1491,8 +1627,6 @@ class ManagementLayer:
     def _rclone_list_remotes(self) -> Dict[str, Any]:
         """List rclone remotes using direct rclone-python integration."""
         try:
-            import rclone
-            
             # Get Rclone configuration from database
             rclone_config = self.ctx.index_db.index_db.get_rclone()
             if not rclone_config:
@@ -1505,13 +1639,16 @@ class ManagementLayer:
                 return {"remotes": []}
 
             return {"remotes": sorted(remotes.keys())}
-            
-        except ImportError:
-            logger.error("rclone-python library not available")
-            return {"error": "rclone-python library not available", "status": "library_missing"}
         except Exception as e:
             logger.error(f"Failed to list rclone remotes: {e}")
             return {"error": f"Failed to list rclone remotes: {e}", "status": "error"}
+
+    def _rclone_test_remote(self, remote: str | None, path: str | None = None) -> Dict[str, Any]:
+        if not remote:
+            raise ValueError("remote name is required")
+        if not self.ctx.indexer:
+            raise RuntimeError("Indexer not initialized")
+        return self.ctx.indexer.test_rclone_remote(remote, path=path)
 
     # === Share Operations ===
     def shares(self, action: str, **kwargs) -> Dict[str, Any]:

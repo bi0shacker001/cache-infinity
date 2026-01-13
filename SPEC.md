@@ -493,6 +493,8 @@ FTP/FTPS and SFTP are different protocols and should be separate services.
 
 * The SFTP-exposed `authorized_keys` content is the *source of truth* for future SSH/SFTP public-key authentication decisions for that user (i.e., it defines which public keys are authorized for that account).
 * Changes take effect for new sessions after the update is committed.
+* Admin interfaces may update `authorized_keys` content directly for a user.
+* Per-user flag `ssh_keys_editable` controls whether that user may edit the virtual `/.ssh/authorized_keys` file via SFTP; when disabled, the file is read-only for that user, while admin interfaces may still update it.
 
 #### Implementation constraints (non-prescriptive)
 
@@ -594,6 +596,7 @@ The Rclone tab provides the following configuration sections:
 **Global Rclone Settings:**
 
 * **Rclone Configuration**: All rclone settings stored in database (no external config files)
+  * CacheInfinity may render a temporary runtime `rclone.conf` (e.g., under `config_dir/runtime/`) for rclone-python usage; the database remains the source of truth and no user-managed config file is required.
 * **Rclone-python Configuration**: Configuration options for rclone-python library stored in database
 * **Performance Settings**: Global bandwidth limits and transfer concurrency settings stored in database
 
@@ -606,6 +609,7 @@ The Rclone tab provides the following configuration sections:
   * **Configuration**: Provider-specific configuration fields (credentials, endpoints, etc.)
   * **Bandwidth Limits**: Optional bandwidth restrictions for this remote
   * **Transfer Settings**: Concurrency and timeout configurations
+  * **CacheInfinity Overrides**: Remote-level overrides are stored as CacheInfinity-only metadata and are not written into the rendered `rclone.conf` file.
 * **Test Connectivity**: Button to verify remote configuration and credentials
 * **Remove Remote**: Option to delete configured remotes
 
@@ -1072,6 +1076,9 @@ tls:
 
 * `app/ui/web/*` provides administrative configuration and maintenance actions.
 * All writes flow through the admin management layer (`app/ui/backend.py`, old name `management.py`).
+* WebUI supports CSS-based theme switching stored server-side (database-backed) and applied on render.
+  * `?notheme=1` disables theme application for recovery/debugging.
+* Dashboard/overview views stream live updates via Server-Sent Events at `/events/overview` (status + download queue).
 
 ### 16.2 Admin API
 

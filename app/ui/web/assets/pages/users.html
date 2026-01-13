@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CacheInfinity Users</title>
+    <link rel="stylesheet" href="/assets/css/styles.css">
+    <link rel="stylesheet" href="/assets/css/layout.css">
+    <link rel="stylesheet" href="/assets/css/components.css">
+  </head>
+  <body data-page="users"{% if theme %} data-theme="{{ theme }}"{% endif %}>
+    <header class="topbar">
+      <div class="brand">
+        <span>CacheInfinity</span>
+        <small>User Management</small>
+      </div>
+      <nav class="nav">
+        <a href="/" data-nav="dashboard">Dashboard</a>
+        <a href="/overview" data-nav="overview">Overview</a>
+        <a href="/storage" data-nav="storage">Storage</a>
+        <a href="/cachelinks" data-nav="cachelinks">Cachelinks</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+        <a href="/users" data-nav="users">Users</a>
+        <a href="/cookies" data-nav="cookies">Cookies</a>
+        <a href="/maintenance" data-nav="maintenance">Maintenance</a>
+      </nav>
+      <div class="session">
+        <span id="session-user">Signed in</span>
+        <button class="button" id="logout-button">Log out</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>Users</h1>
+          <p>Admin accounts and WebDAV share permissions live here.</p>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="section" style="--delay:0.05s;">
+          <div class="section-header">
+            <h2>Admin Users</h2>
+          </div>
+          <div id="admin-users"></div>
+          <form id="admin-user-form" class="stack" style="margin-top:16px;">
+            <div class="form-grid">
+              <div class="field"><label class="label">Username</label><input class="input" id="admin-username"></div>
+              <div class="field"><label class="label">Password</label><input class="input" id="admin-password" type="password"></div>
+              <div class="field"><label class="label">Enabled</label><select class="select" id="admin-enabled"><option value="true">True</option><option value="false">False</option></select></div>
+              <div class="field"><label class="label">Admin</label><select class="select" id="admin-is-admin"><option value="true">True</option><option value="false">False</option></select></div>
+            </div>
+            <button class="button primary" type="submit">Save Admin User</button>
+          </form>
+        </div>
+
+        <div class="section" style="--delay:0.1s;">
+          <div class="section-header">
+            <h2>WebDAV Users</h2>
+          </div>
+          <form id="webdav-user-form" class="stack">
+            <div class="form-grid">
+              <div class="field"><label class="label">Share</label><select class="select" id="webdav-share"></select></div>
+              <div class="field"><label class="label">Username</label><input class="input" id="webdav-username"></div>
+              <div class="field"><label class="label">Password</label><input class="input" id="webdav-password" type="password"></div>
+              <div class="field"><label class="label">Enabled</label><select class="select" id="webdav-enabled"><option value="true">True</option><option value="false">False</option></select></div>
+              <div class="field"><label class="label">Login</label><select class="select" id="webdav-login"><option value="true">True</option><option value="false">False</option></select></div>
+              <div class="field"><label class="label">Read</label><select class="select" id="webdav-read"><option value="true">True</option><option value="false">False</option></select></div>
+              <div class="field"><label class="label">Write</label><select class="select" id="webdav-write"><option value="true">True</option><option value="false">False</option></select></div>
+              <div class="field"><label class="label">Cache</label><select class="select" id="webdav-cache"><option value="true">True</option><option value="false">False</option></select></div>
+            </div>
+            <button class="button secondary" type="submit">Save WebDAV User</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="webdav-users" class="stack"></section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/assets/js/common.js"></script>
+    <script src="/assets/js/users.js"></script>
+  </body>
+</html>

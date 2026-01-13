@@ -732,6 +732,8 @@ def _build_fetcher(settings: Settings) -> Fetcher:
             "max_zip_total_gb": settings.limits.max_zip_total_gb,
             "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
         },
+        config_dir=settings.config_dir,
+        rclone_settings=settings.rclone,
     )
     _LOGGER.debug("Initialized fetcher with %d cookie domains", len(settings.cookies))
     return fetcher
@@ -747,6 +749,8 @@ def _build_indexer(
         settings.cookies,
         index_db,
         cachelinks,
+        config_dir=settings.config_dir,
+        rclone_settings=settings.rclone,
     )
     _LOGGER.debug(
         "Initialized indexer with settings: min_days=%d, max_days=%d",

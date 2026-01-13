@@ -14,9 +14,10 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, Optional, List, Any, Callable, TYPE_CHECKING
 from urllib.parse import urlparse
 
-from core.config import CookieJarDefinition
+from core.config import CookieJarDefinition, RcloneSettings
 from cache.checksum import ChecksumCalculator
 from storage.staging import StagingArea, StagingDefinition
+from storage.configuration import ConfigurationManager
 from db.dbmanage import DatabaseManager
 
 _logger = logging.getLogger(__name__)
@@ -141,6 +142,8 @@ class Fetcher:
         max_concurrent: int = 3,
         staging_definition: Optional[StagingDefinition] = None,
         zip_caching_limits: Optional[Dict[str, Any]] = None,
+        config_dir: Optional[Path] = None,
+        rclone_settings: Optional[RcloneSettings] = None,
     ):
         """Initialize fetcher.
          
@@ -162,6 +165,8 @@ class Fetcher:
         self._active_downloads = 0
         self._download_lock = threading.Lock()
         self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
+        self._rclone_settings = rclone_settings
+        self._rclone_config_path = self._prepare_rclone_config(config_dir, rclone_settings)
         
         # Initialize staging area for zip caching
         self.staging_definition = staging_definition or StagingDefinition()
@@ -196,6 +201,7 @@ class Fetcher:
         expected_checksum: Optional[str] = None,
         progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
         url_handler: Optional[str] = None,
+        rclone_options: Optional[Dict[str, Any]] = None,
     ) -> DownloadResult:
         """Download a file using PycURL with cookie support and checksum verification.
         
@@ -216,6 +222,7 @@ class Fetcher:
                 url=url,
                 destination=destination,
                 expected_checksum=expected_checksum,
+                rclone_options=rclone_options,
             )
         pycurl = _import_pycurl()
         start_time = time.time()
@@ -419,21 +426,29 @@ class Fetcher:
         url: str,
         destination: Path,
         expected_checksum: Optional[str] = None,
+        rclone_options: Optional[Dict[str, Any]] = None,
     ) -> DownloadResult:
         start_time = time.time()
         remote = _rclone_spec(url)
+        remote_name = remote.split(":", 1)[0] if ":" in remote else ""
         destination.parent.mkdir(parents=True, exist_ok=True)
         last_error: str | None = None
         for attempt in range(self.max_retries + 1):
             try:
                 # Get Rclone configuration from database
-                rclone_config_path = self._get_rclone_config_path()
+                rclone_config_path = self._rclone_config_path
+                overrides = self._rclone_remote_overrides(remote_name)
+                if rclone_options:
+                    for key, value in rclone_options.items():
+                        if value is not None and value != "":
+                            overrides[key] = value
+                flags = self._rclone_flags(overrides)
                 with _rclone_env(rclone_config_path):
                     rclone = _import_rclone()
                     if hasattr(rclone, "copyto"):
-                        rclone.copyto(remote, str(destination))
+                        self._rclone_call(rclone.copyto, remote, str(destination), flags=flags)
                     elif hasattr(rclone, "copy"):
-                        rclone.copy(remote, str(destination.parent))
+                        self._rclone_call(rclone.copy, remote, str(destination.parent), flags=flags)
                     else:
                         raise RuntimeError("rclone-python missing copy/copyto support")
 
@@ -470,6 +485,72 @@ class Fetcher:
             duration=time.time() - start_time,
             error_message=last_error or "Rclone transfer failed",
         )
+
+    def _prepare_rclone_config(
+        self,
+        config_dir: Optional[Path],
+        rclone_settings: Optional[RcloneSettings],
+    ) -> Optional[Path]:
+        if not config_dir or not rclone_settings or not rclone_settings.remotes:
+            return None
+        manager = ConfigurationManager(config_dir)
+        return manager.write_rclone_config(rclone_settings.remotes)
+
+    def _merge_rclone_options(self, overrides: Optional[Dict[str, Any]]) -> dict[str, Any]:
+        options: dict[str, Any] = {}
+        if self._rclone_settings:
+            options.update(
+                {
+                    "bandwidth_limit": self._rclone_settings.bandwidth_limit,
+                    "transfer_concurrency": self._rclone_settings.transfer_concurrency,
+                    "checkers": self._rclone_settings.checkers,
+                    "timeout": self._rclone_settings.timeout,
+                    "retries": self._rclone_settings.retries,
+                }
+            )
+        if overrides:
+            for key in ("bandwidth_limit", "transfer_concurrency", "checkers", "timeout", "retries"):
+                value = overrides.get(key)
+                if value is not None and value != "":
+                    options[key] = value
+        return options
+
+    def _rclone_remote_overrides(self, remote: str | None) -> dict[str, Any]:
+        if not remote or not self._rclone_settings or not self._rclone_settings.remotes:
+            return {}
+        config = self._rclone_settings.remotes.get(remote) or {}
+        if not isinstance(config, dict):
+            return {}
+        return {
+            "bandwidth_limit": config.get("ci_bandwidth_limit"),
+            "transfer_concurrency": config.get("ci_transfer_concurrency"),
+            "checkers": config.get("ci_checkers"),
+            "timeout": config.get("ci_timeout"),
+            "retries": config.get("ci_retries"),
+        }
+
+    def _rclone_flags(self, overrides: Optional[Dict[str, Any]]) -> list[str]:
+        options = self._merge_rclone_options(overrides)
+        flags: list[str] = []
+        if options.get("bandwidth_limit"):
+            flags.extend(["--bwlimit", str(options["bandwidth_limit"])])
+        if options.get("transfer_concurrency"):
+            flags.extend(["--transfers", str(options["transfer_concurrency"])])
+        if options.get("checkers"):
+            flags.extend(["--checkers", str(options["checkers"])])
+        if options.get("timeout"):
+            flags.extend(["--timeout", str(options["timeout"])])
+        if options.get("retries") is not None:
+            flags.extend(["--retries", str(options["retries"])])
+        return flags
+
+    def _rclone_call(self, func, *args, flags: Optional[list[str]] = None):
+        if flags:
+            try:
+                return func(*args, flags=flags)
+            except TypeError:
+                return func(*args)
+        return func(*args)
         
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL.

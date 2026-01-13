@@ -19,10 +19,11 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 
 from core.config import CookieJarDefinition
-from core.config import IndexingSettings
+from core.config import IndexingSettings, RcloneSettings
 from cache.cachelinks import CachelinkDescriptor, CachelinkIndex, normalize_source_url
 from dataclasses import dataclass
 from db.dbmanage import DatabaseManager
+from storage.configuration import ConfigurationManager
 
 if TYPE_CHECKING:
     from net.fetcher import Fetcher
@@ -112,16 +113,6 @@ def _rclone_env(config_path: Optional[Path]):
             os.environ[key] = previous
 
 
-class RemoteListingFetcher:
-    """Fetcher for remote directory listings with support for multiple protocols."""
-    
-    def __init__(self):
-        """Initialize remote listing fetcher."""
-        self._pycurl = _import_pycurl()
-        _logger.debug("RemoteListingFetcher initialized")
-    
-
-
 def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for raw in raw_lines:
@@ -202,9 +193,10 @@ class _DomainState:
 class RemoteListingFetcher:
     """Fetcher for remote directory listings with support for multiple protocols."""
     
-    def __init__(self):
+    def __init__(self, rclone_config_path: Optional[Path] = None):
         """Initialize remote listing fetcher."""
         self._pycurl = _import_pycurl()
+        self._rclone_config_path = rclone_config_path
         _logger.debug("RemoteListingFetcher initialized")
 
     def _fetch_bytes(
@@ -264,6 +256,7 @@ class RemoteListingFetcher:
         cached_etag: str | None = None,
         cached_modified: str | None = None,
         url_handler: str | None = None,
+        rclone_options: dict[str, Any] | None = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Fetch remote directory listing.
         
@@ -277,7 +270,7 @@ class RemoteListingFetcher:
         try:
             handler = _resolve_url_handler(url, url_handler)
             if handler == "rclone":
-                return self._fetch_rclone_listing(url, parse_entries)
+                return self._fetch_rclone_listing(url, parse_entries, rclone_options=rclone_options)
             if handler in ("http", "https") or url.startswith('http'):
                 return self._fetch_http_listing(
                     url,
@@ -349,17 +342,24 @@ class RemoteListingFetcher:
             _logger.error(f"FTP listing fetch failed for {url}: {exc}")
             return [], {'error': str(exc), 'url': url}
 
-    def _fetch_rclone_listing(self, url: str, parse_entries: bool) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    def _fetch_rclone_listing(
+        self,
+        url: str,
+        parse_entries: bool,
+        *,
+        rclone_options: dict[str, Any] | None = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         try:
             if not parse_entries:
                 return [], {"url": url, "status": "ok", "source": "rclone"}
             
             # Get Rclone configuration from database
             rclone_config_path = self._get_rclone_config_path()
+            flags = self._rclone_flags(rclone_options)
             with _rclone_env(rclone_config_path):
                 rclone = _import_rclone()
                 spec = _rclone_spec(url)
-                rows = rclone.lsjson(spec)
+                rows = self._rclone_call(rclone.lsjson, spec, flags=flags)
             entries: list[dict[str, Any]] = []
             for row in rows or []:
                 name = row.get("Name") or row.get("Path") or ""
@@ -380,6 +380,33 @@ class RemoteListingFetcher:
         except Exception as exc:
             _logger.error("Rclone listing fetch failed for %s: %s", url, exc)
             return [], {"error": str(exc), "url": url}
+
+    def _get_rclone_config_path(self) -> Optional[Path]:
+        return self._rclone_config_path
+
+    def _rclone_flags(self, rclone_options: dict[str, Any] | None) -> list[str]:
+        if not rclone_options:
+            return []
+        flags: list[str] = []
+        if rclone_options.get("bandwidth_limit"):
+            flags.extend(["--bwlimit", str(rclone_options["bandwidth_limit"])])
+        if rclone_options.get("transfer_concurrency"):
+            flags.extend(["--transfers", str(rclone_options["transfer_concurrency"])])
+        if rclone_options.get("checkers"):
+            flags.extend(["--checkers", str(rclone_options["checkers"])])
+        if rclone_options.get("timeout"):
+            flags.extend(["--timeout", str(rclone_options["timeout"])])
+        if rclone_options.get("retries") is not None:
+            flags.extend(["--retries", str(rclone_options["retries"])])
+        return flags
+
+    def _rclone_call(self, func, *args, flags: Optional[list[str]] = None):
+        if flags:
+            try:
+                return func(*args, flags=flags)
+            except TypeError:
+                return func(*args)
+        return func(*args)
     
     def _parse_html_directory(self, html_content: str, base_url: str) -> List[Dict[str, Any]]:
         """Parse HTML directory listing."""
@@ -445,6 +472,8 @@ class Indexer:
         cookie_jars: Dict[str, CookieJarDefinition],
         db_manager: DatabaseManager | None = None,
         cachelinks: CachelinkIndex | None = None,
+        config_dir: Optional[Path] = None,
+        rclone_settings: Optional[RcloneSettings] = None,
     ):
         """Initialize indexer.
          
@@ -458,6 +487,8 @@ class Indexer:
         self.cookie_jars = cookie_jars
         self.db_manager = db_manager
         self.cachelinks = cachelinks
+        self._rclone_settings = rclone_settings
+        self._rclone_config_path = self._prepare_rclone_config(config_dir, rclone_settings)
         self._last_index_times: Dict[str, int] = {}
         self._budget_state: dict[str, Any] = {
             "date": datetime.now(timezone.utc).date(),
@@ -466,7 +497,7 @@ class Indexer:
         }
         self._domain_state: dict[str, _DomainState] = {}
         self._domain_lock = threading.RLock()
-        self._fetcher = RemoteListingFetcher()
+        self._fetcher = RemoteListingFetcher(self._rclone_config_path)
         _logger.debug("Indexer initialized")
 
     def preview_listing(
@@ -484,8 +515,122 @@ class Indexer:
         listing_url = listing_root.rstrip("/")
         if normalized:
             listing_url = f"{listing_url}/{normalized}"
-        entries, _ = self._fetcher.fetch(listing_url, url_handler=url_handler)
+        rclone_options = self._merge_rclone_options(
+            self._rclone_remote_overrides(self._rclone_remote_from_url(listing_url, url_handler))
+        )
+        entries, _ = self._fetcher.fetch(
+            listing_url,
+            url_handler=url_handler,
+            rclone_options=rclone_options,
+        )
         return entries[:limit]
+
+    def test_rclone_remote(self, remote: str, path: str | None = None) -> Dict[str, Any]:
+        if not self._rclone_settings or not self._rclone_settings.remotes:
+            return {"status": "not_configured", "error": "Rclone remotes not configured"}
+        if remote not in self._rclone_settings.remotes:
+            return {"status": "not_configured", "error": f"Remote '{remote}' not found"}
+        spec_path = (path or "").lstrip("/")
+        spec = f"{remote}:{spec_path}"
+        try:
+            flags = self._rclone_flags(
+                self._merge_rclone_options(self._rclone_remote_overrides(remote))
+            )
+            with _rclone_env(self._rclone_config_path):
+                rclone = _import_rclone()
+                rows = self._rclone_call(rclone.lsjson, spec, flags=flags)
+            count = len(rows or [])
+            return {"status": "ok", "entries": count}
+        except ModuleNotFoundError:
+            return {"status": "library_missing", "error": "rclone-python library not available"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    def _prepare_rclone_config(
+        self,
+        config_dir: Optional[Path],
+        rclone_settings: Optional[RcloneSettings],
+    ) -> Optional[Path]:
+        if not config_dir or not rclone_settings or not rclone_settings.remotes:
+            return None
+        manager = ConfigurationManager(config_dir)
+        return manager.write_rclone_config(rclone_settings.remotes)
+
+    def _merge_rclone_options(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        options: dict[str, Any] = {}
+        if self._rclone_settings:
+            options.update(
+                {
+                    "bandwidth_limit": self._rclone_settings.bandwidth_limit,
+                    "transfer_concurrency": self._rclone_settings.transfer_concurrency,
+                    "checkers": self._rclone_settings.checkers,
+                    "timeout": self._rclone_settings.timeout,
+                    "retries": self._rclone_settings.retries,
+                }
+            )
+        for key in ("bandwidth_limit", "transfer_concurrency", "checkers", "timeout", "retries"):
+            value = overrides.get(key)
+            if value is not None and value != "":
+                options[key] = value
+        return options
+
+    def _rclone_remote_overrides(self, remote: str | None) -> dict[str, Any]:
+        if not remote or not self._rclone_settings or not self._rclone_settings.remotes:
+            return {}
+        config = self._rclone_settings.remotes.get(remote) or {}
+        if not isinstance(config, dict):
+            return {}
+        return {
+            "bandwidth_limit": config.get("ci_bandwidth_limit"),
+            "transfer_concurrency": config.get("ci_transfer_concurrency"),
+            "checkers": config.get("ci_checkers"),
+            "timeout": config.get("ci_timeout"),
+            "retries": config.get("ci_retries"),
+        }
+
+    def _rclone_remote_from_url(self, url: str, handler: str | None) -> str | None:
+        normalized = (handler or "").lower().strip()
+        if normalized == "rclone" or _is_rclone_url(url):
+            spec = _rclone_spec(url)
+            if ":" in spec:
+                return spec.split(":", 1)[0]
+        return None
+
+    def _rclone_options_for_descriptor(self, descriptor: CachelinkDescriptor) -> dict[str, Any]:
+        overrides = self._rclone_remote_overrides(descriptor.rclone_remote)
+        cachelink_overrides = {
+            "bandwidth_limit": descriptor.bandwidth_limit,
+            "transfer_concurrency": descriptor.transfer_concurrency,
+            "checkers": descriptor.checkers,
+            "timeout": descriptor.timeout,
+            "retries": descriptor.retries,
+        }
+        for key, value in cachelink_overrides.items():
+            if value is not None and value != "":
+                overrides[key] = value
+        return self._merge_rclone_options(overrides)
+
+    def _rclone_flags(self, options: dict[str, Any]) -> list[str]:
+        flags: list[str] = []
+        if options.get("bandwidth_limit"):
+            flags.extend(["--bwlimit", str(options["bandwidth_limit"])])
+        if options.get("transfer_concurrency"):
+            flags.extend(["--transfers", str(options["transfer_concurrency"])])
+        if options.get("checkers"):
+            flags.extend(["--checkers", str(options["checkers"])])
+        if options.get("timeout"):
+            flags.extend(["--timeout", str(options["timeout"])])
+        if options.get("retries") is not None:
+            flags.extend(["--retries", str(options["retries"])])
+        return flags
+
+    def _rclone_call(self, func, *args, flags: Optional[list[str]] = None):
+        if flags:
+            try:
+                return func(*args, flags=flags)
+            except TypeError:
+                return func(*args)
+        return func(*args)
         
     def should_reindex(self, target_id: str) -> bool:
         """Determine if a target should be reindexed.
@@ -786,9 +931,11 @@ class Indexer:
         descriptor = self._get_cachelink_descriptor(target_id)
         listing_url = url
         url_handler = None
+        rclone_options = None
         if descriptor:
             listing_url = descriptor.remote_listing_url
             url_handler = descriptor.url_handler
+            rclone_options = self._rclone_options_for_descriptor(descriptor)
         elif subfolder:
             listing_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
 
@@ -831,6 +978,7 @@ class Indexer:
                     cached_etag=cached_etag,
                     cached_modified=cached_modified,
                     url_handler=url_handler,
+                    rclone_options=rclone_options,
                 )
             finally:
                 self._finish_domain_request(domain)
@@ -1462,6 +1610,13 @@ def _run_availability_probe(
         remote_url,
         staging_path,
         url_handler=descriptor.url_handler,
+        rclone_options={
+            "bandwidth_limit": descriptor.bandwidth_limit,
+            "transfer_concurrency": descriptor.transfer_concurrency,
+            "checkers": descriptor.checkers,
+            "timeout": descriptor.timeout,
+            "retries": descriptor.retries,
+        },
     )
     if not result.success:
         message = result.error_message or ""

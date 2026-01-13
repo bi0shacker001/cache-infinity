@@ -26,6 +26,13 @@ class CachelinkDescriptor:
     subfolder: str
     mode: "CachelinkMode"
     url_handler: str
+    rclone_remote: str | None = None
+    rclone_path: str | None = None
+    bandwidth_limit: str | None = None
+    transfer_concurrency: int | None = None
+    checkers: int | None = None
+    timeout: int | None = None
+    retries: int | None = None
 
     @property
     def backend_relative_folder(self) -> PurePosixPath:
@@ -134,6 +141,13 @@ def load_cachelinks(
         subfolder: str,
         mode_value: str | None = None,
         handler_value: str | None = None,
+        rclone_remote: str | None = None,
+        rclone_path: str | None = None,
+        bandwidth_limit: str | None = None,
+        transfer_concurrency: int | None = None,
+        checkers: int | None = None,
+        timeout: int | None = None,
+        retries: int | None = None,
     ) -> None:
         clean_url = (url or "").strip()
         if not clean_url:
@@ -151,6 +165,13 @@ def load_cachelinks(
             subfolder=subfolder or "/",
             mode=mode,
             url_handler=url_handler,
+            rclone_remote=rclone_remote,
+            rclone_path=rclone_path,
+            bandwidth_limit=bandwidth_limit,
+            transfer_concurrency=transfer_concurrency,
+            checkers=checkers,
+            timeout=timeout,
+            retries=retries,
         )
         cachelinks[canonical_id] = descriptor
 
@@ -169,6 +190,13 @@ def load_cachelinks(
                     subfolder=value.get("subfolder", "/"),
                     mode_value=value.get("mode"),
                     handler_value=value.get("url_handler") or value.get("handler"),
+                    rclone_remote=value.get("rclone_remote"),
+                    rclone_path=value.get("rclone_path"),
+                    bandwidth_limit=value.get("bandwidth_limit"),
+                    transfer_concurrency=value.get("transfer_concurrency"),
+                    checkers=value.get("checkers"),
+                    timeout=value.get("timeout"),
+                    retries=value.get("retries"),
                 )
             elif isinstance(value, dict):
                 walk_tree(value, path_segments + [key], source_file)
@@ -199,6 +227,13 @@ def load_cachelinks(
                     subfolder=item.get("subfolder", "/"),
                     mode_value=item.get("mode"),
                     handler_value=item.get("url_handler") or item.get("handler"),
+                    rclone_remote=item.get("rclone_remote"),
+                    rclone_path=item.get("rclone_path"),
+                    bandwidth_limit=item.get("bandwidth_limit"),
+                    transfer_concurrency=item.get("transfer_concurrency"),
+                    checkers=item.get("checkers"),
+                    timeout=item.get("timeout"),
+                    retries=item.get("retries"),
                 )
 
     for path in mount_tree_paths:
