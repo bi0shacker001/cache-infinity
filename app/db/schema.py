@@ -84,6 +84,9 @@ class TargetState:
     etag: str | None
     last_modified: str | None
     listing_hash: str | None
+    last_error: str | None
+    last_error_at: datetime | None
+    next_retry_at: datetime | None
 
 
 @dataclass
@@ -159,10 +162,18 @@ class IndexDatabase:
                     listing_hash TEXT,
                     needs_full_reindex INTEGER DEFAULT 1,
                     last_error TEXT,
-                    last_error_at TEXT
+                    last_error_at TEXT,
+                    next_retry_at TEXT
                 )
                 """
             )
+            try:
+                columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(indexing_targets)")}
+                if "next_retry_at" not in columns:
+                    self._db.execute("ALTER TABLE indexing_targets ADD COLUMN next_retry_at TEXT")
+                    self._db.commit()
+            except Exception:
+                self._db.rollback()
             
             # Configuration tables
             self._db.execute(
@@ -217,10 +228,36 @@ class IndexDatabase:
                     allow_early_full_on_change BOOLEAN NOT NULL,
                     early_full_requires_hot BOOLEAN NOT NULL,
                     score_weights TEXT,  -- JSON string
+                    per_domain_concurrency INTEGER NOT NULL,
+                    per_domain_rate_limit_per_minute INTEGER NOT NULL,
+                    per_domain_backoff_base_seconds INTEGER NOT NULL,
+                    per_domain_backoff_max_seconds INTEGER NOT NULL,
+                    giant_directory_entry_limit INTEGER NOT NULL,
+                    giant_directory_cooldown_minutes INTEGER NOT NULL,
+                    partition_hint_max_children INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            try:
+                columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_indexing)")}
+                new_columns = {
+                    "per_domain_concurrency": 2,
+                    "per_domain_rate_limit_per_minute": 30,
+                    "per_domain_backoff_base_seconds": 5,
+                    "per_domain_backoff_max_seconds": 300,
+                    "giant_directory_entry_limit": 10000,
+                    "giant_directory_cooldown_minutes": 60,
+                    "partition_hint_max_children": 25,
+                }
+                for column, default in new_columns.items():
+                    if column not in columns:
+                        self._db.execute(
+                            f"ALTER TABLE config_indexing ADD COLUMN {column} INTEGER NOT NULL DEFAULT {int(default)}"
+                        )
+                        self._db.commit()
+            except Exception:
+                self._db.rollback()
             
             self._db.execute(
                 """
@@ -579,7 +616,8 @@ class IndexDatabase:
             row = self._db.fetchone(
                 """
                 SELECT id, last_full_index_at, last_check_at, needs_full_reindex,
-                       remote_url, etag, last_modified, listing_hash
+                       remote_url, etag, last_modified, listing_hash,
+                       last_error, last_error_at, next_retry_at
                 FROM indexing_targets
                 WHERE cachelink_id = ?
                 """,
@@ -595,7 +633,8 @@ class IndexDatabase:
                 row = self._db.fetchone(
                     """
                     SELECT id, last_full_index_at, last_check_at, needs_full_reindex,
-                           remote_url, etag, last_modified, listing_hash
+                           remote_url, etag, last_modified, listing_hash,
+                           last_error, last_error_at, next_retry_at
                     FROM indexing_targets
                     WHERE cachelink_id = ?
                     """,
@@ -612,7 +651,8 @@ class IndexDatabase:
                     row = self._db.fetchone(
                         """
                         SELECT id, last_full_index_at, last_check_at, needs_full_reindex,
-                               remote_url, etag, last_modified, listing_hash
+                               remote_url, etag, last_modified, listing_hash,
+                               last_error, last_error_at, next_retry_at
                         FROM indexing_targets
                         WHERE cachelink_id = ?
                         """,
@@ -620,6 +660,8 @@ class IndexDatabase:
                     )
         last_full = _parse_ts(row["last_full_index_at"]) if row["last_full_index_at"] else None
         last_check = _parse_ts(row["last_check_at"]) if row["last_check_at"] else None
+        last_error_at = _parse_ts(row["last_error_at"]) if row["last_error_at"] else None
+        next_retry_at = _parse_ts(row["next_retry_at"]) if row["next_retry_at"] else None
         needs_full = bool(row["needs_full_reindex"])
         remote_value = row["remote_url"] or remote_url
         self._logger.debug("Target state for %s: last_full=%s, needs_full=%s",
@@ -634,6 +676,9 @@ class IndexDatabase:
             etag=row["etag"],
             last_modified=row["last_modified"],
             listing_hash=row["listing_hash"],
+            last_error=row["last_error"],
+            last_error_at=last_error_at,
+            next_retry_at=next_retry_at,
         )
 
     def list_targets(self, descriptors: Iterable[CachelinkDescriptor]) -> list[TargetState]:
@@ -694,7 +739,8 @@ class IndexDatabase:
                 """
                 UPDATE indexing_targets
                 SET last_full_index_at = ?, last_check_at = ?, etag = ?, last_modified = ?,
-                    listing_hash = ?, needs_full_reindex = 0, last_error = NULL, last_error_at = NULL
+                    listing_hash = ?, needs_full_reindex = 0, last_error = NULL, last_error_at = NULL,
+                    next_retry_at = NULL
                 WHERE id = ?
                 """,
                 (now, now, etag, last_modified, listing_hash, target_id),
@@ -722,7 +768,10 @@ class IndexDatabase:
                 UPDATE indexing_targets
                 SET last_check_at = ?, etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
                     listing_hash = COALESCE(?, listing_hash),
-                    needs_full_reindex = CASE WHEN ? = 1 THEN 1 ELSE needs_full_reindex END
+                    needs_full_reindex = CASE WHEN ? = 1 THEN 1 ELSE needs_full_reindex END,
+                    last_error = NULL,
+                    last_error_at = NULL,
+                    next_retry_at = NULL
                 WHERE id = ?
                 """,
                 (now, etag, last_modified, listing_hash, needs_full, target_id),
@@ -733,12 +782,17 @@ class IndexDatabase:
             )
             self._db.commit()
 
-    def mark_failure(self, target_id: int, message: str) -> None:
+    def mark_failure(self, target_id: int, message: str, *, next_retry_at: datetime | None = None) -> None:
         ts = datetime.now(timezone.utc).isoformat()
+        next_retry_value = next_retry_at.isoformat() if next_retry_at else None
         with self._lock:
             self._db.execute(
-                "UPDATE indexing_targets SET last_error = ?, last_error_at = ?, needs_full_reindex = 1 WHERE id = ?",
-                (message[:500], ts, target_id),
+                """
+                UPDATE indexing_targets
+                SET last_error = ?, last_error_at = ?, next_retry_at = ?, needs_full_reindex = 1
+                WHERE id = ?
+                """,
+                (message[:500], ts, next_retry_value, target_id),
             )
             self._db.execute(
                 "INSERT INTO indexing_events (target_id, event_type, occurred_at) VALUES (?, ?, ?)",
@@ -1040,7 +1094,12 @@ class IndexDatabase:
     def list_degraded_targets(self) -> list[dict[str, str | None]]:
         with self._lock:
             rows = self._db.fetchall(
-                "SELECT cachelink_id, remote_url, last_error, last_error_at FROM indexing_targets WHERE last_error IS NOT NULL ORDER BY last_error_at DESC"
+                """
+                SELECT cachelink_id, remote_url, last_error, last_error_at, next_retry_at
+                FROM indexing_targets
+                WHERE last_error IS NOT NULL
+                ORDER BY last_error_at DESC
+                """
             )
         degraded: list[dict[str, str | None]] = []
         for row in rows:
@@ -1050,6 +1109,7 @@ class IndexDatabase:
                     "remote_url": row["remote_url"],
                     "last_error": row["last_error"],
                     "last_error_at": row["last_error_at"],
+                    "next_retry_at": row["next_retry_at"],
                 }
             )
         return degraded
@@ -1533,7 +1593,10 @@ class IndexDatabase:
                 SELECT min_full_reindex_days, max_full_reindex_days, hot_window_days, hot_radius,
                        daily_full_reindex_budget, daily_cheap_check_budget, max_full_reindex_per_14d,
                        max_cheap_checks_per_day, allow_early_full_on_change, early_full_requires_hot,
-                       score_weights, updated_at
+                       score_weights, per_domain_concurrency, per_domain_rate_limit_per_minute,
+                       per_domain_backoff_base_seconds, per_domain_backoff_max_seconds,
+                       giant_directory_entry_limit, giant_directory_cooldown_minutes,
+                       partition_hint_max_children, updated_at
                 FROM config_indexing
                 ORDER BY id DESC
                 LIMIT 1
@@ -1553,6 +1616,13 @@ class IndexDatabase:
             "allow_early_full_on_change": bool(row["allow_early_full_on_change"]),
             "early_full_requires_hot": bool(row["early_full_requires_hot"]),
             "score_weights": row["score_weights"],
+            "per_domain_concurrency": row["per_domain_concurrency"],
+            "per_domain_rate_limit_per_minute": row["per_domain_rate_limit_per_minute"],
+            "per_domain_backoff_base_seconds": row["per_domain_backoff_base_seconds"],
+            "per_domain_backoff_max_seconds": row["per_domain_backoff_max_seconds"],
+            "giant_directory_entry_limit": row["giant_directory_entry_limit"],
+            "giant_directory_cooldown_minutes": row["giant_directory_cooldown_minutes"],
+            "partition_hint_max_children": row["partition_hint_max_children"],
             "updated_at": row["updated_at"],
         }
 
@@ -1565,8 +1635,11 @@ class IndexDatabase:
                 INSERT INTO config_indexing (min_full_reindex_days, max_full_reindex_days, hot_window_days, hot_radius,
                                            daily_full_reindex_budget, daily_cheap_check_budget, max_full_reindex_per_14d,
                                            max_cheap_checks_per_day, allow_early_full_on_change, early_full_requires_hot,
-                                           score_weights, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                           score_weights, per_domain_concurrency, per_domain_rate_limit_per_minute,
+                                           per_domain_backoff_base_seconds, per_domain_backoff_max_seconds,
+                                           giant_directory_entry_limit, giant_directory_cooldown_minutes,
+                                           partition_hint_max_children, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_full_reindex_days = excluded.min_full_reindex_days,
                     max_full_reindex_days = excluded.max_full_reindex_days,
@@ -1579,6 +1652,13 @@ class IndexDatabase:
                     allow_early_full_on_change = excluded.allow_early_full_on_change,
                     early_full_requires_hot = excluded.early_full_requires_hot,
                     score_weights = excluded.score_weights,
+                    per_domain_concurrency = excluded.per_domain_concurrency,
+                    per_domain_rate_limit_per_minute = excluded.per_domain_rate_limit_per_minute,
+                    per_domain_backoff_base_seconds = excluded.per_domain_backoff_base_seconds,
+                    per_domain_backoff_max_seconds = excluded.per_domain_backoff_max_seconds,
+                    giant_directory_entry_limit = excluded.giant_directory_entry_limit,
+                    giant_directory_cooldown_minutes = excluded.giant_directory_cooldown_minutes,
+                    partition_hint_max_children = excluded.partition_hint_max_children,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -1593,6 +1673,13 @@ class IndexDatabase:
                     indexing["allow_early_full_on_change"],
                     indexing["early_full_requires_hot"],
                     indexing["score_weights"],
+                    indexing["per_domain_concurrency"],
+                    indexing["per_domain_rate_limit_per_minute"],
+                    indexing["per_domain_backoff_base_seconds"],
+                    indexing["per_domain_backoff_max_seconds"],
+                    indexing["giant_directory_entry_limit"],
+                    indexing["giant_directory_cooldown_minutes"],
+                    indexing["partition_hint_max_children"],
                     now,
                 ),
             )

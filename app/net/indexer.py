@@ -10,12 +10,13 @@ import random
 import shutil
 import threading
 import time
-from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
-from urllib.parse import urljoin, urlparse
-from html.parser import HTMLParser
-from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from urllib.parse import urljoin, urlparse
 
 from core.config import CookieJarDefinition
 from core.config import IndexingSettings
@@ -132,6 +133,27 @@ def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
     return headers
 
 
+def _retry_after_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        seconds = int(cleaned)
+        return max(0, seconds)
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(cleaned)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    delta = parsed - datetime.now(timezone.utc)
+    return max(0, int(delta.total_seconds()))
+
+
 class _AnchorHTMLParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -167,6 +189,14 @@ class _AnchorHTMLParser(HTMLParser):
         self._in_a = False
         self._href = None
         self._text_parts = []
+
+
+@dataclass
+class _DomainState:
+    last_request_at: float | None = None
+    inflight: int = 0
+    backoff_until: float | None = None
+    failure_count: int = 0
 
 
 class RemoteListingFetcher:
@@ -221,6 +251,7 @@ class RemoteListingFetcher:
             "last_modified": parsed_headers.get("last-modified", ""),
             "content_length": parsed_headers.get("content-length", ""),
             "etag": parsed_headers.get("etag", ""),
+            "retry_after": parsed_headers.get("retry-after", ""),
             "url": url,
         }
         return buffer.getvalue(), metadata
@@ -289,7 +320,8 @@ class RemoteListingFetcher:
                 return [], {"status": "not_modified", "url": url}
 
             if int(metadata.get("status_code") or 0) >= 400:
-                return [], {"error": f"HTTP {metadata.get('status_code')}", "url": url}
+                metadata["error"] = f"HTTP {metadata.get('status_code')}"
+                return [], metadata
             
             if not parse_entries:
                 return [], metadata
@@ -432,6 +464,8 @@ class Indexer:
             "full_used": 0,
             "cheap_used": 0,
         }
+        self._domain_state: dict[str, _DomainState] = {}
+        self._domain_lock = threading.RLock()
         self._fetcher = RemoteListingFetcher()
         _logger.debug("Indexer initialized")
 
@@ -542,6 +576,112 @@ class Indexer:
 
         return float(hot_count) * decay
 
+    def _domain_key(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme == "rclone":
+            spec = _rclone_spec(url)
+            remote = spec.split(":", 1)[0] if ":" in spec else spec
+            return f"rclone:{remote}".lower()
+        hostname = parsed.hostname or parsed.netloc or ""
+        if hostname:
+            return hostname.lower()
+        if parsed.scheme:
+            return parsed.scheme.lower()
+        return "unknown"
+
+    def _domain_state_for(self, domain: str) -> _DomainState:
+        with self._domain_lock:
+            state = self._domain_state.get(domain)
+            if state is None:
+                state = _DomainState()
+                self._domain_state[domain] = state
+            return state
+
+    def _domain_next_delay(self, domain: str, now_ts: float) -> float:
+        state = self._domain_state_for(domain)
+        delay = 0.0
+
+        if state.backoff_until and now_ts < state.backoff_until:
+            delay = max(delay, state.backoff_until - now_ts)
+
+        rate_limit = self.settings.per_domain_rate_limit_per_minute
+        if rate_limit > 0 and state.last_request_at is not None:
+            min_interval = 60.0 / max(1, rate_limit)
+            rate_delay = min_interval - (now_ts - state.last_request_at)
+            if rate_delay > 0:
+                delay = max(delay, rate_delay)
+
+        concurrency = self.settings.per_domain_concurrency
+        if concurrency > 0 and state.inflight >= concurrency:
+            delay = max(delay, 1.0)
+
+        return delay
+
+    def _start_domain_request(self, domain: str, now_ts: float) -> None:
+        with self._domain_lock:
+            state = self._domain_state_for(domain)
+            state.inflight += 1
+            state.last_request_at = now_ts
+
+    def _finish_domain_request(self, domain: str) -> None:
+        with self._domain_lock:
+            state = self._domain_state_for(domain)
+            state.inflight = max(0, state.inflight - 1)
+
+    def _apply_domain_backoff(
+        self,
+        domain: str,
+        *,
+        now_ts: float,
+        retry_after: int | None = None,
+        exponential: bool = True,
+    ) -> float:
+        state = self._domain_state_for(domain)
+        base = max(0, int(self.settings.per_domain_backoff_base_seconds))
+        maximum = max(base, int(self.settings.per_domain_backoff_max_seconds))
+        delay = base
+        if exponential:
+            state.failure_count += 1
+            delay = min(maximum, base * (2 ** (state.failure_count - 1)))
+        if retry_after is not None:
+            delay = max(delay, retry_after)
+        if delay <= 0:
+            return 0.0
+        if retry_after is None:
+            jitter = random.uniform(0.8, 1.2)
+            delay = delay * jitter
+        delay = max(float(retry_after or 0), min(maximum, delay))
+        state.backoff_until = now_ts + delay
+        return delay
+
+    def _clear_domain_backoff(self, domain: str) -> None:
+        state = self._domain_state_for(domain)
+        state.failure_count = 0
+        state.backoff_until = None
+
+    def _record_failure(
+        self,
+        state,
+        message: str,
+        *,
+        domain: str,
+        retry_after: int | None = None,
+        exponential: bool = True,
+    ) -> None:
+        if not state or not self.db_manager:
+            return
+        now_ts = time.time()
+        delay = self._apply_domain_backoff(
+            domain,
+            now_ts=now_ts,
+            retry_after=retry_after,
+            exponential=exponential,
+        )
+        next_retry_at = (
+            datetime.fromtimestamp(now_ts + delay, tz=timezone.utc) if delay > 0 else None
+        )
+        self.db_manager.mark_failure(state.id, message, next_retry_at=next_retry_at)
+
     def should_reindex_with_budget(self, target_id: str, now: datetime | None = None):
         """Determine if a target should be reindexed considering budget and cadence.
 
@@ -553,6 +693,9 @@ class Indexer:
         now = now or datetime.now(timezone.utc)
         state = self._get_target_state(target_id)
         hotness = self._compute_hotness_score(state)
+        if state and state.next_retry_at and now < state.next_retry_at:
+            delay = (state.next_retry_at - now).total_seconds()
+            return None, delay
 
         min_interval = max(timedelta(days=7), timedelta(days=self.settings.min_full_reindex_days))
         max_interval = min(timedelta(days=60), timedelta(days=self.settings.max_full_reindex_days))
@@ -638,29 +781,72 @@ class Indexer:
         Returns:
             Tuple of (success, performed_action)
         """
+        start_time = time.monotonic()
+        performed_action = action or "full"
+        descriptor = self._get_cachelink_descriptor(target_id)
+        listing_url = url
+        url_handler = None
+        if descriptor:
+            listing_url = descriptor.remote_listing_url
+            url_handler = descriptor.url_handler
+        elif subfolder:
+            listing_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
+
+        domain = self._domain_key(listing_url)
+        state = self._get_target_state(target_id)
+        if state is None and descriptor and self.db_manager:
+            state = self.db_manager.ensure_target(descriptor, listing_url)
+
+        now = datetime.now(timezone.utc)
+        if state and state.next_retry_at and now < state.next_retry_at:
+            return False, performed_action
+
+        now_ts = time.time()
+        delay = self._domain_next_delay(domain, now_ts)
+        if delay > 0:
+            _logger.debug("Domain throttle active for %s: %.1fs", domain, delay)
+            return False, performed_action
+
+        def _record_log(success: bool, entries_count: int, error_message: str | None) -> None:
+            if self.db_manager and hasattr(self.db_manager, "record_indexing_log"):
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                self.db_manager.record_indexing_log(
+                    target_id,
+                    int(time.time()),
+                    success,
+                    entries_count,
+                    error_message,
+                    duration_ms=duration_ms,
+                    source_domain=domain,
+                )
+
         try:
-            descriptor = self._get_cachelink_descriptor(target_id)
-            listing_url = url
-            url_handler = None
-            if descriptor:
-                listing_url = descriptor.remote_listing_url
-                url_handler = descriptor.url_handler
-            elif subfolder:
-                listing_url = f"{url.rstrip('/')}/{subfolder.lstrip('/')}"
+            self._start_domain_request(domain, now_ts)
+            try:
+                cached_etag = state.etag if state else None
+                cached_modified = state.last_modified if state else None
+                entries, metadata = self._fetcher.fetch(
+                    listing_url,
+                    parse_entries=True,
+                    cached_etag=cached_etag,
+                    cached_modified=cached_modified,
+                    url_handler=url_handler,
+                )
+            finally:
+                self._finish_domain_request(domain)
 
-            state = self._get_target_state(target_id)
-            if state is None and descriptor and self.db_manager:
-                state = self.db_manager.ensure_target(descriptor, listing_url)
-
-            cached_etag = state.etag if state else None
-            cached_modified = state.last_modified if state else None
-            entries, metadata = self._fetcher.fetch(
-                listing_url,
-                parse_entries=True,
-                cached_etag=cached_etag,
-                cached_modified=cached_modified,
-                url_handler=url_handler,
-            )
+            retry_after = _retry_after_seconds(metadata.get("retry_after"))
+            if metadata.get("error"):
+                message = str(metadata.get("error") or "Listing fetch failed")
+                self._record_failure(
+                    state,
+                    message,
+                    domain=domain,
+                    retry_after=retry_after,
+                    exponential=True,
+                )
+                _record_log(False, 0, message)
+                return False, performed_action
 
             if metadata.get("status") == "not_modified":
                 if state and self.db_manager:
@@ -671,16 +857,45 @@ class Indexer:
                         listing_hash=state.listing_hash,
                         changed=False,
                     )
+                self._clear_domain_backoff(domain)
+                _record_log(True, 0, None)
                 return True, action or "cheap"
 
             status_code = metadata.get("status_code")
             if status_code and int(status_code) >= 400:
+                message = f"HTTP {status_code}"
+                exponential = int(status_code) == 429 or int(status_code) >= 500
+                self._record_failure(
+                    state,
+                    message,
+                    domain=domain,
+                    retry_after=retry_after,
+                    exponential=exponential,
+                )
+                _record_log(False, 0, message)
+                return False, performed_action
+
+            giant_limit = int(self.settings.giant_directory_entry_limit or 0)
+            if giant_limit and len(entries) > giant_limit:
+                hint = self._partition_hint(entries)
+                message = (
+                    f"Partition required: listing has {len(entries)} entries "
+                    f"(limit {giant_limit}). {hint}".strip()
+                )
                 if state and self.db_manager:
-                    self.db_manager.mark_failure(state.id, f"HTTP {status_code}")
-                return False, action or "full"
+                    cooldown = int(self.settings.giant_directory_cooldown_minutes or 0)
+                    next_retry_at = (
+                        now + timedelta(minutes=cooldown) if cooldown > 0 else None
+                    )
+                    self.db_manager.mark_failure(
+                        state.id,
+                        message,
+                        next_retry_at=next_retry_at,
+                    )
+                _record_log(False, len(entries), message)
+                return False, performed_action
 
             listing_hash = self._listing_hash(entries)
-            performed_action = "full"
             if state and self.db_manager:
                 perform_full = action == "full" or (
                     action is None and (state.needs_full_reindex or state.last_full_index_at is None)
@@ -695,6 +910,7 @@ class Indexer:
                         last_modified=metadata.get("last_modified"),
                         listing_hash=listing_hash,
                     )
+                    performed_action = "full"
                 else:
                     performed_action = "cheap"
                     changed = listing_hash != (state.listing_hash or "")
@@ -706,23 +922,23 @@ class Indexer:
                         changed=changed,
                     )
 
-            if self.db_manager and hasattr(self.db_manager, "record_indexing_log"):
-                self.db_manager.record_indexing_log(
-                    target_id,
-                    int(time.time()),
-                    True,
-                    len(entries),
-                    None,
-                )
-
+            self._clear_domain_backoff(domain)
+            self._last_index_times[target_id] = int(time.time())
+            _record_log(True, len(entries), None)
             _logger.debug("Indexed target %s (%d entries)", target_id, len(entries))
             return True, performed_action
 
         except Exception as exc:
             _logger.error(f"Failed to index target {target_id}: {exc}")
-            if self.db_manager:
-                self.db_manager.record_indexing_log(target_id, int(time.time()), False, 0, str(exc))
-            return False, action or "full"
+            self._record_failure(
+                state,
+                str(exc),
+                domain=domain,
+                retry_after=None,
+                exponential=True,
+            )
+            _record_log(False, 0, str(exc))
+            return False, performed_action
     
     def _update_entry_in_database(self, target_id: str, entry: Dict[str, Any]) -> None:
         """Update a single entry in the database."""
@@ -763,6 +979,29 @@ class Indexer:
             
         except Exception as exc:
             _logger.error(f"Failed to update entry in database: {exc}")
+
+    def _partition_hint(self, entries: List[Dict[str, Any]]) -> str:
+        limit = int(self.settings.partition_hint_max_children or 0)
+        if limit <= 0:
+            return ""
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not entry.get("is_dir"):
+                continue
+            name = str(entry.get("name") or "").strip("/")
+            if not name:
+                path = str(entry.get("path") or "").strip("/")
+                name = path.split("/", 1)[0] if path else ""
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            candidates.append(name)
+            if len(candidates) >= limit:
+                break
+        if not candidates:
+            return "Consider splitting into subfolder targets."
+        return f"Consider subfolder targets like: {', '.join(candidates)}."
     
     def _get_cachelink_descriptor(self, target_id: str) -> Optional[CachelinkDescriptor]:
         """Get cachelink descriptor for a target ID."""
@@ -950,6 +1189,7 @@ class Indexer:
     def get_targets_for_indexing(self) -> tuple[list[dict[str, str]], float | None]:
         """Get list of targets that need indexing based on budgets and schedules."""
         now = datetime.now(timezone.utc)
+        now_ts = time.time()
         self._reset_daily_budgets(now)
 
         if not self.cachelinks:
@@ -959,10 +1199,20 @@ class Indexer:
         soonest_due: float | None = None
         for descriptor in self.cachelinks.cachelinks.values():
             decision, next_due = self.should_reindex_with_budget(descriptor.canonical_id, now=now)
-            if next_due is not None:
-                soonest_due = next_due if soonest_due is None else min(soonest_due, next_due)
             if decision:
+                domain = self._domain_key(descriptor.remote_listing_url)
+                delay = self._domain_next_delay(domain, now_ts)
+                effective_due = delay if delay > 0 else next_due
+                if effective_due is not None:
+                    if soonest_due is None or (soonest_due < 0 and effective_due >= 0):
+                        soonest_due = effective_due
+                    else:
+                        soonest_due = min(soonest_due, effective_due)
+                if delay > 0:
+                    continue
                 candidates.append((decision, descriptor))
+            elif next_due is not None:
+                soonest_due = next_due if soonest_due is None else min(soonest_due, next_due)
 
         def _priority(item: tuple[dict[str, Any], CachelinkDescriptor]):
             decision, desc = item

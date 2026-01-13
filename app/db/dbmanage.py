@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +71,8 @@ class DatabaseManager:
                 timestamp INTEGER NOT NULL,
                 success BOOLEAN NOT NULL,
                 entries_processed INTEGER DEFAULT 0,
+                duration_ms INTEGER,
+                source_domain TEXT,
                 error_message TEXT
             )
             """
@@ -104,6 +107,17 @@ class DatabaseManager:
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_user ON file_access(user)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_file_access_time ON file_access(last_accessed)")
         self.adapter.execute("CREATE INDEX IF NOT EXISTS idx_indexing_log_target ON indexing_log(target_id)")
+        try:
+            columns = {
+                row["name"]
+                for row in self.adapter.fetchall("PRAGMA table_info(indexing_log)")
+            }
+            if "duration_ms" not in columns:
+                self.adapter.execute("ALTER TABLE indexing_log ADD COLUMN duration_ms INTEGER")
+            if "source_domain" not in columns:
+                self.adapter.execute("ALTER TABLE indexing_log ADD COLUMN source_domain TEXT")
+        except Exception:  # pragma: no cover - defensive
+            pass
 
         # Pending downloads queue for background fetcher
         self.adapter.execute(
@@ -203,14 +217,17 @@ class DatabaseManager:
         success: bool,
         entries_processed: int,
         error_message: str | None,
+        *,
+        duration_ms: int | None = None,
+        source_domain: str | None = None,
     ) -> None:
         self.adapter.execute(
             """
             INSERT OR REPLACE INTO indexing_log (
-                target_id, timestamp, success, entries_processed, error_message
-            ) VALUES (?, ?, ?, ?, ?)
+                target_id, timestamp, success, entries_processed, duration_ms, source_domain, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (target_id, timestamp, success, entries_processed, error_message),
+            (target_id, timestamp, success, entries_processed, duration_ms, source_domain, error_message),
         )
         self.adapter.commit()
 
@@ -258,6 +275,40 @@ class DatabaseManager:
             (since_ts,),
         )
         return int(row["count"]) if row else 0
+
+    def indexing_metrics_summary(self, since_hours: int = 24) -> dict[str, float | int]:
+        since_ts = int(time.time()) - (since_hours * 3600)
+        rows = self.adapter.fetchall(
+            """
+            SELECT success, duration_ms
+            FROM indexing_log
+            WHERE timestamp >= ?
+            """,
+            (since_ts,),
+        )
+        if not rows:
+            return {
+                "samples": 0,
+                "successes": 0,
+                "failures": 0,
+                "success_rate": 0.0,
+                "avg_duration_ms": 0.0,
+                "last_duration_ms": 0,
+            }
+        durations = [row["duration_ms"] for row in rows if row.get("duration_ms") is not None]
+        successes = sum(1 for row in rows if row.get("success"))
+        failures = len(rows) - successes
+        avg_duration = sum(durations) / len(durations) if durations else 0.0
+        last_duration = durations[-1] if durations else 0
+        success_rate = successes / len(rows) if rows else 0.0
+        return {
+            "samples": len(rows),
+            "successes": successes,
+            "failures": failures,
+            "success_rate": round(success_rate, 4),
+            "avg_duration_ms": round(avg_duration, 2),
+            "last_duration_ms": last_duration,
+        }
 
     def list_degraded_indexing(self, since_ts: int) -> list[dict]:
         return self.adapter.fetchall(

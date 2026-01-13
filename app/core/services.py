@@ -211,6 +211,7 @@ class DatabaseService(BaseService):
         if not self.database_manager.create_tables():
             raise ConfigError("Failed to initialize database schema")
         self.database_manager.ensure_indexer_tables()
+        self.database_manager.any_admin_users()
 
     def start(self) -> None:
         return None

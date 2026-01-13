@@ -146,6 +146,12 @@ class ManagementLayer:
 
     def _describe_status(self) -> Dict[str, Any]:
         stats = self.ctx.index_db.get_database_stats() if self.ctx.index_db else {}
+        indexing_metrics = {}
+        if hasattr(self.ctx.index_db, "indexing_metrics_summary"):
+            try:
+                indexing_metrics = self.ctx.index_db.indexing_metrics_summary()
+            except Exception:
+                indexing_metrics = {}
         share_list: list[dict[str, object]] = []
         for share in self.ctx.settings.shares.values():
             user_count = len([name for name in share.users.keys() if name != "anonymous"])
@@ -190,6 +196,7 @@ class ManagementLayer:
             "shares": share_list,
             "cachelink_count": len(self.ctx.cachelinks.cachelinks),
             "stats": summary,
+            "indexing_metrics": indexing_metrics,
             "storage": storage,
             "degraded_targets": degraded_targets,
             "missing_datadir": not bool(self.ctx.datadir_registry.storages),
@@ -1315,6 +1322,13 @@ class ManagementLayer:
                 "allow_early_full_on_change": settings.indexing.allow_early_full_on_change,
                 "early_full_requires_hot": settings.indexing.early_full_requires_hot,
                 "score_weights": dict(settings.indexing.score_weights or {}),
+                "per_domain_concurrency": settings.indexing.per_domain_concurrency,
+                "per_domain_rate_limit_per_minute": settings.indexing.per_domain_rate_limit_per_minute,
+                "per_domain_backoff_base_seconds": settings.indexing.per_domain_backoff_base_seconds,
+                "per_domain_backoff_max_seconds": settings.indexing.per_domain_backoff_max_seconds,
+                "giant_directory_entry_limit": settings.indexing.giant_directory_entry_limit,
+                "giant_directory_cooldown_minutes": settings.indexing.giant_directory_cooldown_minutes,
+                "partition_hint_max_children": settings.indexing.partition_hint_max_children,
             },
             "auth": {
                 "oidc": {

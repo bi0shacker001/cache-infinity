@@ -750,10 +750,21 @@ CacheInfinity MUST remain responsive and safe when the virtual filesystem overla
 - Indexing MUST apply exponential backoff on upstream 429/5xx responses and MUST respect Retry-After when provided.
 - Cheap checks MUST prefer conditional requests (ETag / Last-Modified). When the upstream indicates "not modified", indexing MUST short-circuit without rewriting unchanged metadata.
 
+Configuration knobs (defaults in parentheses):
+- `indexing.per_domain_concurrency` (2) — max concurrent listing requests per domain
+- `indexing.per_domain_rate_limit_per_minute` (30) — max listing requests per domain per minute
+- `indexing.per_domain_backoff_base_seconds` (5) — initial backoff delay for 429/5xx
+- `indexing.per_domain_backoff_max_seconds` (300) — maximum backoff delay
+
 #### 10.2.4 Target partitioning and giant-directory safety
 
 - Cachelinks SHOULD be configured as directory-level targets (subfolder targets) when upstream listings expose usable boundaries, to avoid single targets with unbounded entry counts.
 - If a target is detected to be excessively large for safe periodic refresh, CacheInfinity MUST throttle refresh attempts for that target, MUST record a clear diagnostic indicating partitioning is required, and MUST avoid repeatedly crawling the same giant listing at full speed.
+
+Configuration knobs (defaults in parentheses):
+- `indexing.giant_directory_entry_limit` (10000) — entry count threshold that triggers throttling
+- `indexing.giant_directory_cooldown_minutes` (60) — cooldown before retrying a giant target
+- `indexing.partition_hint_max_children` (25) — max directory names to include in partitioning hints
 
 #### 10.2.5 Metadata model requirements for fast WebDAV listings
 

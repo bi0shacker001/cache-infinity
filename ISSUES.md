@@ -6,8 +6,8 @@ This file tracks all known compliance issues with the current SPEC.md requiremen
 
 **Current Compliance Status: 85% Complete**
 
-- **Resolved Issues**: 6 of 10 (60%)
-- **Open Issues**: 4 of 10 (40%)
+- **Resolved Issues**: 7 of 10 (70%)
+- **Open Issues**: 3 of 10 (30%)
 - **Overall Progress**: Good progress, but SFTP virtual authorized_keys not implemented
 
 ## Resolved Compliance Issues ✅
@@ -84,12 +84,12 @@ This file tracks all known compliance issues with the current SPEC.md requiremen
 **Target Resolution:** Phase 3 - Critical Priority
 
 ### ISSUE-007: Incomplete Indexing Robustness ❌
-**Status:** Open
+**Status:** Resolved
 **Severity:** Medium
 **SPEC Section:** 10.2 Indexing at Scale and Metadata Performance
 **Description:** Missing per-domain rate limiting, giant-directory safety, and target partitioning features.
 **Impact:** May cause performance issues with large-scale indexing
-**Resolution:** Implement advanced indexing features for scalability
+**Resolution:** ✅ Added per-domain rate limiting/concurrency caps with exponential backoff (Retry-After aware), giant-directory throttling with partitioning hints, next-retry tracking, and indexing duration metrics.
 **Dependencies:** None
 **Assigned:** Unassigned
 **Target Resolution:** Phase 3 - Medium Priority

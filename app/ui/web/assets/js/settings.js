@@ -392,6 +392,27 @@ function renderSettingsDetail() {
         <label>Max Cheap / Day
           <input type="number" id="idx-max-cheap" value="${esc(indexing.max_cheap_checks_per_day ?? '')}">
         </label>
+        <label>Per-Domain Concurrency
+          <input type="number" id="idx-domain-concurrency" value="${esc(indexing.per_domain_concurrency ?? '')}">
+        </label>
+        <label>Per-Domain Rate / Min
+          <input type="number" id="idx-domain-rate" value="${esc(indexing.per_domain_rate_limit_per_minute ?? '')}">
+        </label>
+        <label>Backoff Base (s)
+          <input type="number" id="idx-backoff-base" value="${esc(indexing.per_domain_backoff_base_seconds ?? '')}">
+        </label>
+        <label>Backoff Max (s)
+          <input type="number" id="idx-backoff-max" value="${esc(indexing.per_domain_backoff_max_seconds ?? '')}">
+        </label>
+        <label>Giant Dir Entry Limit
+          <input type="number" id="idx-giant-limit" value="${esc(indexing.giant_directory_entry_limit ?? '')}">
+        </label>
+        <label>Giant Dir Cooldown (min)
+          <input type="number" id="idx-giant-cooldown" value="${esc(indexing.giant_directory_cooldown_minutes ?? '')}">
+        </label>
+        <label>Partition Hint Max
+          <input type="number" id="idx-partition-hints" value="${esc(indexing.partition_hint_max_children ?? '')}">
+        </label>
         <label>Allow Early Full?
           <input type="checkbox" id="idx-allow-early" ${indexing.allow_early_full_on_change ? 'checked' : ''}>
         </label>
@@ -748,6 +769,13 @@ function collectIndexingDetail() {
     daily_cheap_check_budget: parseNumber(document.getElementById('idx-cheap-budget').value),
     max_full_reindex_per_14d: parseNumber(document.getElementById('idx-max-full').value),
     max_cheap_checks_per_day: parseNumber(document.getElementById('idx-max-cheap').value),
+    per_domain_concurrency: parseNumber(document.getElementById('idx-domain-concurrency').value),
+    per_domain_rate_limit_per_minute: parseNumber(document.getElementById('idx-domain-rate').value),
+    per_domain_backoff_base_seconds: parseNumber(document.getElementById('idx-backoff-base').value),
+    per_domain_backoff_max_seconds: parseNumber(document.getElementById('idx-backoff-max').value),
+    giant_directory_entry_limit: parseNumber(document.getElementById('idx-giant-limit').value),
+    giant_directory_cooldown_minutes: parseNumber(document.getElementById('idx-giant-cooldown').value),
+    partition_hint_max_children: parseNumber(document.getElementById('idx-partition-hints').value),
     allow_early_full_on_change: document.getElementById('idx-allow-early').checked,
     early_full_requires_hot: document.getElementById('idx-requires-hot').checked,
     score_weights: {

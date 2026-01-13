@@ -78,12 +78,12 @@ This file contains the actionable task list for achieving full SPEC compliance, 
 - [ ] **TASK-055:** Set up continuous integration testing
 
 ### Indexing Improvements 🟡 (MEDIUM PRIORITY)
-- [ ] **TASK-060:** Implement per-domain rate limiting
-- [ ] **TASK-061:** Add giant-directory safety throttling
-- [ ] **TASK-062:** Implement target partitioning support
-- [ ] **TASK-063:** Enhance indexing error handling
-- [ ] **TASK-064:** Add indexing performance metrics
-- [ ] **TASK-065:** Test advanced indexing features
+- [x] **TASK-060:** Implement per-domain rate limiting
+- [x] **TASK-061:** Add giant-directory safety throttling
+- [x] **TASK-062:** Implement target partitioning support
+- [x] **TASK-063:** Enhance indexing error handling
+- [x] **TASK-064:** Add indexing performance metrics
+- [x] **TASK-065:** Test advanced indexing features
 
 ### Cookie Management 🟡 (MEDIUM PRIORITY)
 - [x] **TASK-070:** Review current cookie implementation

@@ -151,6 +151,13 @@ class ConfigService:
 
         if "indexing" in payload:
             indexing = payload.get("indexing") or {}
+            per_domain_concurrency = indexing.get("per_domain_concurrency")
+            per_domain_rate = indexing.get("per_domain_rate_limit_per_minute")
+            backoff_base = indexing.get("per_domain_backoff_base_seconds")
+            backoff_max = indexing.get("per_domain_backoff_max_seconds")
+            giant_limit = indexing.get("giant_directory_entry_limit")
+            giant_cooldown = indexing.get("giant_directory_cooldown_minutes")
+            partition_hint = indexing.get("partition_hint_max_children")
             index_db.save_indexing(
                 {
                     "min_full_reindex_days": int(indexing.get("min_full_reindex_days") or 30),
@@ -164,6 +171,27 @@ class ConfigService:
                     "allow_early_full_on_change": bool(indexing.get("allow_early_full_on_change", True)),
                     "early_full_requires_hot": bool(indexing.get("early_full_requires_hot", True)),
                     "score_weights": json.dumps(indexing.get("score_weights") or {}),
+                    "per_domain_concurrency": int(per_domain_concurrency)
+                    if per_domain_concurrency not in (None, "")
+                    else 2,
+                    "per_domain_rate_limit_per_minute": int(per_domain_rate)
+                    if per_domain_rate not in (None, "")
+                    else 30,
+                    "per_domain_backoff_base_seconds": int(backoff_base)
+                    if backoff_base not in (None, "")
+                    else 5,
+                    "per_domain_backoff_max_seconds": int(backoff_max)
+                    if backoff_max not in (None, "")
+                    else 300,
+                    "giant_directory_entry_limit": int(giant_limit)
+                    if giant_limit not in (None, "")
+                    else 10000,
+                    "giant_directory_cooldown_minutes": int(giant_cooldown)
+                    if giant_cooldown not in (None, "")
+                    else 60,
+                    "partition_hint_max_children": int(partition_hint)
+                    if partition_hint not in (None, "")
+                    else 25,
                 }
             )
 
@@ -517,6 +545,13 @@ class ConfigService:
                 "allow_early_full_on_change": settings.indexing.allow_early_full_on_change,
                 "early_full_requires_hot": settings.indexing.early_full_requires_hot,
                 "score_weights": settings.indexing.score_weights or {},
+                "per_domain_concurrency": settings.indexing.per_domain_concurrency,
+                "per_domain_rate_limit_per_minute": settings.indexing.per_domain_rate_limit_per_minute,
+                "per_domain_backoff_base_seconds": settings.indexing.per_domain_backoff_base_seconds,
+                "per_domain_backoff_max_seconds": settings.indexing.per_domain_backoff_max_seconds,
+                "giant_directory_entry_limit": settings.indexing.giant_directory_entry_limit,
+                "giant_directory_cooldown_minutes": settings.indexing.giant_directory_cooldown_minutes,
+                "partition_hint_max_children": settings.indexing.partition_hint_max_children,
             },
             "auth": {
                 "oidc": {
@@ -769,7 +804,26 @@ class ConfigMigration:
                 "max_cheap_checks_per_day": int(indexing_raw.get("max_cheap_checks_per_day", 50)),
                 "allow_early_full_on_change": bool(indexing_raw.get("allow_early_full_on_change", True)),
                 "early_full_requires_hot": bool(indexing_raw.get("early_full_requires_hot", True)),
-                "score_weights": json.dumps(score_weights) if score_weights else None
+                "score_weights": json.dumps(score_weights) if score_weights else None,
+                "per_domain_concurrency": int(indexing_raw.get("per_domain_concurrency", 2)),
+                "per_domain_rate_limit_per_minute": int(
+                    indexing_raw.get("per_domain_rate_limit_per_minute", 30)
+                ),
+                "per_domain_backoff_base_seconds": int(
+                    indexing_raw.get("per_domain_backoff_base_seconds", 5)
+                ),
+                "per_domain_backoff_max_seconds": int(
+                    indexing_raw.get("per_domain_backoff_max_seconds", 300)
+                ),
+                "giant_directory_entry_limit": int(
+                    indexing_raw.get("giant_directory_entry_limit", 10000)
+                ),
+                "giant_directory_cooldown_minutes": int(
+                    indexing_raw.get("giant_directory_cooldown_minutes", 60)
+                ),
+                "partition_hint_max_children": int(
+                    indexing_raw.get("partition_hint_max_children", 25)
+                ),
             }
             self.index_db.save_indexing(indexing)
         
@@ -998,6 +1052,13 @@ class IndexingSettings:
     allow_early_full_on_change: bool = True
     early_full_requires_hot: bool = True
     score_weights: Optional[dict[str, float]] = None
+    per_domain_concurrency: int = 2
+    per_domain_rate_limit_per_minute: int = 30
+    per_domain_backoff_base_seconds: int = 5
+    per_domain_backoff_max_seconds: int = 300
+    giant_directory_entry_limit: int = 10000
+    giant_directory_cooldown_minutes: int = 60
+    partition_hint_max_children: int = 25
     
     def validate(self) -> None:
         """Validate indexing settings."""
@@ -1017,6 +1078,22 @@ class IndexingSettings:
             raise ConfigError("max_full_reindex_per_14d must be non-negative")
         if self.max_cheap_checks_per_day < 0:
             raise ConfigError("max_cheap_checks_per_day must be non-negative")
+        if self.per_domain_concurrency < 0:
+            raise ConfigError("per_domain_concurrency must be non-negative")
+        if self.per_domain_rate_limit_per_minute < 0:
+            raise ConfigError("per_domain_rate_limit_per_minute must be non-negative")
+        if self.per_domain_backoff_base_seconds < 0:
+            raise ConfigError("per_domain_backoff_base_seconds must be non-negative")
+        if self.per_domain_backoff_max_seconds < 0:
+            raise ConfigError("per_domain_backoff_max_seconds must be non-negative")
+        if self.per_domain_backoff_max_seconds < self.per_domain_backoff_base_seconds:
+            raise ConfigError("per_domain_backoff_max_seconds must be >= per_domain_backoff_base_seconds")
+        if self.giant_directory_entry_limit < 0:
+            raise ConfigError("giant_directory_entry_limit must be non-negative")
+        if self.giant_directory_cooldown_minutes < 0:
+            raise ConfigError("giant_directory_cooldown_minutes must be non-negative")
+        if self.partition_hint_max_children < 0:
+            raise ConfigError("partition_hint_max_children must be non-negative")
 
 
 @dataclass
@@ -1306,7 +1383,14 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
             max_cheap_checks_per_day=indexing_raw["max_cheap_checks_per_day"],
             allow_early_full_on_change=indexing_raw["allow_early_full_on_change"],
             early_full_requires_hot=indexing_raw["early_full_requires_hot"],
-            score_weights=score_weights
+            score_weights=score_weights,
+            per_domain_concurrency=indexing_raw.get("per_domain_concurrency", 2),
+            per_domain_rate_limit_per_minute=indexing_raw.get("per_domain_rate_limit_per_minute", 30),
+            per_domain_backoff_base_seconds=indexing_raw.get("per_domain_backoff_base_seconds", 5),
+            per_domain_backoff_max_seconds=indexing_raw.get("per_domain_backoff_max_seconds", 300),
+            giant_directory_entry_limit=indexing_raw.get("giant_directory_entry_limit", 10000),
+            giant_directory_cooldown_minutes=indexing_raw.get("giant_directory_cooldown_minutes", 60),
+            partition_hint_max_children=indexing_raw.get("partition_hint_max_children", 25),
         )
     else:
         indexing = IndexingSettings()
@@ -1617,6 +1701,13 @@ def _parse_indexing(indexing_raw: dict) -> IndexingSettings:
         allow_early_full_on_change=bool(indexing_raw.get("allow_early_full_on_change", True)),
         early_full_requires_hot=bool(indexing_raw.get("early_full_requires_hot", True)),
         score_weights=score_weights,
+        per_domain_concurrency=int(indexing_raw.get("per_domain_concurrency", 2)),
+        per_domain_rate_limit_per_minute=int(indexing_raw.get("per_domain_rate_limit_per_minute", 30)),
+        per_domain_backoff_base_seconds=int(indexing_raw.get("per_domain_backoff_base_seconds", 5)),
+        per_domain_backoff_max_seconds=int(indexing_raw.get("per_domain_backoff_max_seconds", 300)),
+        giant_directory_entry_limit=int(indexing_raw.get("giant_directory_entry_limit", 10000)),
+        giant_directory_cooldown_minutes=int(indexing_raw.get("giant_directory_cooldown_minutes", 60)),
+        partition_hint_max_children=int(indexing_raw.get("partition_hint_max_children", 25)),
     )
 
 
