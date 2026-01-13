@@ -176,7 +176,12 @@ def load_cachelinks(
         cachelinks[canonical_id] = descriptor
 
     def is_leaf_mapping(node: object) -> bool:
-        return isinstance(node, dict) and "url" in node
+        if not isinstance(node, dict):
+            return False
+        url = node.get("url")
+        if not url or not str(url).strip():
+            return False
+        return True
 
     def walk_tree(node: dict, path_segments: list[str], source_file: Path) -> None:
         for key, value in node.items():
