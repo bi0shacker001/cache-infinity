@@ -822,7 +822,7 @@ class AuthenticationManager:
             }
         
         # Check database credentials
-        if self.db_adapter.validate_credentials(username, password, purpose="webui"):
+        if self.db_manager.validate_credentials(username, password, purpose="webui"):
             # Create new session token
             token = self._create_session_token(username)
             return {

@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+<<<<<<< HEAD
 import itertools
 import json
+=======
+import base64
+import binascii
+import hashlib
+import itertools
+>>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
 import logging
 import os
 import shlex
 import threading
 from datetime import datetime
+<<<<<<< HEAD
 from pathlib import Path, PurePosixPath
+=======
+>>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List
 
-from pyftpdlib.authorizers import DummyAuthorizer
+from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
@@ -27,6 +37,7 @@ try:
 except ImportError:
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
+<<<<<<< HEAD
     class SSHServer:  # type: ignore[misc]
         pass
 
@@ -39,6 +50,22 @@ except ImportError:
 from core.config import FTPConfig
 from auth.credentials import AuthenticationManager
 from auth.credentials import SSHHostKeyAdmin, SSHHostKeyManager
+=======
+    class SSHServer:  # type: ignore[no-redef]
+        """Fallback SSHServer base when asyncssh is unavailable."""
+        pass
+
+    class SFTPServer:  # type: ignore[no-redef]
+        """Fallback SFTPServer base when asyncssh is unavailable."""
+        pass
+
+    class ChannelOpenError(Exception):  # type: ignore[no-redef]
+        """Fallback ChannelOpenError when asyncssh is unavailable."""
+        pass
+
+from core.config import FTPConfig
+from auth.credentials import AuthenticationManager, UserSSHKeyManager
+>>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
 from storage.datadir import DatadirRegistry
 from storage.vfs import VirtualFilesystem
 

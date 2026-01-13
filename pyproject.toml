@@ -17,7 +17,10 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pycurl>=7.45.0",
     "Flask>=3.0",
+<<<<<<< HEAD
     "rclone-python>=1.0.0",
+=======
+>>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
 ]
 
 [project.optional-dependencies]
