@@ -359,6 +359,17 @@ def _install_reinit_signal(callback: Callable[[str], None]) -> None:
         _LOGGER.debug("SIGUSR1 not supported on this platform")
 
 
+def _install_ctrl_r_handler(callback: Callable[[str], None]) -> None:
+    """Install Ctrl+R (SIGUSR2) handler for server reload/reinit."""
+    try:
+        signal.signal(signal.SIGUSR2, lambda signum, frame: callback("SIGUSR2"))
+        _LOGGER.info("Ctrl+R (SIGUSR2) handler installed for server reload")
+    except AttributeError:
+        _LOGGER.debug("SIGUSR2 not supported on this platform")
+    except ValueError:
+        _LOGGER.debug("SIGUSR2 signal already registered")
+
+
 def _install_shutdown_signal(callback: Callable[[str], None]) -> None:
     for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
         if sig is None:
@@ -421,6 +432,7 @@ def run_server(args) -> None:
     restart_argv = [sys.executable] + sys.argv
     reinit_callback = lambda reason: _trigger_reinit(reason, restart_argv, os.environ)
     _install_reinit_signal(reinit_callback)
+    _install_ctrl_r_handler(reinit_callback)  # Tie Ctrl+R to reinit
     def shutdown_callback(reason: str) -> None:
         _LOGGER.info("Shutdown requested: %s", reason)
         server.stop()
