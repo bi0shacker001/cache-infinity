@@ -267,25 +267,31 @@ function renderSettingsDetail() {
     </div>
     <div class="settings-block">
       <h4>Rclone</h4>
+      <p class="text-muted">Rclone settings are stored in the database and used by rclone-python.</p>
       <div class="form-grid">
-        <label>Enabled
-          <input type="checkbox" id="rclone-enabled" ${rclone.enabled ? 'checked' : ''}>
+        <label>Bandwidth Limit
+          <input type="text" id="rclone-bandwidth" value="${esc(rclone.bandwidth_limit || '')}" placeholder="10M">
         </label>
-        <label>Config Path
-          <input type="text" id="rclone-config-path" value="${esc(rclone.config_path || '')}" placeholder="/config/rclone.conf">
+        <label>Transfer Concurrency
+          <input type="number" id="rclone-transfer-concurrency" value="${esc(rclone.transfer_concurrency ?? '')}" step="1">
         </label>
-        <label>RC URL
-          <input type="text" id="rclone-rc-url" value="${esc(rclone.rc_url || '')}" placeholder="http://127.0.0.1:5572">
+        <label>Checkers
+          <input type="number" id="rclone-checkers" value="${esc(rclone.checkers ?? '')}" step="1">
         </label>
-        <label>RC User
-          <input type="text" id="rclone-rc-user" value="${esc(rclone.rc_user || '')}">
+        <label>Timeout (seconds)
+          <input type="number" id="rclone-timeout" value="${esc(rclone.timeout ?? '')}" step="1">
         </label>
-        <label>RC Pass
-          <input type="password" id="rclone-rc-pass" value="${esc(rclone.rc_pass || '')}">
+        <label>Retries
+          <input type="number" id="rclone-retries" value="${esc(rclone.retries ?? '')}" step="1">
+        </label>
+        <label class="full-row">Remotes (JSON)
+          <textarea id="rclone-remotes" rows="6" placeholder="{\"remote\": {\"type\": \"s3\"}}">${esc(
+            JSON.stringify(rclone.remotes || {}, null, 2)
+          )}</textarea>
         </label>
       </div>
       <div class="panel">
-        <div class="panel-subtitle">Detected remotes (via rclone rc)</div>
+        <div class="panel-subtitle">Detected remotes (rclone-python)</div>
         <div id="rclone-remote-list" class="tag-list">Loading…</div>
         <button class="btn btn-secondary btn-small" type="button" id="rclone-remotes-refresh">Refresh remotes</button>
         <div id="rclone-remote-status" class="status-msg" style="margin-top:0.25rem;"></div>
@@ -610,6 +616,15 @@ function renderRcloneRemotes() {
 }
 
 function collectSettingsDetail() {
+  let remotesValue = null;
+  const remotesRaw = document.getElementById('rclone-remotes')?.value.trim() || '';
+  if (remotesRaw) {
+    try {
+      remotesValue = JSON.parse(remotesRaw);
+    } catch (err) {
+      remotesValue = null;
+    }
+  }
   return {
     paths: collectDatadirs(),
     staging: {
@@ -621,13 +636,19 @@ function collectSettingsDetail() {
       max_zip_total_gb: parseNumber(document.getElementById('limit-zip').value),
       one_zip_cache_at_a_time: document.getElementById('limit-one-zip').checked,
     },
-    rclone: {
-      enabled: document.getElementById('rclone-enabled').checked,
-      config_path: document.getElementById('rclone-config-path').value.trim(),
-      rc_url: document.getElementById('rclone-rc-url').value.trim(),
-      rc_user: document.getElementById('rclone-rc-user').value.trim(),
-      rc_pass: document.getElementById('rclone-rc-pass').value.trim(),
-    },
+    rclone: (() => {
+      const payload = {
+        bandwidth_limit: document.getElementById('rclone-bandwidth').value.trim(),
+        transfer_concurrency: parseNumber(document.getElementById('rclone-transfer-concurrency').value),
+        checkers: parseNumber(document.getElementById('rclone-checkers').value),
+        timeout: parseNumber(document.getElementById('rclone-timeout').value),
+        retries: parseNumber(document.getElementById('rclone-retries').value),
+      };
+      if (remotesValue !== null) {
+        payload.remotes = remotesValue;
+      }
+      return payload;
+    })(),
     cookies: collectCookieConfigs(),
     shares: collectShareConfigs(),
     tls: collectTlsDetail(),

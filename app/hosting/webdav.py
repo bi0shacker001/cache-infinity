@@ -6,8 +6,9 @@ import hashlib
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 try:  # pragma: no cover - optional dependency
     from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
@@ -35,6 +36,73 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when optional depende
 
 _logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from auth.credentials import AuthenticationManager
+    from cache.cachelinks import CachelinkIndex
+    from core.config import Settings
+    from core.services import ServiceManager, WebDAVService, WebUIService
+    from db.dbmanage import DatabaseManager
+    from net.fetcher import Fetcher
+    from storage.datadir import DatadirRegistry
+    from storage.staging import StagingArea
+
+
+@dataclass
+class HostingContext:
+    """Runtime dependencies required by the WebDAV provider."""
+
+    settings: "Settings"
+    index_db: "DatabaseManager"
+    datadir_registry: "DatadirRegistry"
+    staging: "StagingArea"
+    cachelinks: "CachelinkIndex"
+    fetcher: "Fetcher"
+    auth_manager: "AuthenticationManager | None" = None
+
+
+def _current_webdav_app(service_manager: "ServiceManager"):
+    webdav_service: "WebDAVService" = service_manager.context["webdav"]
+    return webdav_service.app
+
+
+def _current_webui_app(service_manager: "ServiceManager"):
+    webui_service: "WebUIService" = service_manager.context["webui"]
+    return webui_service.app
+
+
+class _ReloadableApp:
+    """WSGI wrapper that delegates to the current CacheInfinity WsgiDAV app."""
+
+    def __init__(self, service_manager: "ServiceManager") -> None:
+        self._service_manager = service_manager
+
+    def __call__(self, environ, start_response):
+        app = _current_webdav_app(self._service_manager)
+        try:
+            return app(environ, start_response)
+        except Exception:
+            path = environ.get("PATH_INFO", "?")
+            _logger.exception("Unhandled error when serving %s", path)
+            start_response("500 Internal Server Error", [("Content-Type", "text/plain")])
+            return [b"Internal Server Error"]
+
+
+class _UIReloadableApp:
+    """WSGI wrapper for the Web UI that picks up new state on reloads."""
+
+    def __init__(self, service_manager: "ServiceManager") -> None:
+        self._service_manager = service_manager
+
+    def __call__(self, environ, start_response):
+        app = _current_webui_app(self._service_manager)
+        try:
+            return app(environ, start_response)
+        except Exception:
+            path = environ.get("PATH_INFO", "?")
+            _logger.exception("Unhandled error when serving %s", path)
+            start_response("500 Internal Server Error", [("Content-Type", "text/plain")])
+            return [b"Internal Server Error"]
+
 
 def _normalize_prop_name(name: Any) -> str:
     if isinstance(name, tuple) and len(name) == 2:
@@ -57,14 +125,39 @@ def _split_zip_subfolder(subfolder: str) -> tuple[str | None, str]:
     return None, normalized
 
 
+def build_user_mapping(settings) -> dict[str, dict[str, dict[str, str]]]:
+    """Build WsgiDAV user mapping based on share auth configuration."""
+    mapping: dict[str, dict[str, dict[str, str]]] = {}
+    for share in settings.shares.values():
+        share_users: dict[str, dict[str, str]] = {}
+        for username, policy in share.users.items():
+            if not policy.login:
+                continue
+            if username == "anonymous":
+                share_users[username] = {"auth": "anonymous"}
+                continue
+            if settings.auth.proxy_header.enabled:
+                share_users[username] = {"auth": "external"}
+                continue
+            if settings.auth.ldap.enabled:
+                share_users[username] = {"auth": "ldap"}
+                continue
+            if settings.auth.oidc.enabled:
+                share_users[username] = {"auth": "oidc"}
+                continue
+            share_users[username] = {"auth": "local"}
+        mapping[share.frontend_folder.as_posix()] = share_users
+    return mapping
+
+
 class CacheInfinityDomainController(BaseDomainController):
     """Domain controller that validates WebDAV users against the database."""
 
     def __init__(self, wsgidav_app, config):
         super().__init__(wsgidav_app, config)
         self._config = config
-        self._service = config.get("cacheinfinity_service")
-        self._auth_manager = getattr(self._service, "auth_manager", None)
+        self._context = config.get("cacheinfinity_context")
+        self._auth_manager = getattr(self._context, "auth_manager", None)
         self._user_mapping = config.get("simple_dc", {}).get("user_mapping", {})
 
     def getDomainRealm(self, path_info, environ):
@@ -92,7 +185,7 @@ class CacheInfinityDomainController(BaseDomainController):
 
     def isValidUser(self, realm, username, password, environ):
         entry = self._get_user_entry(realm, username)
-        if not entry or not self._service:
+        if not entry or not self._context:
             return False
         mode = entry.get("auth", "local")
         if mode == "anonymous":
@@ -100,19 +193,19 @@ class CacheInfinityDomainController(BaseDomainController):
         if mode == "external":
             return True
         if mode == "ldap":
-            return bool(self._service.index_db.validate_ldap_credentials(username, password, purpose="webdav"))
+            return bool(self._context.index_db.validate_ldap_credentials(username, password, purpose="webdav"))
         if mode == "oidc":
-            return bool(self._service.index_db.validate_oidc_credentials(username, password))
+            return bool(self._context.index_db.validate_oidc_credentials(username, password))
         if self._auth_manager:
             return bool(self._auth_manager.authenticate_user(username, password, purpose="webdav"))
-        return bool(self._service.index_db.validate_credentials(username, password, purpose="webdav"))
+        return bool(self._context.index_db.validate_credentials(username, password, purpose="webdav"))
 
     def basic_authentication(self, realm, username, password, environ):
         return self.isValidUser(realm, username, password, environ)
 
     def digest_authentication(self, realm, username, environ):
         entry = self._get_user_entry(realm, username)
-        if not entry or not self._service:
+        if not entry or not self._context:
             return False
         if entry.get("auth") in {"anonymous", "external"}:
             return False
@@ -153,9 +246,10 @@ class CacheInfinityDomainController(BaseDomainController):
 class WebDAVProvider(DAVProvider):
     """Custom WebDAV provider for CacheInfinity."""
 
-    def __init__(self, service):
+    def __init__(self, context: HostingContext):
         super().__init__()
-        self.service = service
+        self.context = context
+        self._zip_cache_lock = threading.Lock()
         _logger.info("WebDAV provider initialized")
 
     def get_resource_inst(self, path: str, environ: Dict[str, Any]) -> Optional[Any]:
@@ -175,17 +269,17 @@ class WebDAVProvider(DAVProvider):
         if datadir_rel is None:
             return None
 
-        datadir_path = self.service.datadir_registry.primary.resolve(datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(datadir_rel)
         if datadir_path.exists():
             cache_state = "local-only"
-            if self.service.index_db.lookup_backend_checksum(datadir_rel):
+            if self.context.index_db.lookup_backend_checksum(datadir_rel):
                 cache_state = "cached"
             if datadir_path.is_dir():
                 return DatadirDirectoryResource(
                     path,
                     environ,
                     self,
-                    self.service,
+                    self.context,
                     share,
                     share_rel,
                     datadir_rel,
@@ -197,7 +291,7 @@ class WebDAVProvider(DAVProvider):
                 path,
                 environ,
                 self,
-                self.service,
+                self.context,
                 datadir_rel,
                 cache_state=cache_state,
             )
@@ -222,7 +316,7 @@ class WebDAVProvider(DAVProvider):
                     path,
                     environ,
                     self,
-                    self.service,
+                    self.context,
                     share,
                     share_rel,
                     datadir_rel,
@@ -236,7 +330,7 @@ class WebDAVProvider(DAVProvider):
                 path,
                 environ,
                 self,
-                self.service,
+                self.context,
                 share,
                 share_rel,
                 datadir_rel,
@@ -252,7 +346,7 @@ class WebDAVProvider(DAVProvider):
                 path,
                 environ,
                 self,
-                self.service,
+                self.context,
                 share,
                 share_rel,
                 datadir_rel,
@@ -270,7 +364,7 @@ class WebDAVProvider(DAVProvider):
                 path,
                 environ,
                 self,
-                self.service,
+                self.context,
                 descriptor,
                 datadir_rel,
                 base_rel,
@@ -374,7 +468,7 @@ class WebDAVProvider(DAVProvider):
 
     def _resolve_share(self, path: str) -> Optional[tuple[Any, PurePosixPath, str]]:
         candidates = []
-        for share in self.service.settings.shares.values():
+        for share in self.context.settings.shares.values():
             prefix = share.frontend_folder.as_posix()
             if prefix != "/" and prefix.endswith("/"):
                 prefix = prefix.rstrip("/")
@@ -419,7 +513,7 @@ class WebDAVProvider(DAVProvider):
                 path,
                 environ,
                 self,
-                self.service,
+                self.context,
                 share,
                 share_rel,
                 datadir_rel,
@@ -431,7 +525,7 @@ class WebDAVProvider(DAVProvider):
             path,
             environ,
             self,
-            self.service,
+            self.context,
             datadir_rel,
             cache_state="local-only",
         )
@@ -459,7 +553,7 @@ class WebDAVProvider(DAVProvider):
         datadir_rel: PurePosixPath,
     ) -> list[str]:
         try:
-            datadir_path = self.service.datadir_registry.primary.resolve(datadir_rel)
+            datadir_path = self.context.datadir_registry.primary.resolve(datadir_rel)
             if not datadir_path.exists() or not datadir_path.is_dir():
                 return []
             members = []
@@ -495,7 +589,7 @@ class WebDAVProvider(DAVProvider):
         base = share.datadir_folder.as_posix().strip("/")
         base_path = PurePosixPath(base) if base else PurePosixPath("")
         matches = []
-        for descriptor in self.service.cachelinks.cachelinks.values():
+        for descriptor in self.context.cachelinks.cachelinks.values():
             mount_path = self._descriptor_mount_path(descriptor)
             if self._is_prefix(base_path, mount_path):
                 matches.append(descriptor)
@@ -543,7 +637,7 @@ class WebDAVProvider(DAVProvider):
         return best, PurePosixPath(*remainder) if remainder else PurePosixPath("")
 
     def _lookup_cachelink_entry(self, descriptor, subpath: PurePosixPath) -> tuple[Any | None, bool]:
-        entries = self.service.index_db.list_entries_for_descriptor(descriptor)
+        entries = self.context.index_db.list_entries_for_descriptor(descriptor)
         normalized = self._normalize_entry_path(subpath)
         has_child = False
         for entry in entries:
@@ -555,7 +649,7 @@ class WebDAVProvider(DAVProvider):
         return (None, has_child)
 
     def _cachelink_children(self, descriptor, subpath: PurePosixPath) -> dict[str, bool]:
-        entries = self.service.index_db.list_entries_for_descriptor(descriptor)
+        entries = self.context.index_db.list_entries_for_descriptor(descriptor)
         normalized = self._normalize_entry_path(subpath)
         children: dict[str, bool] = {}
         normalized_parts = self._path_parts(normalized)
@@ -614,7 +708,7 @@ class DatadirFileResource(DAVNonCollection):
         super().__init__(path, environ)
         self.path = path
         self.provider = provider
-        self.service = service
+        self.context = service
         self.datadir_rel = datadir_rel
         self.cache_state = cache_state
         self._write_handle = None
@@ -623,7 +717,7 @@ class DatadirFileResource(DAVNonCollection):
         return self._resolve_path().is_file()
 
     def _resolve_path(self):
-        return self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        return self.context.datadir_registry.primary.resolve(self.datadir_rel)
 
     def get_content_length(self) -> int:
         try:
@@ -686,7 +780,7 @@ class DatadirFileResource(DAVNonCollection):
         src_path = self._resolve_path()
         if not src_path.exists():
             raise RuntimeError("Source file does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         dest_path_obj.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.copy2(src_path, dest_path_obj)
@@ -698,7 +792,7 @@ class DatadirFileResource(DAVNonCollection):
         src_path = self._resolve_path()
         if not src_path.exists():
             raise RuntimeError("Source file does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         dest_path_obj.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.move(str(src_path), str(dest_path_obj))
@@ -736,7 +830,7 @@ class CachelinkFileResource(DAVNonCollection):
         super().__init__(path, environ)
         self.path = path
         self.provider = provider
-        self.service = service
+        self.context = service
         self.descriptor = descriptor
         self.datadir_rel = datadir_rel
         self.base_rel = base_rel
@@ -746,7 +840,7 @@ class CachelinkFileResource(DAVNonCollection):
         self._write_handle = None
 
     def exists(self):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         return datadir_path.exists() or self.entry is not None
 
     def get_content_length(self) -> int:
@@ -768,7 +862,7 @@ class CachelinkFileResource(DAVNonCollection):
 
     def get_content(self):
         try:
-            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
             if datadir_path.exists():
                 self._record_access()
                 return open(datadir_path, "rb")
@@ -784,8 +878,8 @@ class CachelinkFileResource(DAVNonCollection):
             if not remote_url:
                 _logger.error("Could not build remote URL for %s", self.path)
                 return None
-            staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
-            result = self.service.fetcher.download_file(
+            staging_path = self.context.staging.reserve_tempfile(self.subpath.name or "download")
+            result = self.context.fetcher.download_file(
                 remote_url,
                 staging_path,
                 url_handler=self.descriptor.url_handler,
@@ -815,7 +909,7 @@ class CachelinkFileResource(DAVNonCollection):
         return mime_type or "application/octet-stream"
 
     def begin_write(self, content_type=None):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         datadir_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_handle = open(datadir_path, "wb")
         return self._write_handle
@@ -826,14 +920,14 @@ class CachelinkFileResource(DAVNonCollection):
             self._write_handle = None
         if with_errors:
             try:
-                datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+                datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
                 if datadir_path.exists():
                     datadir_path.unlink()
             except Exception:
                 return
 
     def delete(self):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not datadir_path.exists():
             raise RuntimeError("File does not exist")
         datadir_path.unlink()
@@ -842,10 +936,10 @@ class CachelinkFileResource(DAVNonCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source file does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         dest_path_obj.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.copy2(src_path, dest_path_obj)
@@ -854,10 +948,10 @@ class CachelinkFileResource(DAVNonCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source file does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         dest_path_obj.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         shutil.move(str(src_path), str(dest_path_obj))
@@ -865,12 +959,12 @@ class CachelinkFileResource(DAVNonCollection):
     def get_property_value(self, name: Any):
         key = _normalize_prop_name(name)
         if key == "{urn:cacheinfinity}cache-state":
-            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
             if not datadir_path.exists():
                 return "remote"
-            return "cached" if self.service.index_db.lookup_backend_checksum(self.datadir_rel) else "local-only"
+            return "cached" if self.context.index_db.lookup_backend_checksum(self.datadir_rel) else "local-only"
         if key == "{urn:cacheinfinity}size-on-disk":
-            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
             try:
                 return str(datadir_path.stat().st_size) if datadir_path.exists() else "0"
             except Exception:
@@ -897,18 +991,18 @@ class CachelinkFileResource(DAVNonCollection):
 
     def _record_access(self) -> None:
         try:
-            state = self.service.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
+            state = self.context.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
         except Exception:
             return
         relative_path = self.subpath.as_posix().lstrip("/")
         if not relative_path:
             return
-        self.service.index_db.record_access(state.id, relative_path)
+        self.context.index_db.record_access(state.id, relative_path)
         parent = PurePosixPath(relative_path).parent
         for _ in range(2):
             if str(parent) == ".":
                 break
-            self.service.index_db.record_access(state.id, parent.as_posix())
+            self.context.index_db.record_access(state.id, parent.as_posix())
             parent = parent.parent
 
     def _mark_reindex_on_failure(self, error_message: str) -> None:
@@ -916,8 +1010,8 @@ class CachelinkFileResource(DAVNonCollection):
         if "404" not in lowered and "5xx" not in lowered and "http 5" not in lowered:
             return
         try:
-            state = self.service.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
-            self.service.index_db.mark_needs_full(state.id)
+            state = self.context.index_db.ensure_target(self.descriptor, self.descriptor.remote_listing_url)
+            self.context.index_db.mark_needs_full(state.id)
         except Exception:
             return
 
@@ -927,7 +1021,7 @@ class CachelinkFileResource(DAVNonCollection):
             with open(datadir_path, "rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     sha256.update(chunk)
-            self.service.index_db.record_backend_checksum(
+            self.context.index_db.record_backend_checksum(
                 self.datadir_rel,
                 "sha256",
                 sha256.hexdigest(),
@@ -937,8 +1031,10 @@ class CachelinkFileResource(DAVNonCollection):
             return
 
     def _handle_zip_download(self, datadir_path: "Path"):
+        import shutil
+        import tempfile
         import zipfile
-        limits = self.service.settings.limits
+        limits = self.context.settings.limits
         max_bytes = max(0, limits.max_zip_total_gb) * 1024**3
         zip_path, inner = _split_zip_subfolder(self.descriptor.subfolder)
         if not zip_path:
@@ -947,10 +1043,7 @@ class CachelinkFileResource(DAVNonCollection):
         base = self.descriptor.download_root.rstrip("/")
         remote_zip_url = f"{base}/{zip_path}"
 
-        lock = getattr(self.service, "_zip_cache_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self.service._zip_cache_lock = lock
+        lock = self.provider._zip_cache_lock
         use_whole_zip = True
         acquired = False
         if limits.one_zip_cache_at_a_time:
@@ -961,14 +1054,15 @@ class CachelinkFileResource(DAVNonCollection):
         if not use_whole_zip:
             return self._download_single_file(datadir_path)
 
-        staging_zip = self.service.staging.reserve_tempfile("zip")
-        result = self.service.fetcher.download_file(
+        staging_zip = self.context.staging.reserve_tempfile("zip")
+        result = self.context.fetcher.download_file(
             remote_zip_url,
             staging_zip,
             url_handler=self.descriptor.url_handler,
         )
         if not result.success:
-            lock.release()
+            if acquired:
+                lock.release()
             _logger.error("Failed to download zip %s: %s", remote_zip_url, result.error_message)
             self._mark_reindex_on_failure(result.error_message or "")
             try:
@@ -988,6 +1082,11 @@ class CachelinkFileResource(DAVNonCollection):
             with zipfile.ZipFile(staging_zip, "r") as archive:
                 members = [info for info in archive.infolist() if not info.is_dir()]
                 prefix = inner.strip("/") + "/" if inner else ""
+                requested_member = None
+                relative = self.subpath.as_posix().lstrip("/")
+                if relative:
+                    requested_member = f"{prefix}{relative}" if prefix else relative
+
                 filtered = [
                     info for info in members if info.filename.startswith(prefix)
                 ]
@@ -997,6 +1096,20 @@ class CachelinkFileResource(DAVNonCollection):
                     release_lock = lock if acquired else None
                     return self._download_single_file(datadir_path, cleanup_path=staging_zip, release_lock=release_lock)
 
+                served_handle = None
+                if requested_member:
+                    for info in filtered:
+                        if info.filename == requested_member:
+                            served_handle = tempfile.NamedTemporaryFile(
+                                prefix="ci-zip-member-",
+                                dir=self.context.staging.base_path,
+                                delete=True,
+                            )
+                            with archive.open(info) as src:
+                                shutil.copyfileobj(src, served_handle)
+                            served_handle.seek(0)
+                            break
+
                 for info in filtered:
                     relative_name = info.filename[len(prefix):] if prefix else info.filename
                     if not relative_name:
@@ -1005,7 +1118,7 @@ class CachelinkFileResource(DAVNonCollection):
                     if rel_path.is_absolute() or ".." in rel_path.parts:
                         continue
                     dest_rel = self.base_rel / rel_path
-                    dest_path = self.service.datadir_registry.primary.resolve(dest_rel)
+                    dest_path = self.context.datadir_registry.primary.resolve(dest_rel)
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info) as src, open(dest_path, "wb") as dst:
                         for chunk in iter(lambda: src.read(1024 * 1024), b""):
@@ -1015,6 +1128,8 @@ class CachelinkFileResource(DAVNonCollection):
             if acquired:
                 lock.release()
                 acquired = False
+            if served_handle is not None:
+                return served_handle
             return open(datadir_path, "rb") if datadir_path.exists() else None
         finally:
             try:
@@ -1043,8 +1158,8 @@ class CachelinkFileResource(DAVNonCollection):
         remote_url = self._build_remote_url()
         if not remote_url:
             return None
-        staging_path = self.service.staging.reserve_tempfile(self.subpath.name or "download")
-        result = self.service.fetcher.download_file(
+        staging_path = self.context.staging.reserve_tempfile(self.subpath.name or "download")
+        result = self.context.fetcher.download_file(
             remote_url,
             staging_path,
             url_handler=self.descriptor.url_handler,
@@ -1088,7 +1203,7 @@ class CachelinkDirectoryResource(DAVCollection):
         super().__init__(path, environ)
         self.path = path
         self.provider = provider
-        self.service = service
+        self.context = service
         self.share = share
         self.share_rel = share_rel
         self.datadir_rel = datadir_rel
@@ -1112,7 +1227,7 @@ class CachelinkDirectoryResource(DAVCollection):
 
     def get_member_names(self):
         members = set()
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if datadir_path.exists() and datadir_path.is_dir():
             for item in datadir_path.iterdir():
                 members.add(item.name)
@@ -1145,7 +1260,7 @@ class CachelinkDirectoryResource(DAVCollection):
     def create_collection(self, name):
         if not name:
             raise RuntimeError("Folder name required")
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         target = datadir_path / name
         target.mkdir(parents=True, exist_ok=False)
 
@@ -1155,13 +1270,13 @@ class CachelinkDirectoryResource(DAVCollection):
             self.path.rstrip("/") + "/" + name,
             self.environ,
             self.provider,
-            self.service,
+            self.context,
             child_rel,
             cache_state="local-only",
         )
 
     def delete(self):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not datadir_path.exists():
             raise RuntimeError("Directory does not exist")
         if any(datadir_path.iterdir()):
@@ -1172,10 +1287,10 @@ class CachelinkDirectoryResource(DAVCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source directory does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         import shutil
         shutil.copytree(src_path, dest_path_obj, dirs_exist_ok=True)
 
@@ -1183,10 +1298,10 @@ class CachelinkDirectoryResource(DAVCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source directory does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         import shutil
         shutil.move(str(src_path), str(dest_path_obj))
 
@@ -1219,7 +1334,7 @@ class DatadirDirectoryResource(DAVCollection):
         super().__init__(path, environ)
         self.path = path
         self.provider = provider
-        self.service = service
+        self.context = service
         self.share = share
         self.share_rel = share_rel
         self.datadir_rel = datadir_rel
@@ -1228,7 +1343,7 @@ class DatadirDirectoryResource(DAVCollection):
         self.cache_state = cache_state
 
     def exists(self):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         return datadir_path.exists() and datadir_path.is_dir()
 
     def get_content_length(self) -> int:
@@ -1236,7 +1351,7 @@ class DatadirDirectoryResource(DAVCollection):
 
     def get_last_modified(self) -> int:
         try:
-            datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+            datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
             return int(datadir_path.stat().st_mtime)
         except Exception:
             return int(time.time())
@@ -1246,7 +1361,7 @@ class DatadirDirectoryResource(DAVCollection):
 
     def get_member_names(self):
         members = set()
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if datadir_path.exists() and datadir_path.is_dir():
             for item in datadir_path.iterdir():
                 members.add(item.name)
@@ -1275,7 +1390,7 @@ class DatadirDirectoryResource(DAVCollection):
     def create_collection(self, name):
         if not name:
             raise RuntimeError("Folder name required")
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         target = datadir_path / name
         target.mkdir(parents=True, exist_ok=False)
 
@@ -1285,13 +1400,13 @@ class DatadirDirectoryResource(DAVCollection):
             self.path.rstrip("/") + "/" + name,
             self.environ,
             self.provider,
-            self.service,
+            self.context,
             child_rel,
             cache_state="local-only",
         )
 
     def delete(self):
-        datadir_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        datadir_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not datadir_path.exists():
             raise RuntimeError("Directory does not exist")
         if any(datadir_path.iterdir()):
@@ -1302,10 +1417,10 @@ class DatadirDirectoryResource(DAVCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source directory does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         import shutil
         shutil.copytree(src_path, dest_path_obj, dirs_exist_ok=True)
 
@@ -1313,10 +1428,10 @@ class DatadirDirectoryResource(DAVCollection):
         dest_rel = self.provider._resolve_datadir_rel_for_write(dest_path, self.environ)
         if dest_rel is None:
             raise RuntimeError("Destination is not writable")
-        src_path = self.service.datadir_registry.primary.resolve(self.datadir_rel)
+        src_path = self.context.datadir_registry.primary.resolve(self.datadir_rel)
         if not src_path.exists():
             raise RuntimeError("Source directory does not exist")
-        dest_path_obj = self.service.datadir_registry.primary.resolve(dest_rel)
+        dest_path_obj = self.context.datadir_registry.primary.resolve(dest_rel)
         import shutil
         shutil.move(str(src_path), str(dest_path_obj))
 

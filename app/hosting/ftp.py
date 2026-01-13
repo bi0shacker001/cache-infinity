@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
 import logging
 import os
+import shlex
 import threading
+from datetime import datetime
+from pathlib import Path, PurePosixPath
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any, List
 
@@ -22,10 +27,18 @@ try:
 except ImportError:
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
+    class SSHServer:  # type: ignore[misc]
+        pass
+
+    class SFTPServer:  # type: ignore[misc]
+        pass
+
+    class ChannelOpenError(Exception):  # type: ignore[misc]
+        pass
 
 from core.config import FTPConfig
 from auth.credentials import AuthenticationManager
-from auth.ssh_keys import UserSSHKeyManager
+from auth.credentials import SSHHostKeyAdmin, SSHHostKeyManager
 from storage.datadir import DatadirRegistry
 from storage.vfs import VirtualFilesystem
 
@@ -305,16 +318,29 @@ class FTPService:
             return False
         
         try:
-            # Create SFTP handler
-            sftp_handler = CacheInfinitySFTPHandler(
-                self.auth_manager, self.datadir_registry, self.ftp_config
-            )
-            
+            ssh_key_manager = None
+            if self.auth_manager and getattr(self.auth_manager, "db_adapter", None):
+                ssh_key_manager = SSHHostKeyManager(self.auth_manager.db_adapter)
+
+            host_keys = ssh_key_manager.load_or_generate_host_keys() if ssh_key_manager else []
+            if not host_keys:
+                raise SFTPServiceError("No SSH host keys available for SFTP server")
+
+            def _sftp_factory(conn):
+                return CacheInfinitySFTPHandler(
+                    conn, self.auth_manager, self.datadir_registry, self.ftp_config
+                )
+
+            def _ssh_factory():
+                return CacheInfinitySSHServer(self.auth_manager, ssh_key_manager)
+
             # Start SFTP server in a separate thread
             self._sftp_task = asyncio.create_task(
                 asyncssh.create_server(
-                    lambda: sftp_handler,
-                    host, port
+                    _ssh_factory,
+                    host, port,
+                    server_host_keys=[str(path) for path in host_keys],
+                    sftp_factory=_sftp_factory,
                 )
             )
             
@@ -385,31 +411,38 @@ class FTPService:
 class CacheInfinitySFTPHandler(SFTPServer):
     """Custom SFTP handler that integrates with CacheInfinity's permission system."""
 
-    def __init__(self, auth_manager: AuthenticationManager,
+    def __init__(self, conn,
+                 auth_manager: AuthenticationManager,
                  datadir_registry: DatadirRegistry,
                  ftp_config: FTPConfig):
         """Initialize SFTP handler with CacheInfinity integration.
         
         Args:
+            conn: AsyncSSH connection
             auth_manager: AuthenticationManager for permission checks
             datadir_registry: DatadirRegistry for filesystem operations
             ftp_config: FTP configuration
         """
+        super().__init__(conn)
         self.auth_manager = auth_manager
         self.datadir_registry = datadir_registry
         self.ftp_config = ftp_config
         self._logger = logging.getLogger(__name__)
         self.username = None
+        self._open_handles = {}
+        self._handle_counter = itertools.count(1)
+        self._share_mode = "fallback"
+        self._shares = []
+        self._share_lookup = {}
         
         # Initialize SSH key manager for virtual authorized_keys
-        self.ssh_key_manager = None
-        if hasattr(datadir_registry, 'index_db'):
-            self.ssh_key_manager = UserSSHKeyManager(datadir_registry.index_db)
+        self.ssh_key_manager = getattr(self.auth_manager, "user_ssh_key_manager", None)
 
     def begin_session(self, username: str = None, *args, **kwargs) -> None:
         """Begin SFTP session for authenticated user."""
         self._logger.info("SFTP session started for user: %s", username)
         self.username = username
+        self._refresh_user_shares()
         super().begin_session(username, *args, **kwargs)
 
     def end_session(self) -> None:
@@ -429,19 +462,31 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def list_folder(self, path: str) -> List[Dict[str, Any]]:
         """List contents of a directory."""
         try:
-            # Use VFS to list directory contents
-            entries = self._list_directory_vfs(path)
-            
-            # Add virtual .ssh directory if this is the user's effective root
-            if self._is_user_effective_root(path):
-                entries.append({
-                    'name': '.ssh',
-                    'is_dir': True,
-                    'size': 0,
-                    'mtime': datetime.now(),
-                    'cache_state': 'virtual',
-                    'source': 'virtual'
-                })
+            if not self._check_read_permission(path):
+                raise PermissionError(f"Read permission denied for {path}")
+
+            normalized_path = self.canonicalize(path)
+            if normalized_path.startswith('.ssh/') and not self._is_virtual_ssh_path(path):
+                raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
+
+            if self._is_virtual_ssh_path(path):
+                if path.endswith('authorized_keys'):
+                    raise NotADirectoryError(path)
+                entries = [self._authorized_keys_entry()]
+            else:
+                # Use VFS to list directory contents
+                entries = self._list_directory_vfs(path)
+
+                # Add virtual .ssh directory if this is the user's effective root
+                if self._is_user_effective_root(path):
+                    entries.append({
+                        'name': '.ssh',
+                        'is_dir': True,
+                        'size': 0,
+                        'mtime': datetime.now(),
+                        'cache_state': 'virtual',
+                        'source': 'virtual'
+                    })
             
             # Convert to SFTP format
             sftp_entries = []
@@ -469,21 +514,35 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _list_directory_vfs(self, path: str) -> List[Dict[str, Any]]:
         """List directory using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            share_ctx = self._resolve_share_path(path)
+            if share_ctx and share_ctx.get("root_virtual"):
+                return [
+                    {
+                        'name': share["name"],
+                        'path': share["name"],
+                        'is_dir': True,
+                        'size': 0,
+                        'mtime': datetime.now(),
+                        'cache_state': 'virtual',
+                        'source': 'virtual'
+                    }
+                    for share in self._shares
+                ]
+
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return []
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
-            
+
             if not os.path.exists(full_path):
                 return []
-            
+
             entries = []
             for item in os.listdir(full_path):
+                if item == ".ssh":
+                    continue
                 item_path = os.path.join(full_path, item)
                 stat = os.stat(item_path)
-                
+
                 entries.append({
                     'name': item,
                     'path': os.path.join(path, item),
@@ -493,7 +552,7 @@ class CacheInfinitySFTPHandler(SFTPServer):
                     'cache_state': 'cached' if not os.path.isdir(item_path) else 'local-only',
                     'source': 'local'
                 })
-            
+
             return entries
             
         except Exception as e:
@@ -503,6 +562,23 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def stat(self, path: str) -> Dict[str, Any]:
         """Get file/directory status."""
         try:
+            if not self._check_read_permission(path):
+                raise PermissionError(f"Read permission denied for {path}")
+
+            normalized_path = self.canonicalize(path)
+            if normalized_path.startswith('.ssh/') and not self._is_virtual_ssh_path(path):
+                raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
+
+            if self._share_mode == "multi" and normalized_path in ("", ".", "/"):
+                return {
+                    'size': 0,
+                    'uid': 1000,
+                    'gid': 1000,
+                    'permissions': 0o755,
+                    'atime': int(datetime.now().timestamp()),
+                    'mtime': int(datetime.now().timestamp())
+                }
+
             # Handle virtual .ssh directory
             if self._is_virtual_ssh_path(path):
                 if path.endswith('authorized_keys'):
@@ -516,6 +592,8 @@ class CacheInfinitySFTPHandler(SFTPServer):
                         'atime': int(datetime.now().timestamp()),
                         'mtime': int(datetime.now().timestamp())
                     }
+                if self.canonicalize(path).startswith('.ssh/'):
+                    raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
                 else:
                     # Virtual .ssh directory
                     return {
@@ -560,16 +638,26 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _get_file_info_vfs(self, path: str) -> Optional[Dict[str, Any]]:
         """Get file info using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            share_ctx = self._resolve_share_path(path)
+            if share_ctx and share_ctx.get("root_virtual"):
+                return {
+                    'path': path,
+                    'name': os.path.basename(path) or ".",
+                    'is_dir': True,
+                    'size': 0,
+                    'mtime': datetime.now(),
+                    'cache_state': 'virtual',
+                    'source': 'virtual',
+                    'physical_path': None
+                }
+
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return None
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
-            
+
             if not os.path.exists(full_path):
                 return None
-            
+
             stat = os.stat(full_path)
             
             return {
@@ -590,24 +678,24 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def open(self, path: str, pflags: int, attrs: Dict[str, Any]) -> str:
         """Open a file for reading/writing."""
         try:
+            needs_write = bool(pflags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))
+            needs_read = not (pflags & os.O_WRONLY)
+            if needs_read and not self._check_read_permission(path):
+                raise PermissionError(f"Read permission denied for {path}")
+            if needs_write and not self._check_write_permission(path):
+                raise PermissionError(f"Write permission denied for {path}")
+
             # Handle virtual .ssh/authorized_keys file
             if self._is_virtual_ssh_path(path) and path.endswith('authorized_keys'):
                 # Check permissions for authorized_keys
-                if not self._check_write_permission(path) and (pflags & os.O_WRONLY or pflags & os.O_RDWR):
-                    raise PermissionError(f"Write permission denied for {path}")
-                
                 # For authorized_keys, we always return a virtual handle
                 # The actual content is managed through the database
-                return self._create_file_handle(path, self._get_authorized_keys_content().encode('utf-8'))
-            
+                return self._create_file_handle(path)
+
             # Handle masking of real .ssh directories
             if self._is_real_ssh_path(path):
                 # Deny access to real .ssh directories
                 raise PermissionError(f"Access to real .ssh directory is not allowed: {path}")
-            
-            # Check permissions for regular files
-            if not self._check_write_permission(path) and (pflags & os.O_WRONLY or pflags & os.O_RDWR):
-                raise PermissionError(f"Write permission denied for {path}")
             
             # Use VFS to read file content
             content = self._read_file_vfs(path)
@@ -618,23 +706,33 @@ class CacheInfinitySFTPHandler(SFTPServer):
                 else:
                     raise FileNotFoundError(f"File not found: {path}")
             
-            return self._create_file_handle(path, content)
+            return self._create_file_handle(path)
             
         except Exception as e:
             self._logger.error("Error opening file %s: %s", path, e)
             raise OSError(f"Cannot open file: {e}")
 
-    def _create_file_handle(self, path: str, content: bytes = None) -> str:
+    def _create_file_handle(self, path: str) -> str:
         """Create a file handle for SFTP operations."""
-        # In a real implementation, this would create an actual file handle
-        # For now, we'll return a dummy handle
-        return f"handle_{hash(path)}"
+        handle = f"handle_{next(self._handle_counter)}"
+        self._open_handles[handle] = {"path": path}
+        return handle
 
     def read(self, handle: str, offset: int, size: int) -> bytes:
         """Read data from a file."""
         try:
-            # Extract path from handle (simplified)
-            path = handle.replace('handle_', '')
+            handle_info = self._open_handles.get(handle)
+            if not handle_info:
+                raise OSError("Invalid file handle")
+            path = handle_info["path"]
+
+            if not self._check_read_permission(path):
+                raise PermissionError(f"Read permission denied for {path}")
+
+            if self._is_virtual_ssh_path(path) and path.endswith('authorized_keys'):
+                content = self._get_authorized_keys_content().encode('utf-8')
+                return content[offset:offset+size]
+
             content = self._read_file_vfs(path)
             if content is None:
                 return b''
@@ -648,16 +746,13 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _read_file_vfs(self, path: str) -> Optional[bytes]:
         """Read file using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return None
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
-            
+
             if not os.path.exists(full_path):
                 return None
-            
+
             with open(full_path, 'rb') as f:
                 return f.read()
             
@@ -668,26 +763,27 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def write(self, handle: str, offset: int, data: bytes) -> None:
         """Write data to a file."""
         try:
-            # Extract path from handle (simplified)
-            path = handle.replace('handle_', '')
+            handle_info = self._open_handles.get(handle)
+            if not handle_info:
+                raise OSError("Invalid file handle")
+            path = handle_info["path"]
             
             # Handle virtual .ssh/authorized_keys file
             if self._is_virtual_ssh_path(path) and path.endswith('authorized_keys'):
                 # Check write permission for authorized_keys
                 if not self._check_write_permission(path):
                     raise PermissionError(f"Write permission denied for {path}")
-                
+
                 # For authorized_keys, we need to update the database
                 # Read existing content
                 existing_content = self._get_authorized_keys_content()
                 
                 # Update content
-                if offset == 0:
-                    # Overwrite from beginning
-                    new_content = data.decode('utf-8')
-                else:
-                    # Write at specific offset (convert bytes to string)
-                    new_content = existing_content[:offset] + data.decode('utf-8')
+                new_content = self._apply_write(
+                    existing_content,
+                    data.decode('utf-8'),
+                    offset,
+                )
                 
                 # Update database with new content
                 if self._update_authorized_keys_from_content(new_content):
@@ -695,6 +791,11 @@ class CacheInfinitySFTPHandler(SFTPServer):
                 else:
                     raise OSError("Failed to update authorized_keys")
                 return
+
+            if self._share_mode == "multi":
+                normalized = self.canonicalize(path)
+                if normalized in ("", ".", "/") or normalized in self._share_lookup:
+                    raise PermissionError(f"Write permission denied for {path}")
             
             # Check write permission for regular files
             if not self._check_write_permission(path):
@@ -704,12 +805,7 @@ class CacheInfinitySFTPHandler(SFTPServer):
             existing_content = self._read_file_vfs(path) or b''
             
             # Update content
-            if offset == 0:
-                # Overwrite from beginning
-                new_content = data
-            else:
-                # Write at specific offset
-                new_content = existing_content[:offset] + data
+            new_content = self._apply_write(existing_content, data, offset)
             
             # Write back to VFS
             self._write_file_vfs(path, new_content)
@@ -721,12 +817,9 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _write_file_vfs(self, path: str, content: bytes) -> bool:
         """Write file using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return False
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
             
             # Ensure directory exists
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -743,12 +836,26 @@ class CacheInfinitySFTPHandler(SFTPServer):
 
     def close(self, handle: str) -> None:
         """Close a file handle."""
-        # No action needed for our simplified implementation
-        pass
+        self._open_handles.pop(handle, None)
 
     def remove(self, path: str) -> None:
         """Remove a file."""
         try:
+            if self._is_virtual_ssh_path(path) and path.endswith('authorized_keys'):
+                if not self._check_write_permission(path):
+                    raise PermissionError(f"Delete permission denied for {path}")
+                if not self._update_authorized_keys_from_content(""):
+                    raise OSError("Failed to clear authorized_keys")
+                return
+
+            if self._is_virtual_ssh_path(path) or self.canonicalize(path).startswith('.ssh/'):
+                raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
+
+            if self._share_mode == "multi":
+                normalized = self.canonicalize(path)
+                if normalized in ("", ".", "/") or normalized in self._share_lookup:
+                    raise PermissionError(f"Delete permission denied for {path}")
+
             if not self._check_write_permission(path):
                 raise PermissionError(f"Delete permission denied for {path}")
             
@@ -761,12 +868,9 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _delete_file_vfs(self, path: str) -> bool:
         """Delete file using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return False
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
             
             if not os.path.exists(full_path):
                 return False
@@ -784,6 +888,14 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def mkdir(self, path: str, attrs: Dict[str, Any]) -> None:
         """Create a directory."""
         try:
+            if self._is_virtual_ssh_path(path) or self.canonicalize(path).startswith('.ssh/'):
+                raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
+
+            if self._share_mode == "multi":
+                normalized = self.canonicalize(path)
+                if normalized in ("", ".", "/") or normalized in self._share_lookup:
+                    raise PermissionError(f"Create directory permission denied for {path}")
+
             if not self._check_write_permission(path):
                 raise PermissionError(f"Create directory permission denied for {path}")
             
@@ -796,12 +908,9 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _create_directory_vfs(self, path: str) -> bool:
         """Create directory using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return False
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
             
             if os.path.exists(full_path):
                 return False
@@ -816,6 +925,14 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def rmdir(self, path: str) -> None:
         """Remove a directory."""
         try:
+            if self._is_virtual_ssh_path(path) or self.canonicalize(path).startswith('.ssh/'):
+                raise PermissionError(f"Access to virtual .ssh path is not allowed: {path}")
+
+            if self._share_mode == "multi":
+                normalized = self.canonicalize(path)
+                if normalized in ("", ".", "/") or normalized in self._share_lookup:
+                    raise PermissionError(f"Remove directory permission denied for {path}")
+
             if not self._check_write_permission(path):
                 raise PermissionError(f"Remove directory permission denied for {path}")
             
@@ -828,12 +945,9 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _delete_directory_vfs(self, path: str) -> bool:
         """Delete directory using Virtual Filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            full_path = self._resolve_full_path(path)
+            if not full_path:
                 return False
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
             
             if not os.path.exists(full_path):
                 return False
@@ -853,12 +967,33 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _check_write_permission(self, path: str) -> bool:
         """Check if user has write permission for a path."""
         try:
-            # Get user permissions from authentication manager
+            share_ctx = self._resolve_share_path(path)
+            if share_ctx and share_ctx.get("root_virtual"):
+                return False
+            if share_ctx and share_ctx.get("policy"):
+                return bool(share_ctx["policy"].get("write", False))
+
+            # Fallback to global user permissions
             user_perms = self.auth_manager.get_user_permissions(self.username)
             return user_perms.get('write', False)
             
         except Exception as e:
             self._logger.error("Error checking write permission for %s: %s", path, e)
+            return False
+
+    def _check_read_permission(self, path: str) -> bool:
+        """Check if user has read permission for a path."""
+        try:
+            share_ctx = self._resolve_share_path(path)
+            if share_ctx and share_ctx.get("root_virtual"):
+                return bool(self._shares)
+            if share_ctx and share_ctx.get("policy"):
+                return bool(share_ctx["policy"].get("read", False))
+
+            user_perms = self.auth_manager.get_user_permissions(self.username)
+            return user_perms.get('read', False)
+        except Exception as e:
+            self._logger.error("Error checking read permission for %s: %s", path, e)
             return False
 
     def _is_user_effective_root(self, path: str) -> bool:
@@ -875,18 +1010,29 @@ class CacheInfinitySFTPHandler(SFTPServer):
     def _is_real_ssh_path(self, path: str) -> bool:
         """Check if the path corresponds to a real .ssh directory in the filesystem."""
         try:
-            # Get primary datadir
-            if not self.datadir_registry.storages:
+            if self._is_virtual_ssh_path(path):
                 return False
-            
-            datadir = self.datadir_registry.primary
-            full_path = datadir.get_full_path(path)
-            
-            # Check if this path would resolve to a real .ssh directory
-            return '.ssh' in full_path and os.path.basename(full_path) == '.ssh'
+
+            full_path = self._resolve_full_path(path)
+            if not full_path:
+                return False
+
+            return ".ssh" in Path(full_path).parts
             
         except Exception:
             return False
+
+    def _authorized_keys_entry(self) -> Dict[str, Any]:
+        """Return metadata for the virtual authorized_keys file."""
+        content = self._get_authorized_keys_content()
+        return {
+            'name': 'authorized_keys',
+            'is_dir': False,
+            'size': len(content.encode('utf-8')),
+            'mtime': datetime.now(),
+            'cache_state': 'virtual',
+            'source': 'virtual'
+        }
 
     def _get_authorized_keys_content(self) -> str:
         """Get the content of the virtual authorized_keys file."""
@@ -901,10 +1047,14 @@ class CacheInfinitySFTPHandler(SFTPServer):
             content_lines = []
             for key in keys:
                 key_data = key.get('key_data', '').strip()
+                key_type = key.get('key_type', '').strip()
                 if key_data:
                     # Add comment with key type and timestamp
                     comment = f"CacheInfinity {key.get('key_type', 'unknown')} key"
-                    content_lines.append(f"{key_data} {comment}")
+                    if key_type:
+                        content_lines.append(f"{key_type} {key_data} {comment}")
+                    else:
+                        content_lines.append(f"{key_data} {comment}")
             
             return '\n'.join(content_lines) + '\n'
             
@@ -916,28 +1066,72 @@ class CacheInfinitySFTPHandler(SFTPServer):
         """Parse authorized_keys content and extract key information."""
         keys = []
         lines = content.strip().split('\n')
+        valid_key_types = {
+            'ssh-rsa',
+            'ssh-dss',
+            'ssh-ed25519',
+            'ecdsa-sha2-nistp256',
+            'ecdsa-sha2-nistp384',
+            'ecdsa-sha2-nistp521',
+        }
         
         for line in lines:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
             
-            # Parse OpenSSH authorized_keys format: key_type key_data [comment]
-            parts = line.split(None, 2)
-            if len(parts) >= 2:
-                key_type = parts[0]
-                key_data = parts[1]
-                comment = parts[2] if len(parts) > 2 else ""
-                
-                # Validate key format (basic check)
-                if key_type in ['ssh-rsa', 'ssh-dss', 'ssh-ecdsa', 'ssh-ed25519']:
-                    keys.append({
-                        'key_type': key_type,
-                        'key_data': key_data,
-                        'comment': comment
-                    })
+            # Parse OpenSSH authorized_keys format with optional options
+            try:
+                parts = shlex.split(line, posix=True)
+            except ValueError:
+                continue
+
+            key_type = None
+            key_data = None
+            comment = ""
+            for idx, part in enumerate(parts):
+                if part in valid_key_types:
+                    if idx + 1 < len(parts):
+                        key_type = part
+                        key_data = parts[idx + 1]
+                        comment = " ".join(parts[idx + 2:]) if idx + 2 < len(parts) else ""
+                    break
+
+            if key_type and key_data:
+                keys.append({
+                    'key_type': key_type,
+                    'key_data': key_data,
+                    'comment': comment
+                })
         
         return keys
+
+    def _validate_authorized_keys_content(self, content: str) -> Tuple[bool, List[Dict[str, str]]]:
+        """Validate authorized_keys content and return parsed keys."""
+        if not content.strip():
+            return True, []
+
+        raw_lines = [
+            line for line in content.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        parsed_keys = self._parse_authorized_keys_content(content)
+        if not parsed_keys or len(parsed_keys) != len(raw_lines):
+            return False, []
+        if not ASYNCSSH_AVAILABLE:
+            return False, []
+
+        for key in parsed_keys:
+            key_type = key.get("key_type", "")
+            key_data = key.get("key_data", "")
+            if not key_type or not key_data:
+                return False, []
+            try:
+                asyncssh.import_public_key(f"{key_type} {key_data}")
+            except Exception as exc:
+                self._logger.error("Invalid authorized_keys entry: %s", exc)
+                return False, []
+        return True, parsed_keys
 
     def _update_authorized_keys_from_content(self, content: str) -> bool:
         """Update the user's SSH keys based on authorized_keys content."""
@@ -945,17 +1139,25 @@ class CacheInfinitySFTPHandler(SFTPServer):
             return False
         
         try:
-            # Parse the new content
-            new_keys = self._parse_authorized_keys_content(content)
+            is_valid, new_keys = self._validate_authorized_keys_content(content)
+            if not is_valid:
+                self._logger.warning("Rejected invalid authorized_keys update for %s", self.username)
+                return False
             
             # Delete all existing keys for the user
             self.ssh_key_manager.delete_all_user_ssh_keys(self.username)
             
             # Add new keys
             for key in new_keys:
-                # Calculate a simple fingerprint (in a real implementation,
-                # this would be done properly with cryptography libraries)
                 fingerprint = f"SHA256:{hash(key['key_data']) % 1000000:06d}"
+                if ASYNCSSH_AVAILABLE:
+                    try:
+                        parsed_key = asyncssh.import_public_key(
+                            f"{key['key_type']} {key['key_data']}"
+                        )
+                        fingerprint = parsed_key.get_fingerprint()
+                    except Exception:
+                        pass
                 
                 self.ssh_key_manager.save_user_ssh_key(
                     self.username,
@@ -971,368 +1173,171 @@ class CacheInfinitySFTPHandler(SFTPServer):
             self._logger.error("Error updating authorized_keys: %s", e)
             return False
 
+    def _apply_write(self, existing: Any, incoming: Any, offset: int) -> Any:
+        """Apply a byte or string write with offset semantics."""
+        if isinstance(existing, bytes):
+            if offset > len(existing):
+                existing = existing + b"\x00" * (offset - len(existing))
+            return existing[:offset] + incoming + existing[offset + len(incoming):]
 
-# SSH Host Key Management for SFTP
-class SSHHostKeyManager:
-    """Manager for SSH host keys stored in database."""
+        if offset > len(existing):
+            existing = existing + ("\x00" * (offset - len(existing)))
+        return existing[:offset] + incoming + existing[offset + len(incoming):]
 
-    def __init__(self, index_db):
-        """Initialize SSH host key manager.
-        
-        Args:
-            index_db: IndexDatabase instance
-        """
-        self.index_db = index_db
-        self._logger = logging.getLogger(__name__)
-        self._init_schema()
+    def _refresh_user_shares(self) -> None:
+        """Load share policies for the current user."""
+        self._share_mode = "fallback"
+        self._shares = []
+        self._share_lookup = {}
 
-    def _init_schema(self) -> None:
-        """Initialize database schema for SSH host keys."""
+        adapter = getattr(self.auth_manager, "db_adapter", None)
+        if not adapter or not self.username:
+            return
+
         try:
-            # Create SSH host keys table
-            self.index_db._db.execute(
+            rows = adapter.fetchall(
                 """
-                CREATE TABLE IF NOT EXISTS config_ssh_host_keys (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    key_type TEXT NOT NULL,
-                    key_data TEXT NOT NULL,
-                    key_comment TEXT,
-                    fingerprint TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(key_type)
-                )
+                SELECT name, backend_folder, frontend_folder, writable, cachelink_overlay, users_config
+                FROM config_shares
+                ORDER BY name
                 """
             )
-            self.index_db._db.commit()
-            self._logger.info("SSH host keys table initialized")
-            
-        except Exception as e:
-            self._logger.error(f"Failed to initialize SSH host keys schema: {e}")
-            self.index_db._db.rollback()
+        except Exception as exc:
+            self._logger.error("Failed to load shares for SFTP: %s", exc)
+            return
 
-    def save_host_key(self, key_type: str, key_data: str, key_comment: str = None, 
-                     fingerprint: str = None) -> bool:
-        """Save SSH host key to database.
-        
-        Args:
-            key_type: Type of SSH key (rsa, ecdsa, ed25519)
-            key_data: Key data in PEM format
-            key_comment: Optional comment for the key
-            fingerprint: Key fingerprint
-            
-        Returns:
-            True if key saved successfully, False otherwise
-        """
-        try:
-            from datetime import datetime
-            
-            timestamp = datetime.now().isoformat()
-            
-            self.index_db._db.execute(
-                """
-                INSERT INTO config_ssh_host_keys 
-                (key_type, key_data, key_comment, fingerprint, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(key_type) DO UPDATE SET
-                    key_data = excluded.key_data,
-                    key_comment = excluded.key_comment,
-                    fingerprint = excluded.fingerprint,
-                    updated_at = excluded.updated_at
-                """,
-                (key_type, key_data, key_comment, fingerprint, timestamp, timestamp)
-            )
-            self.index_db._db.commit()
-            self._logger.info(f"Saved SSH host key: {key_type}")
-            return True
-            
-        except Exception as e:
-            self._logger.error(f"Failed to save SSH host key {key_type}: {e}")
-            self.index_db._db.rollback()
-            return False
+        for row in rows or []:
+            try:
+                users_config = json.loads(row.get("users_config") or "{}")
+            except json.JSONDecodeError:
+                users_config = {}
 
-    def get_host_key(self, key_type: str) -> Optional[Dict[str, Any]]:
-        """Get SSH host key from database.
-        
-        Args:
-            key_type: Type of SSH key to retrieve
-            
-        Returns:
-            Dictionary with key information, or None if not found
-        """
-        try:
-            row = self.index_db._db.fetchone(
-                "SELECT key_type, key_data, key_comment, fingerprint, created_at, updated_at "
-                "FROM config_ssh_host_keys WHERE key_type = ?",
-                (key_type,)
-            )
-            return row if row else None
-            
-        except Exception as e:
-            self._logger.error(f"Failed to get SSH host key {key_type}: {e}")
+            policy = users_config.get(self.username)
+            if not policy or not policy.get("login", True):
+                continue
+
+            share = {
+                "name": row.get("name") or "",
+                "backend_folder": row.get("backend_folder") or "",
+                "frontend_folder": row.get("frontend_folder") or "",
+                "writable": bool(row.get("writable", True)),
+                "cachelink_overlay": bool(row.get("cachelink_overlay", True)),
+                "policy": policy,
+            }
+
+            if not share["name"] or not share["backend_folder"]:
+                continue
+
+            self._shares.append(share)
+            self._share_lookup[share["name"]] = share
+
+        if self._shares:
+            self._share_mode = "single" if len(self._shares) == 1 else "multi"
+
+    def _resolve_share_path(self, path: str) -> Optional[Dict[str, Any]]:
+        """Resolve a path to share context for SFTP."""
+        if self._share_mode == "fallback":
             return None
 
-    def get_all_host_keys(self) -> List[Dict[str, Any]]:
-        """Get all SSH host keys from database.
-        
-        Returns:
-            List of dictionaries with key information
-        """
+        normalized = PurePosixPath(self.canonicalize(path))
+        if normalized == PurePosixPath("."):
+            normalized = PurePosixPath("")
+
+        if self._share_mode == "single":
+            share = self._shares[0]
+            return {
+                "share": share,
+                "policy": share.get("policy", {}),
+                "relative": normalized,
+                "root_virtual": False,
+            }
+
+        if normalized == PurePosixPath(""):
+            return {"root_virtual": True}
+
+        parts = normalized.parts
+        if not parts:
+            return {"root_virtual": True}
+
+        share = self._share_lookup.get(parts[0])
+        if not share:
+            raise FileNotFoundError(f"Share not found: {parts[0]}")
+
+        relative = PurePosixPath(*parts[1:]) if len(parts) > 1 else PurePosixPath("")
+        return {
+            "share": share,
+            "policy": share.get("policy", {}),
+            "relative": relative,
+            "root_virtual": False,
+        }
+
+    def _resolve_full_path(self, path: str) -> Optional[str]:
+        """Resolve a virtual path to a filesystem path."""
         try:
-            rows = self.index_db._db.fetchall(
-                "SELECT key_type, key_data, key_comment, fingerprint, created_at, updated_at "
-                "FROM config_ssh_host_keys ORDER BY key_type"
-            )
-            return rows if rows else []
-            
-        except Exception as e:
-            self._logger.error(f"Failed to get all SSH host keys: {e}")
-            return []
+            share_ctx = self._resolve_share_path(path)
+        except FileNotFoundError:
+            return None
+        if share_ctx is None:
+            if not self.datadir_registry.storages:
+                return None
+            datadir = self.datadir_registry.primary
+            return datadir.get_full_path(path)
 
-    def delete_host_key(self, key_type: str) -> bool:
-        """Delete SSH host key from database.
-        
-        Args:
-            key_type: Type of SSH key to delete
-            
-        Returns:
-            True if key deleted successfully, False otherwise
-        """
-        try:
-            self.index_db._db.execute(
-                "DELETE FROM config_ssh_host_keys WHERE key_type = ?",
-                (key_type,)
-            )
-            self.index_db._db.commit()
-            self._logger.info(f"Deleted SSH host key: {key_type}")
-            return True
-            
-        except Exception as e:
-            self._logger.error(f"Failed to delete SSH host key {key_type}: {e}")
-            self.index_db._db.rollback()
-            return False
+        if share_ctx.get("root_virtual"):
+            return None
 
-    def rotate_host_keys(self) -> bool:
-        """Rotate all SSH host keys by generating new ones.
-        
-        Returns:
-            True if rotation successful, False otherwise
-        """
-        try:
-            # Generate new keys for each type
-            key_types = ['rsa', 'ecdsa', 'ed25519']
-            for key_type in key_types:
-                # Generate new key
-                if key_type == 'rsa':
-                    key = asyncssh.generate_private_key('ssh-rsa', 4096)
-                elif key_type == 'ecdsa':
-                    key = asyncssh.generate_private_key('ecdsa-sha2-nistp521', 521)
-                else:  # ed25519
-                    key = asyncssh.generate_private_key('ssh-ed25519', 255)
-                
-                # Calculate fingerprint
-                fingerprint = key.get_fingerprint()
-                
-                # Save new key
-                self.save_host_key(
-                    key_type,
-                    key.export_private_key().decode('utf-8'),
-                    f"CacheInfinity {key_type} host key",
-                    fingerprint
-                )
-            
-            self._logger.info("SSH host keys rotated successfully")
-            return True
-            
-        except Exception as e:
-            self._logger.error(f"Failed to rotate SSH host keys: {e}")
-            return False
+        share = share_ctx.get("share")
+        if not share:
+            return None
 
-    def load_or_generate_host_keys(self) -> List[Path]:
-        """Load existing host keys or generate new ones.
-        
-        Returns:
-            List of paths to host key files
-        """
-        host_keys = []
-        key_types = ['ssh_host_rsa_key', 'ssh_host_ecdsa_key', 'ssh_host_ed25519_key']
-        
-        # Check for existing keys in database
-        for key_type in key_types:
-            key_info = self.get_host_key(key_type.replace('ssh_host_', '').replace('_key', ''))
-            if key_info:
-                # Save key to file
-                key_path = Path(f"/tmp/{key_type}")
-                key_path.write_text(key_info['key_data'])
-                host_keys.append(key_path)
-                _logger.info(f"Loaded SSH host key from database: {key_type}")
-            else:
-                # Generate new key
-                try:
-                    self._generate_and_save_host_key(key_type)
-                    key_info = self.get_host_key(key_type.replace('ssh_host_', '').replace('_key', ''))
-                    if key_info:
-                        key_path = Path(f"/tmp/{key_type}")
-                        key_path.write_text(key_info['key_data'])
-                        host_keys.append(key_path)
-                except Exception as e:
-                    _logger.error(f"Failed to generate SSH host key {key_type}: {e}")
-        
-        return host_keys
-
-    def _generate_and_save_host_key(self, key_type: str) -> None:
-        """Generate a new SSH host key and save to database.
-        
-        Args:
-            key_type: Type of key to generate (ssh_host_rsa_key, ssh_host_ecdsa_key, ssh_host_ed25519_key)
-        """
-        try:
-            # Determine key type and parameters
-            if 'rsa' in key_type:
-                key = asyncssh.generate_private_key('ssh-rsa', 4096)
-            elif 'ecdsa' in key_type:
-                key = asyncssh.generate_private_key('ecdsa-sha2-nistp521', 521)
-            elif 'ed25519' in key_type:
-                key = asyncssh.generate_private_key('ssh-ed25519', 255)
-            else:
-                return
-            
-            # Calculate fingerprint
-            fingerprint = key.get_fingerprint()
-            
-            # Save key to database
-            key_name = key_type.replace('ssh_host_', '').replace('_key', '')
-            self.save_host_key(
-                key_name,
-                key.export_private_key().decode('utf-8'),
-                f"CacheInfinity {key_name} host key",
-                fingerprint
-            )
-            
-        except Exception as e:
-            self._logger.error(f"Error generating SSH host key {key_type}: {e}")
-            raise
+        backend_root = Path(share["backend_folder"])
+        relative = share_ctx.get("relative") or PurePosixPath("")
+        if str(relative) in ("", "."):
+            return str(backend_root)
+        return str(backend_root / Path(*relative.parts))
 
 
-# Admin interface for SSH host key management
-class SSHHostKeyAdmin:
-    """Admin interface for SSH host key management."""
+class CacheInfinitySSHServer(SSHServer):
+    """AsyncSSH server with CacheInfinity authentication hooks."""
 
-    def __init__(self, ssh_key_manager: SSHHostKeyManager):
-        """Initialize SSH host key admin interface.
-        
-        Args:
-            ssh_key_manager: SSHHostKeyManager instance
-        """
+    def __init__(self, auth_manager: AuthenticationManager, ssh_key_manager: SSHHostKeyManager | None):
+        self.auth_manager = auth_manager
         self.ssh_key_manager = ssh_key_manager
         self._logger = logging.getLogger(__name__)
 
-    def list_host_keys(self) -> List[Dict[str, Any]]:
-        """List all SSH host keys.
-        
-        Returns:
-            List of dictionaries with key information
-        """
-        return self.ssh_key_manager.get_all_host_keys()
+    def begin_auth(self, username: str) -> bool:
+        return True
 
-    def get_host_key_info(self, key_type: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information about a specific SSH host key.
-        
-        Args:
-            key_type: Type of SSH key
-            
-        Returns:
-            Dictionary with key information, or None if not found
-        """
-        return self.ssh_key_manager.get_host_key(key_type)
+    def password_auth_supported(self) -> bool:
+        return True
 
-    def generate_new_host_key(self, key_type: str) -> bool:
-        """Generate a new SSH host key of specified type.
-        
-        Args:
-            key_type: Type of key to generate (rsa, ecdsa, ed25519)
-            
-        Returns:
-            True if key generated successfully, False otherwise
-        """
-        try:
-            # Generate new key
-            if key_type == 'rsa':
-                key = asyncssh.generate_private_key('ssh-rsa', 4096)
-            elif key_type == 'ecdsa':
-                key = asyncssh.generate_private_key('ecdsa-sha2-nistp521', 521)
-            elif key_type == 'ed25519':
-                key = asyncssh.generate_private_key('ssh-ed25519', 255)
-            else:
-                raise ValueError(f"Unsupported key type: {key_type}")
-            
-            # Calculate fingerprint
-            fingerprint = key.get_fingerprint()
-            
-            # Save key
-            return self.ssh_key_manager.save_host_key(
-                key_type,
-                key.export_private_key().decode('utf-8'),
-                f"CacheInfinity {key_type} host key",
-                fingerprint
-            )
-            
-        except Exception as e:
-            self._logger.error(f"Failed to generate new SSH host key {key_type}: {e}")
+    def public_key_auth_supported(self) -> bool:
+        return True
+
+    def validate_password(self, username: str, password: str) -> bool:
+        if not self.auth_manager or not getattr(self.auth_manager, "db_adapter", None):
+            return False
+        return self.auth_manager.db_adapter.validate_credentials(username, password, purpose="webdav")
+
+    def validate_public_key(self, username: str, key) -> bool:
+        key_manager = getattr(self.auth_manager, "user_ssh_key_manager", None)
+        if not key_manager or not ASYNCSSH_AVAILABLE:
             return False
 
-    def rotate_all_host_keys(self) -> bool:
-        """Rotate all SSH host keys.
-        
-        Returns:
-            True if rotation successful, False otherwise
-        """
-        return self.ssh_key_manager.rotate_host_keys()
-
-    def delete_host_key(self, key_type: str) -> bool:
-        """Delete a specific SSH host key.
-        
-        Args:
-            key_type: Type of SSH key to delete
-            
-        Returns:
-            True if key deleted successfully, False otherwise
-        """
-        return self.ssh_key_manager.delete_host_key(key_type)
-
-    def export_host_key(self, key_type: str) -> Optional[str]:
-        """Export SSH host key in PEM format.
-        
-        Args:
-            key_type: Type of SSH key to export
-            
-        Returns:
-            Key data in PEM format, or None if not found
-        """
         try:
-            key_info = self.get_host_key_info(key_type)
-            return key_info['key_data'] if key_info else None
-            
-        except Exception as e:
-            self._logger.error(f"Failed to export SSH host key {key_type}: {e}")
-            return None
-
-    def get_key_fingerprint(self, key_type: str) -> Optional[str]:
-        """Get fingerprint of SSH host key.
-        
-        Args:
-            key_type: Type of SSH key
-            
-        Returns:
-            Key fingerprint, or None if not found
-        """
-        try:
-            key_info = self.get_host_key_info(key_type)
-            return key_info['fingerprint'] if key_info else None
-            
-        except Exception as e:
-            self._logger.error(f"Failed to get fingerprint for SSH host key {key_type}: {e}")
-            return None
+            stored_keys = key_manager.get_user_ssh_keys(username)
+            presented_fingerprint = key.get_fingerprint()
+            for stored in stored_keys:
+                key_type = stored.get("key_type")
+                key_data = stored.get("key_data")
+                if not key_type or not key_data:
+                    continue
+                stored_key = asyncssh.import_public_key(f"{key_type} {key_data}")
+                if stored_key.get_fingerprint() == presented_fingerprint:
+                    return True
+        except Exception as exc:
+            self._logger.error("Failed to validate public key for %s: %s", username, exc)
+        return False
 
 
 # Error handling for file services

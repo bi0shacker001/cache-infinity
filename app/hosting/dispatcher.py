@@ -11,21 +11,15 @@ try:
 except ImportError:
     from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
-from ui.api import WebUIAPI
-
 _logger = logging.getLogger(__name__)
 
 
 class HostingDispatcher:
     """WSGI DispatcherMiddleware for hosting port path routing."""
-    
-    def __init__(self, service):
-        """Initialize hosting dispatcher.
-        
-        Args:
-            service: Reference to the main CacheInfinity service
-        """
-        self.service = service
+
+    def __init__(self, service: object | None = None) -> None:
+        """Initialize hosting dispatcher."""
+        self._service = service
         self._webdav_app = None
         self._api_app = None
         self._dispatcher_app = None
@@ -77,12 +71,3 @@ class HostingDispatcher:
             raise RuntimeError("DispatcherMiddleware not ready - both WebDAV and API apps must be set")
         return self._dispatcher_app
     
-    def create_api_app(self) -> Callable[[Dict[str, Any], Callable], Any]:
-        """Create the read-only admin API Flask app.
-        
-        Returns:
-            Flask application for read-only admin API
-        """
-        api_handler = WebUIAPI(self.service)
-        app = api_handler.create_app()
-        return app

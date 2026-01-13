@@ -319,11 +319,12 @@ class DatabaseBackupManager:
         rclone = self.index_db.get_rclone()
         if rclone:
             bootstrap_data['rclone'] = {
-                'enabled': rclone['enabled'],
-                'config_path': rclone.get('config_path'),
-                'rc_url': rclone.get('rc_url'),
-                'rc_user': rclone.get('rc_user'),
-                'rc_pass': rclone.get('rc_pass'),
+                'remotes': rclone.get('remotes', {}),
+                'bandwidth_limit': rclone.get('bandwidth_limit'),
+                'transfer_concurrency': rclone.get('transfer_concurrency', 4),
+                'checkers': rclone.get('checkers', 8),
+                'timeout': rclone.get('timeout', 300),
+                'retries': rclone.get('retries', 3),
             }
 
         # Collect users
@@ -573,12 +574,19 @@ class DatabaseBackupManager:
             return False, warnings
 
         try:
+            remotes = rclone_data.get("remotes") or {}
+            if isinstance(remotes, str):
+                try:
+                    remotes = json.loads(remotes)
+                except json.JSONDecodeError:
+                    remotes = {}
             rclone_db = {
-                "enabled": bool(rclone_data.get("enabled", False)),
-                "config_path": rclone_data.get("config_path"),
-                "rc_url": rclone_data.get("rc_url"),
-                "rc_user": rclone_data.get("rc_user"),
-                "rc_pass": rclone_data.get("rc_pass"),
+                "remotes": remotes,
+                "bandwidth_limit": rclone_data.get("bandwidth_limit"),
+                "transfer_concurrency": int(rclone_data.get("transfer_concurrency") or 4),
+                "checkers": int(rclone_data.get("checkers") or 8),
+                "timeout": int(rclone_data.get("timeout") or 300),
+                "retries": int(rclone_data.get("retries") or 3),
             }
             self.index_db.save_rclone(rclone_db)
             return True, warnings

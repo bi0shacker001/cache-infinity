@@ -19,7 +19,36 @@ from typing import Optional, Dict, List, Any
 from core.config import FTPConfig # Absolute import for config
 from db.dbmanage import DatabaseManager # Use database management service instead
 
+try:
+    import asyncssh
+    ASYNCSSH_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    ASYNCSSH_AVAILABLE = False
+    asyncssh = None
+
 _logger = logging.getLogger(__name__)
+
+
+def start_session_cleanup_thread(
+    index_db,
+    stop_event: threading.Event,
+    *,
+    interval_seconds: int = 3600,
+    max_age_hours: int = 24,
+) -> threading.Thread:
+    """Start a background thread to expire stale WebUI sessions."""
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            try:
+                index_db.cleanup_expired_sessions(max_age_hours=max_age_hours)
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.warning("Session cleanup failed: %s", exc, exc_info=True)
+            stop_event.wait(interval_seconds)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread
 
 
 # Password hashing constants
@@ -243,6 +272,252 @@ class UserSSHKeyManager:
             return False
 
 
+# --- SSH Host Key Management ---
+
+class SSHHostKeyManager:
+    """Manager for SSH host keys stored in database."""
+
+    def __init__(self, db_adapter):
+        """Initialize SSH host key manager.
+
+        Args:
+            db_adapter: Database adapter instance
+        """
+        self.db_adapter = db_adapter
+        self._logger = logging.getLogger(__name__)
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        """Initialize database schema for SSH host keys."""
+        try:
+            self.db_adapter.execute(
+                """
+                CREATE TABLE IF NOT EXISTS config_ssh_host_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key_type TEXT NOT NULL,
+                    key_data TEXT NOT NULL,
+                    key_comment TEXT,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(key_type)
+                )
+                """
+            )
+            self.db_adapter.commit()
+            self._logger.info("SSH host keys table initialized")
+        except Exception as e:
+            self._logger.error(f"Failed to initialize SSH host keys schema: {e}")
+            self.db_adapter.rollback()
+
+    def save_host_key(
+        self,
+        key_type: str,
+        key_data: str,
+        key_comment: str | None = None,
+        fingerprint: str | None = None,
+    ) -> bool:
+        """Save SSH host key to database."""
+        try:
+            timestamp = datetime.now().isoformat()
+            self.db_adapter.execute(
+                """
+                INSERT INTO config_ssh_host_keys
+                (key_type, key_data, key_comment, fingerprint, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key_type) DO UPDATE SET
+                    key_data = excluded.key_data,
+                    key_comment = excluded.key_comment,
+                    fingerprint = excluded.fingerprint,
+                    updated_at = excluded.updated_at
+                """,
+                (key_type, key_data, key_comment, fingerprint, timestamp, timestamp),
+            )
+            self.db_adapter.commit()
+            self._logger.info(f"Saved SSH host key: {key_type}")
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to save SSH host key {key_type}: {e}")
+            self.db_adapter.rollback()
+            return False
+
+    def get_host_key(self, key_type: str) -> Optional[Dict[str, Any]]:
+        """Get SSH host key from database."""
+        try:
+            row = self.db_adapter.fetchone(
+                "SELECT key_type, key_data, key_comment, fingerprint, created_at, updated_at "
+                "FROM config_ssh_host_keys WHERE key_type = ?",
+                (key_type,),
+            )
+            return row if row else None
+        except Exception as e:
+            self._logger.error(f"Failed to get SSH host key {key_type}: {e}")
+            return None
+
+    def get_all_host_keys(self) -> List[Dict[str, Any]]:
+        """Get all SSH host keys from database."""
+        try:
+            rows = self.db_adapter.fetchall(
+                "SELECT key_type, key_data, key_comment, fingerprint, created_at, updated_at "
+                "FROM config_ssh_host_keys ORDER BY key_type"
+            )
+            return rows if rows else []
+        except Exception as e:
+            self._logger.error(f"Failed to get all SSH host keys: {e}")
+            return []
+
+    def delete_host_key(self, key_type: str) -> bool:
+        """Delete SSH host key from database."""
+        try:
+            self.db_adapter.execute(
+                "DELETE FROM config_ssh_host_keys WHERE key_type = ?",
+                (key_type,),
+            )
+            self.db_adapter.commit()
+            self._logger.info(f"Deleted SSH host key: {key_type}")
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to delete SSH host key {key_type}: {e}")
+            self.db_adapter.rollback()
+            return False
+
+    def rotate_host_keys(self) -> bool:
+        """Rotate all SSH host keys by generating new ones."""
+        if not ASYNCSSH_AVAILABLE:
+            self._logger.error("asyncssh is not installed")
+            return False
+        try:
+            key_types = ["rsa", "ecdsa", "ed25519"]
+            for key_type in key_types:
+                if key_type == "rsa":
+                    key = asyncssh.generate_private_key("ssh-rsa", 4096)
+                elif key_type == "ecdsa":
+                    key = asyncssh.generate_private_key("ecdsa-sha2-nistp521", 521)
+                else:
+                    key = asyncssh.generate_private_key("ssh-ed25519", 255)
+
+                fingerprint = key.get_fingerprint()
+                self.save_host_key(
+                    key_type,
+                    key.export_private_key().decode("utf-8"),
+                    f"CacheInfinity {key_type} host key",
+                    fingerprint,
+                )
+            self._logger.info("SSH host keys rotated successfully")
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to rotate SSH host keys: {e}")
+            return False
+
+    def load_or_generate_host_keys(self) -> List[Path]:
+        """Load existing host keys or generate new ones."""
+        host_keys: list[Path] = []
+        key_types = ["ssh_host_rsa_key", "ssh_host_ecdsa_key", "ssh_host_ed25519_key"]
+
+        for key_type in key_types:
+            key_info = self.get_host_key(key_type.replace("ssh_host_", "").replace("_key", ""))
+            if key_info:
+                key_path = Path(f"/tmp/{key_type}")
+                key_path.write_text(key_info["key_data"])
+                host_keys.append(key_path)
+                _logger.info(f"Loaded SSH host key from database: {key_type}")
+                continue
+
+            if not ASYNCSSH_AVAILABLE:
+                _logger.error("asyncssh is not installed; cannot generate host keys")
+                continue
+            try:
+                self._generate_and_save_host_key(key_type)
+                key_info = self.get_host_key(key_type.replace("ssh_host_", "").replace("_key", ""))
+                if key_info:
+                    key_path = Path(f"/tmp/{key_type}")
+                    key_path.write_text(key_info["key_data"])
+                    host_keys.append(key_path)
+            except Exception as e:
+                _logger.error(f"Failed to generate SSH host key {key_type}: {e}")
+
+        return host_keys
+
+    def _generate_and_save_host_key(self, key_type: str) -> None:
+        """Generate a new SSH host key and save to database."""
+        if not ASYNCSSH_AVAILABLE:
+            raise RuntimeError("asyncssh is not installed")
+        if "rsa" in key_type:
+            key = asyncssh.generate_private_key("ssh-rsa", 4096)
+        elif "ecdsa" in key_type:
+            key = asyncssh.generate_private_key("ecdsa-sha2-nistp521", 521)
+        elif "ed25519" in key_type:
+            key = asyncssh.generate_private_key("ssh-ed25519", 255)
+        else:
+            return
+
+        fingerprint = key.get_fingerprint()
+        key_name = key_type.replace("ssh_host_", "").replace("_key", "")
+        self.save_host_key(
+            key_name,
+            key.export_private_key().decode("utf-8"),
+            f"CacheInfinity {key_name} host key",
+            fingerprint,
+        )
+
+
+class SSHHostKeyAdmin:
+    """Admin interface for SSH host key management."""
+
+    def __init__(self, ssh_key_manager: SSHHostKeyManager):
+        self.ssh_key_manager = ssh_key_manager
+        self._logger = logging.getLogger(__name__)
+
+    def list_host_keys(self) -> List[Dict[str, Any]]:
+        return self.ssh_key_manager.get_all_host_keys()
+
+    def get_host_key_info(self, key_type: str) -> Optional[Dict[str, Any]]:
+        return self.ssh_key_manager.get_host_key(key_type)
+
+    def generate_new_host_key(self, key_type: str) -> bool:
+        if not ASYNCSSH_AVAILABLE:
+            self._logger.error("asyncssh is not installed")
+            return False
+        if key_type == "rsa":
+            key = asyncssh.generate_private_key("ssh-rsa", 4096)
+        elif key_type == "ecdsa":
+            key = asyncssh.generate_private_key("ecdsa-sha2-nistp521", 521)
+        elif key_type == "ed25519":
+            key = asyncssh.generate_private_key("ssh-ed25519", 255)
+        else:
+            raise ValueError(f"Unsupported key type: {key_type}")
+
+        fingerprint = key.get_fingerprint()
+        return self.ssh_key_manager.save_host_key(
+            key_type,
+            key.export_private_key().decode("utf-8"),
+            f"CacheInfinity {key_type} host key",
+            fingerprint,
+        )
+
+    def rotate_all_host_keys(self) -> bool:
+        return self.ssh_key_manager.rotate_host_keys()
+
+    def delete_host_key(self, key_type: str) -> bool:
+        return self.ssh_key_manager.delete_host_key(key_type)
+
+    def export_host_key(self, key_type: str) -> Optional[str]:
+        try:
+            key_info = self.get_host_key_info(key_type)
+            return key_info["key_data"] if key_info else None
+        except Exception as e:
+            self._logger.error(f"Failed to export SSH host key {key_type}: {e}")
+            return None
+
+    def get_key_fingerprint(self, key_type: str) -> Optional[str]:
+        try:
+            key_info = self.get_host_key_info(key_type)
+            return key_info["fingerprint"] if key_info else None
+        except Exception as e:
+            self._logger.error(f"Failed to get fingerprint for SSH host key {key_type}: {e}")
+            return None
+
+
 # --- Authentication Manager ---
 
 class AuthenticationManager:
@@ -263,6 +538,7 @@ class AuthenticationManager:
             db_manager: Database management service for credential storage
         """
         self.db_manager = db_manager
+        self.db_adapter = db_manager
         self._sessions: Dict[str, SessionToken] = {}
         self._lock = threading.RLock()
         
@@ -599,8 +875,12 @@ class AuthenticationManager:
 
 
 __all__ = [
+    "ASYNCSSH_AVAILABLE",
     "AuthenticationManager",
+    "SSHHostKeyAdmin",
+    "SSHHostKeyManager",
     "SessionToken",
+    "UserSSHKeyManager",
     "_hash_password",
     "_verify_password_hash",
 ]

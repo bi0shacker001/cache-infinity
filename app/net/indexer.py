@@ -6,9 +6,12 @@ import io
 import hashlib
 import logging
 import os
+import random
+import shutil
+import threading
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path, PurePosixPath
+from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
 from urllib.parse import urljoin, urlparse
 from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
@@ -16,9 +19,14 @@ from contextlib import contextmanager
 
 from core.config import CookieJarDefinition
 from core.config import IndexingSettings
-from cache.cachelinks import CachelinkDescriptor, CachelinkIndex
+from cache.cachelinks import CachelinkDescriptor, CachelinkIndex, normalize_source_url
 from dataclasses import dataclass
 from db.dbmanage import DatabaseManager
+
+if TYPE_CHECKING:
+    from net.fetcher import Fetcher
+    from storage.datadir import DatadirRegistry
+    from storage.staging import StagingArea
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +111,16 @@ def _rclone_env(config_path: Optional[Path]):
             os.environ[key] = previous
 
 
+class RemoteListingFetcher:
+    """Fetcher for remote directory listings with support for multiple protocols."""
+    
+    def __init__(self):
+        """Initialize remote listing fetcher."""
+        self._pycurl = _import_pycurl()
+        _logger.debug("RemoteListingFetcher initialized")
+    
+
+
 def _parse_headers(raw_lines: list[bytes]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for raw in raw_lines:
@@ -154,11 +172,9 @@ class _AnchorHTMLParser(HTMLParser):
 class RemoteListingFetcher:
     """Fetcher for remote directory listings with support for multiple protocols."""
     
-    def __init__(self, rclone_config_path: Optional[Path] = None, rclone_enabled: bool = False):
+    def __init__(self):
         """Initialize remote listing fetcher."""
         self._pycurl = _import_pycurl()
-        self._rclone_config_path = rclone_config_path
-        self._rclone_enabled = rclone_enabled
         _logger.debug("RemoteListingFetcher initialized")
 
     def _fetch_bytes(
@@ -305,7 +321,10 @@ class RemoteListingFetcher:
         try:
             if not parse_entries:
                 return [], {"url": url, "status": "ok", "source": "rclone"}
-            with _rclone_env(self._rclone_config_path if self._rclone_enabled else None):
+            
+            # Get Rclone configuration from database
+            rclone_config_path = self._get_rclone_config_path()
+            with _rclone_env(rclone_config_path):
                 rclone = _import_rclone()
                 spec = _rclone_spec(url)
                 rows = rclone.lsjson(spec)
@@ -394,11 +413,9 @@ class Indexer:
         cookie_jars: Dict[str, CookieJarDefinition],
         db_manager: DatabaseManager | None = None,
         cachelinks: CachelinkIndex | None = None,
-        rclone_config_path: Optional[Path] = None,
-        rclone_enabled: bool = False,
     ):
         """Initialize indexer.
-        
+         
         Args:
             settings: Indexing configuration settings
             cookie_jars: Cookie jar definitions for authenticated domains
@@ -415,11 +432,26 @@ class Indexer:
             "full_used": 0,
             "cheap_used": 0,
         }
-        self._fetcher = RemoteListingFetcher(
-            rclone_config_path=rclone_config_path,
-            rclone_enabled=rclone_enabled,
-        )
+        self._fetcher = RemoteListingFetcher()
         _logger.debug("Indexer initialized")
+
+    def preview_listing(
+        self,
+        url: str,
+        *,
+        subfolder: str = "/",
+        url_handler: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Fetch a preview of a remote listing without persisting state."""
+        _, download_root = normalize_source_url(url)
+        listing_root = download_root or url
+        normalized = (subfolder or "/").lstrip("/")
+        listing_url = listing_root.rstrip("/")
+        if normalized:
+            listing_url = f"{listing_url}/{normalized}"
+        entries, _ = self._fetcher.fetch(listing_url, url_handler=url_handler)
+        return entries[:limit]
         
     def should_reindex(self, target_id: str) -> bool:
         """Determine if a target should be reindexed.
@@ -1044,3 +1076,175 @@ class FileRecord:
     modified: datetime | None
     protocol: str
     checksum: str | None = None
+
+
+def start_indexer_thread(
+    indexer: "Indexer",
+    index_db: DatabaseManager,
+    stop_event: threading.Event,
+    *,
+    idle_seconds: int = 600,
+    accelerated_seconds: int = 60,
+) -> threading.Thread:
+    """Start the progressive indexing background loop."""
+
+    def _loop() -> None:
+        accelerated_until: datetime | None = None
+        first_access_seen = False
+        while not stop_event.is_set():
+            sleep_for = idle_seconds
+            try:
+                targets, next_due = indexer.get_targets_for_indexing()
+                if targets:
+                    _logger.debug("Starting progressive indexing for %d targets", len(targets))
+                    results = indexer.index_all_targets(targets)
+                    success_count = sum(1 for success in results.values() if success)
+                    _logger.debug(
+                        "Progressive indexing completed: %d/%d successful",
+                        success_count,
+                        len(targets),
+                    )
+                    failed_targets = [target_id for target_id, success in results.items() if not success]
+                    if failed_targets:
+                        _logger.warning("Indexing failed for targets: %s", ", ".join(failed_targets))
+                else:
+                    _logger.debug("No targets need indexing at this time")
+
+                access_stats = index_db.access_summary()
+                if access_stats.get("total") and not first_access_seen:
+                    first_access_seen = True
+                    accelerated_until = datetime.now(timezone.utc) + timedelta(hours=1)
+                if accelerated_until and accelerated_until < datetime.now(timezone.utc):
+                    accelerated_until = None
+
+                base_interval = accelerated_seconds if accelerated_until else idle_seconds
+                sleep_for = base_interval
+                if not targets and next_due is not None:
+                    if next_due > base_interval:
+                        sleep_for = next_due
+                    elif next_due <= 0:
+                        sleep_for = base_interval
+                    else:
+                        sleep_for = max(1.0, min(base_interval, next_due))
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.error("Indexer task failed: %s", exc, exc_info=True)
+                sleep_for = 300
+            stop_event.wait(sleep_for)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def start_availability_probe_thread(
+    indexer: "Indexer",
+    index_db: DatabaseManager,
+    cachelinks: CachelinkIndex,
+    datadir_registry: "DatadirRegistry",
+    staging: "StagingArea",
+    fetcher: "Fetcher",
+    stop_event: threading.Event,
+    *,
+    interval_seconds: int = 24 * 3600,
+) -> threading.Thread:
+    """Start periodic availability probing for cached remotes."""
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            try:
+                _run_availability_probe(
+                    indexer,
+                    index_db,
+                    cachelinks,
+                    datadir_registry,
+                    staging,
+                    fetcher,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.error("Availability probe failed: %s", exc, exc_info=True)
+            stop_event.wait(interval_seconds)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def _run_availability_probe(
+    indexer: "Indexer",
+    index_db: DatabaseManager,
+    cachelinks: CachelinkIndex,
+    datadir_registry: "DatadirRegistry",
+    staging: "StagingArea",
+    fetcher: "Fetcher",
+) -> None:
+    if not cachelinks.cachelinks:
+        return
+    if not datadir_registry.storages:
+        return
+
+    candidate = None
+    seen = 0
+    for descriptor in cachelinks.cachelinks.values():
+        entries = index_db.list_entries_for_descriptor(descriptor)
+        for entry in entries:
+            if entry.is_dir:
+                continue
+            rel = (entry.path or "").strip("/")
+            if not rel:
+                continue
+            datadir_rel = descriptor.backend_relative_folder / PurePosixPath(rel)
+            datadir_path = datadir_registry.primary.resolve(datadir_rel)
+            if datadir_path.exists():
+                continue
+            seen += 1
+            if random.randrange(seen) == 0:
+                candidate = (descriptor, entry, datadir_rel)
+
+    if not candidate:
+        return
+    descriptor, entry, datadir_rel = candidate
+    remote_url = entry.remote_url
+    if not remote_url:
+        return
+
+    staging_path = staging.reserve_tempfile("probe")
+    result = fetcher.download_file(
+        remote_url,
+        staging_path,
+        url_handler=descriptor.url_handler,
+    )
+    if not result.success:
+        message = result.error_message or ""
+        _logger.warning("Availability probe failed for %s: %s", remote_url, message)
+        if "404" in message or "5xx" in message or "http 5" in message:
+            state = index_db.ensure_target(descriptor, descriptor.remote_listing_url)
+            index_db.mark_needs_full(state.id)
+        try:
+            if staging_path.exists():
+                staging_path.unlink()
+        except OSError:
+            pass
+        return
+
+    datadir_path = datadir_registry.primary.resolve(datadir_rel)
+    datadir_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(staging_path), str(datadir_path))
+    _record_backend_checksum(index_db, datadir_rel, datadir_path, source="probe")
+    _logger.info("Availability probe cached %s", datadir_rel.as_posix())
+
+
+def _record_backend_checksum(
+    index_db: DatabaseManager,
+    datadir_rel: PurePosixPath,
+    datadir_path: Path,
+    *,
+    source: str,
+) -> None:
+    try:
+        digest = hashlib.sha256()
+        with open(datadir_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        index_db.record_backend_checksum(datadir_rel, "sha256", digest.hexdigest(), source=source)
+    except Exception:
+        return

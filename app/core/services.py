@@ -6,8 +6,11 @@ from abc import ABC, abstractmethod
 from collections import deque
 import logging
 from pathlib import Path
+import threading
 from typing import Any, TYPE_CHECKING
 
+from auth.credentials import AuthenticationManager, start_session_cleanup_thread
+from auth.tls import TLSAutomationService, create_tls_automation_service, start_tls_automation_thread
 from cache.cachelinks import CachelinkIndex, load_cachelinks
 from cache.checksum import ChecksumCatalog
 from core.config import (
@@ -16,26 +19,35 @@ from core.config import (
     load_database_backed_settings_from_manager,
     validate_settings,
 )
-from db.dbmanage import load_database_settings, load_bootstrap_data
-from core.logging import configure_logging
 from core.errors import (
     ServiceDependencyError,
     ServiceInitializationError,
     ServiceStartError,
 )
-from auth.credentials import AuthenticationManager
-from auth.tls import TLSAutomationService, create_tls_automation_service
-from net.fetcher import Fetcher
-from net.indexer import Indexer
+from core.logging import configure_logging
+from db.backupmgmt import DatabaseBackupManager
+from db.dbmanage import DatabaseManager, load_bootstrap_data, load_database_settings
+from hosting.dispatcher import HostingDispatcher
+from hosting.webdav import (
+    CacheInfinityDomainController,
+    HostingContext,
+    WebDAVProvider,
+    _ReloadableApp,
+    _UIReloadableApp,
+    build_user_mapping,
+)
+from net.fetcher import Fetcher, start_download_queue_thread
+from net.indexer import Indexer, start_availability_probe_thread, start_indexer_thread
+from storage.configuration import ConfigurationManager
 from storage.datadir import DatadirRegistry
 from storage.staging import StagingArea
-from storage.configuration import ConfigurationManager
+from ui.api import create_api_app
 from ui.web.webcore import WebUIApp
-from db.backupmgmt import DatabaseBackupManager
 
-if TYPE_CHECKING:
-    from core.server import CacheInfinityService
-from db.dbmanage import DatabaseManager
+if TYPE_CHECKING:  # pragma: no cover - optional dependency
+    from wsgidav.wsgidav_app import WsgiDAVApp
+else:  # pragma: no cover - fallback when WsgiDAV is not installed
+    WsgiDAVApp = Any
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -130,7 +142,7 @@ class ServiceManager:
     def _resolve_order(self) -> list[str]:
         missing = []
         for name, service in self._services.items():
-            for dep in getattr(service, "dependencies", ()):
+            for dep in getattr(service, "dependencies", ()): 
                 if dep not in self._services:
                     missing.append((name, dep))
         if missing:
@@ -141,7 +153,7 @@ class ServiceManager:
         graph: dict[str, list[str]] = {name: [] for name in self._services}
         for name, service in self._services.items():
             incoming.setdefault(name, 0)
-            for dep in getattr(service, "dependencies", ()):
+            for dep in getattr(service, "dependencies", ()): 
                 graph[dep].append(name)
                 incoming[name] = incoming.get(name, 0) + 1
 
@@ -174,7 +186,7 @@ def create_service_manager() -> ServiceManager:
     manager.register(FetcherService())
     manager.register(IndexerService())
     manager.register(ChecksumService())
-    manager.register(ApplicationService())
+    manager.register(BackgroundTaskService())
     manager.register(WebDAVService())
     manager.register(WebUIService())
     return manager
@@ -310,7 +322,7 @@ class AuthService(BaseService):
     """Initializes authentication manager for WebUI and service authentication."""
 
     name = "auth"
-    dependencies = ("database", "config")
+    dependencies = ("database",)
 
     def __init__(self) -> None:
         self.auth_manager: AuthenticationManager | None = None
@@ -334,17 +346,31 @@ class TLSService(BaseService):
 
     def __init__(self) -> None:
         self.tls_automation: TLSAutomationService | None = None
+        self._stop_event: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+        self._settings: Settings | None = None
 
     def initialize(self, context: dict[str, Any]) -> None:
         config_service: ConfigManagerService = context["config"]
         settings = config_service.settings
         self.tls_automation = create_tls_automation_service(settings.config_dir, settings.tls)
+        self._settings = settings
 
     def start(self) -> None:
-        return None
+        if not self.tls_automation or not self._settings:
+            return
+        self._stop_event = threading.Event()
+        self._thread = start_tls_automation_thread(
+            self.tls_automation,
+            self._settings.tls,
+            self._stop_event,
+        )
 
     def stop(self) -> None:
-        return None
+        if self._stop_event:
+            self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
 
 
 class StorageService(BaseService):
@@ -461,76 +487,104 @@ class ChecksumService(BaseService):
         return None
 
 
-class ApplicationService(BaseService):
-    """Builds the CacheInfinity application services."""
+class BackgroundTaskService(BaseService):
+    """Runs long-lived background loops for housekeeping and indexing."""
 
-    name = "application"
-    dependencies = (
-        "database",
-        "config",
-        "logging",
-        "auth",
-        "tls",
-        "storage",
-        "cachelinks",
-        "fetcher",
-        "indexer",
-        "checksums",
-    )
+    name = "background"
+    dependencies = ("database", "storage", "cachelinks", "fetcher", "indexer")
 
     def __init__(self) -> None:
-        self.service: CacheInfinityService | None = None
+        self._stop_event: threading.Event | None = None
+        self._threads: list[threading.Thread] = []
+        self._context: dict[str, Any] = {}
 
     def initialize(self, context: dict[str, Any]) -> None:
-        from core.server import CacheInfinityService
-
-        config_service: ConfigManagerService = context["config"]
-        database_service: DatabaseService = context["database"]
-        auth_service: AuthService = context["auth"]
-        tls_service: TLSService = context["tls"]
-        storage_service: StorageService = context["storage"]
-        cachelinks_service: CachelinksService = context["cachelinks"]
-        fetcher_service: FetcherService = context["fetcher"]
-        indexer_service: IndexerService = context["indexer"]
-        checksum_service: ChecksumService = context["checksums"]
-        self.service = CacheInfinityService.from_settings_with_database(
-            config_service.settings,
-            database_service.database_manager,
-            auth_manager=auth_service.auth_manager,
-            tls_automation=tls_service.tls_automation,
-            datadir_registry=storage_service.datadir_registry,
-            staging=storage_service.staging,
-            cachelinks=cachelinks_service.cachelinks,
-            fetcher=fetcher_service.fetcher,
-            indexer=indexer_service.indexer,
-            checksum_catalog=checksum_service.catalog,
-            build_apps=False,
-            state_store=None,
-        )
-        self.service._reload_args = context["args"]
-        self.service._reload_env = dict(context["env"])
+        self._stop_event = threading.Event()
+        self._context = context
 
     def start(self) -> None:
-        if self.service:
-            self.service.start_background_tasks()
+        if not self._stop_event:
+            return
+        database_service: DatabaseService = self._context["database"]
+        storage_service: StorageService = self._context["storage"]
+        cachelinks_service: CachelinksService = self._context["cachelinks"]
+        fetcher_service: FetcherService = self._context["fetcher"]
+        indexer_service: IndexerService = self._context["indexer"]
+
+        self._threads = []
+        if database_service.database_manager:
+            self._threads.append(
+                start_session_cleanup_thread(
+                    database_service.database_manager,
+                    self._stop_event,
+                )
+            )
+        if indexer_service.indexer and database_service.database_manager:
+            self._threads.append(
+                start_indexer_thread(
+                    indexer_service.indexer,
+                    database_service.database_manager,
+                    self._stop_event,
+                )
+            )
+        if (
+            indexer_service.indexer
+            and database_service.database_manager
+            and cachelinks_service.cachelinks
+            and storage_service.datadir_registry
+            and storage_service.staging
+            and fetcher_service.fetcher
+        ):
+            self._threads.append(
+                start_availability_probe_thread(
+                    indexer_service.indexer,
+                    database_service.database_manager,
+                    cachelinks_service.cachelinks,
+                    storage_service.datadir_registry,
+                    storage_service.staging,
+                    fetcher_service.fetcher,
+                    self._stop_event,
+                )
+            )
+        if (
+            fetcher_service.fetcher
+            and database_service.database_manager
+            and storage_service.datadir_registry
+        ):
+            self._threads.append(
+                start_download_queue_thread(
+                    fetcher_service.fetcher,
+                    database_service.database_manager,
+                    storage_service.datadir_registry,
+                    self._stop_event,
+                )
+            )
 
     def stop(self) -> None:
-        if self.service:
-            self.service._background_running = False
+        if self._stop_event:
+            self._stop_event.set()
+        for thread in self._threads:
+            thread.join(timeout=1.0)
 
 
 class WebDAVService(BaseService):
     """Builds the WsgiDAV application."""
 
     name = "webdav"
-    dependencies = ("application",)
+    dependencies = ("database", "config", "auth", "storage", "cachelinks", "fetcher")
+
+    def __init__(self) -> None:
+        self.app: Any | None = None
 
     def initialize(self, context: dict[str, Any]) -> None:
-        app_service: ApplicationService = context["application"]
-        service = app_service.service
-        if not service:
-            raise ServiceInitializationError(self.name, "application service not initialized")
+        config_service: ConfigManagerService = context["config"]
+        database_service: DatabaseService = context["database"]
+        auth_service: AuthService = context["auth"]
+        storage_service: StorageService = context["storage"]
+        cachelinks_service: CachelinksService = context["cachelinks"]
+        fetcher_service: FetcherService = context["fetcher"]
         args = context.get("args")
+
         if getattr(args, "disable_webdav", False):
             _LOGGER.info("WebDAV disabled via --disable-webdav")
 
@@ -541,7 +595,7 @@ class WebDAVService(BaseService):
                 )
                 return [b"WebDAV disabled via --disable-webdav"]
 
-            service.set_wsgi_app(disabled_app)
+            self.app = disabled_app
             return
         try:
             from wsgidav.wsgidav_app import WsgiDAVApp
@@ -551,13 +605,17 @@ class WebDAVService(BaseService):
                 "WsgiDAV is not installed; install the 'wsgidav' extra to enable WebDAV",
             ) from exc
 
-        from hosting.webdav import CacheInfinityDomainController, WebDAVProvider
-        from hosting.dispatcher import HostingDispatcher
-        from ui.api import create_api_app
-
-        # Create WebDAV app
-        provider = WebDAVProvider(service)
-        user_mapping = service._build_user_mapping()
+        context_obj = HostingContext(
+            settings=config_service.settings,
+            index_db=database_service.database_manager,
+            datadir_registry=storage_service.datadir_registry,
+            staging=storage_service.staging,
+            cachelinks=cachelinks_service.cachelinks,
+            fetcher=fetcher_service.fetcher,
+            auth_manager=auth_service.auth_manager,
+        )
+        user_mapping = build_user_mapping(config_service.settings)
+        provider = WebDAVProvider(context_obj)
         webdav_config = {
             "provider_mapping": {"/": provider},
             "simple_dc": {"user_mapping": user_mapping},
@@ -567,20 +625,16 @@ class WebDAVService(BaseService):
                 "accept_digest": True,
                 "default_to_digest": False,
             },
-            "cacheinfinity_service": service,
+            "cacheinfinity_context": context_obj,
         }
         webdav_app = WsgiDAVApp(webdav_config)
 
-        # Create read-only admin API app
-        api_app = create_api_app(service)
+        api_app = create_api_app(context=context_obj)
 
-        # Create dispatcher that routes /dav to WebDAV and /api to read-only admin API
-        dispatcher = HostingDispatcher(service)
+        dispatcher = HostingDispatcher()
         dispatcher.set_webdav_app(webdav_app)
         dispatcher.set_api_app(api_app)
-        dispatcher_app = dispatcher.get_wsgi_app()
-
-        service.set_wsgi_app(dispatcher_app)
+        self.app = dispatcher.get_wsgi_app()
 
     def start(self) -> None:
         return None
@@ -593,21 +647,47 @@ class WebUIService(BaseService):
     """Builds the WebUI application."""
 
     name = "webui"
-    dependencies = ("application",)
+    dependencies = ("database", "config", "auth", "storage", "cachelinks", "fetcher", "indexer", "checksums")
+
+    def __init__(self) -> None:
+        self.app: Any | None = None
 
     def initialize(self, context: dict[str, Any]) -> None:
         args = context["args"]
         if getattr(args, "disable_ui", False):
+            self.app = self._disabled_app
             return
-        app_service: ApplicationService = context["application"]
-        app = WebUIApp(app_service.service)
-        app_service.service.set_webui_app(app)
+        config_service: ConfigManagerService = context["config"]
+        database_service: DatabaseService = context["database"]
+        auth_service: AuthService = context["auth"]
+        storage_service: StorageService = context["storage"]
+        cachelinks_service: CachelinksService = context["cachelinks"]
+        fetcher_service: FetcherService = context["fetcher"]
+        indexer_service: IndexerService = context["indexer"]
+        checksum_service: ChecksumService = context["checksums"]
+
+        self.app = WebUIApp(
+            settings=config_service.settings,
+            index_db=database_service.database_manager,
+            auth_manager=auth_service.auth_manager,
+            datadir_registry=storage_service.datadir_registry,
+            staging=storage_service.staging,
+            cachelinks=cachelinks_service.cachelinks,
+            fetcher=fetcher_service.fetcher,
+            indexer=indexer_service.indexer,
+            checksum_catalog=checksum_service.catalog,
+        )
 
     def start(self) -> None:
         return None
 
     def stop(self) -> None:
         return None
+
+    @staticmethod
+    def _disabled_app(environ, start_response):
+        start_response("503 Service Unavailable", [("Content-Type", "text/plain")])
+        return [b"WebUI disabled via --disable-ui"]
 
 
 def _build_datadir_registry(settings: Settings) -> DatadirRegistry:
@@ -637,22 +717,6 @@ def _build_cachelinks(settings: Settings) -> CachelinkIndex:
     return cachelinks
 
 
-def _build_database(settings: Settings) -> DatabaseManager:
-    index_db = DatabaseManager.from_settings(settings.database)
-    _LOGGER.debug("Initialized database connection with engine: %s", settings.database.engine)
-    return index_db
-
-
-def _sync_database_state(
-    index_db: DatabaseManager,
-    cachelinks: CachelinkIndex,
-) -> None:
-    index_db.ensure_default_admin()
-    _LOGGER.debug("Ensured default admin user exists")
-    index_db.replace_cachelinks(cachelinks.cachelinks.values())
-    _LOGGER.debug("Replaced cachelinks in database")
-
-
 def _build_checksum_catalog(settings: Settings, index_db: DatabaseManager) -> ChecksumCatalog:
     checksum_catalog = ChecksumCatalog(index_db)
     _LOGGER.debug("Initialized checksum catalog")
@@ -662,8 +726,11 @@ def _build_checksum_catalog(settings: Settings, index_db: DatabaseManager) -> Ch
 def _build_fetcher(settings: Settings) -> Fetcher:
     fetcher = Fetcher(
         settings.cookies,
-        rclone_config_path=settings.rclone.config_path,
-        rclone_enabled=settings.rclone.enabled,
+        staging_definition=settings.staging,
+        zip_caching_limits={
+            "max_zip_total_gb": settings.limits.max_zip_total_gb,
+            "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
+        },
     )
     _LOGGER.debug("Initialized fetcher with %d cookie domains", len(settings.cookies))
     return fetcher
@@ -679,8 +746,6 @@ def _build_indexer(
         settings.cookies,
         index_db,
         cachelinks,
-        rclone_config_path=settings.rclone.config_path,
-        rclone_enabled=settings.rclone.enabled,
     )
     _LOGGER.debug(
         "Initialized indexer with settings: min_days=%d, max_days=%d",
@@ -688,15 +753,3 @@ def _build_indexer(
         settings.indexing.max_full_reindex_days,
     )
     return indexer
-
-
-def _build_tls_service(settings: Settings) -> TLSAutomationService | None:
-    service = create_tls_automation_service(settings.config_dir, settings.tls)
-    _LOGGER.debug("Initialized TLS automation service with mode: %s", settings.tls.mode)
-    return service
-
-
-def _build_auth_manager(index_db: DatabaseManager) -> AuthenticationManager:
-    auth_manager = AuthenticationManager(index_db.adapter)
-    _LOGGER.debug("Initialized AuthenticationManager")
-    return auth_manager

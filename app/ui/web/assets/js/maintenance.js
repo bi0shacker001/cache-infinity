@@ -11,6 +11,7 @@ export function initMaintenance() {
   if (topbar) topbar.innerHTML = '';
   loadDegraded();
   loadDownloadQueue();
+  loadSshHostKeys();
   setupMaintenanceEventListeners();
 }
 
@@ -38,6 +39,8 @@ function setupMaintenanceEventListeners() {
   bindClick('reload-btn', requestReload);
   bindClick('reinit-btn', requestReinit);
   bindClick('download-refresh', loadDownloadQueue);
+  bindClick('ssh-host-key-generate', requestSshHostKeyGenerate);
+  bindClick('ssh-host-key-rotate', requestSshHostKeyRotate);
 
   const statusFilter = document.getElementById('download-status-filter');
   if (statusFilter) {
@@ -229,9 +232,125 @@ async function handleDownloadAction(event) {
   }
 }
 
+async function loadSshHostKeys() {
+  const container = document.getElementById('ssh-host-key-table');
+  if (!container) return;
+  const status = document.getElementById('ssh-host-key-status');
+  if (status) {
+    status.textContent = '';
+    status.className = 'status-msg';
+  }
+
+  try {
+    const data = await fetchJSON('ssh-host-keys');
+    const keys = data.keys || [];
+    if (!keys.length) {
+      container.innerHTML = '<p class="empty">No SSH host keys stored.</p>';
+      return;
+    }
+
+    const rows = keys.map((key) => `<tr>
+        <td>${escapeHtml(key.key_type || '')}</td>
+        <td>${key.fingerprint ? `<code>${escapeHtml(key.fingerprint)}</code>` : '—'}</td>
+        <td>${formatTimestamp(key.updated_at)}</td>
+        <td><button class="btn-link" data-action="ssh-host-key-delete" data-key="${escapeHtml(key.key_type || '')}">Delete</button></td>
+      </tr>`).join('');
+
+    container.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Type</th><th>Fingerprint</th><th>Updated</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+
+    container.querySelectorAll('button[data-action="ssh-host-key-delete"]')
+      .forEach((button) => button.addEventListener('click', handleSshHostKeyDelete));
+  } catch (err) {
+    container.textContent = err.message;
+  }
+}
+
+async function requestSshHostKeyGenerate() {
+  const status = document.getElementById('ssh-host-key-status');
+  const keyType = document.getElementById('ssh-host-key-type')?.value || 'rsa';
+  if (status) {
+    status.textContent = `Generating ${keyType} host key...`;
+    status.className = 'status-msg';
+  }
+  try {
+    await fetchJSON('ssh-host-keys/generate', {
+      method: 'POST',
+      body: JSON.stringify({ key_type: keyType }),
+    });
+    if (status) {
+      status.textContent = `${keyType} host key generated.`;
+      status.className = 'status-msg success';
+    }
+    loadSshHostKeys();
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message;
+      status.className = 'status-msg error';
+    }
+  }
+}
+
+async function requestSshHostKeyRotate() {
+  const status = document.getElementById('ssh-host-key-status');
+  if (!confirm('Rotate all SSH host keys? Clients will see new fingerprints.')) return;
+  if (status) {
+    status.textContent = 'Rotating SSH host keys...';
+    status.className = 'status-msg';
+  }
+  try {
+    await fetchJSON('ssh-host-keys/rotate', { method: 'POST', body: JSON.stringify({}) });
+    if (status) {
+      status.textContent = 'SSH host keys rotated.';
+      status.className = 'status-msg success';
+    }
+    loadSshHostKeys();
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message;
+      status.className = 'status-msg error';
+    }
+  }
+}
+
+async function handleSshHostKeyDelete(event) {
+  const keyType = event.target.dataset.key;
+  if (!keyType) return;
+  if (!confirm(`Delete ${keyType} host key?`)) return;
+  const status = document.getElementById('ssh-host-key-status');
+  if (status) {
+    status.textContent = `Deleting ${keyType} host key...`;
+    status.className = 'status-msg';
+  }
+  try {
+    await fetchJSON(`ssh-host-keys/${encodeURIComponent(keyType)}`, { method: 'DELETE' });
+    if (status) {
+      status.textContent = `${keyType} host key deleted.`;
+      status.className = 'status-msg success';
+    }
+    loadSshHostKeys();
+  } catch (err) {
+    if (status) {
+      status.textContent = err.message;
+      status.className = 'status-msg error';
+    }
+  }
+}
+
 function formatTimestamp(ts) {
   if (!ts) return '—';
-  const date = new Date(Number(ts) * 1000);
+  let date;
+  if (typeof ts === 'string') {
+    if (/^\d+$/.test(ts)) {
+      date = new Date(Number(ts) * 1000);
+    } else {
+      date = new Date(ts);
+    }
+  } else {
+    date = new Date(Number(ts) * 1000);
+  }
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString();
 }

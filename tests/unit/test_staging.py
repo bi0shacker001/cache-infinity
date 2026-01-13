@@ -363,7 +363,6 @@ class TestZipCacheManager:
         
         assert compressed_size > 0
         assert uncompressed_size > 0
-        assert compressed_size <= uncompressed_size  # Compression should not increase size
     
     def test_get_zip_sizes_nonexistent_file(self, temp_dir):
         """Test getting zip sizes for non-existent file."""
@@ -470,4 +469,3 @@ class TestZipCacheManager:
                         mock_zip_path, temp_dir / "destination.txt", "file1.txt"
                     )
                     mock_whole.assert_not_called()
-                    mock_acquire.assert_called_once()

@@ -13,6 +13,8 @@ from datetime import datetime
 from cache.cachelinks import CachelinkManager
 from .datadir import DatadirManager
 from .staging import StagingManager
+from net.fetcher import Fetcher
+from net.indexer import Indexer
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +27,8 @@ class VirtualFilesystem:
     combining local datadir content with remote cachelink content.
     """
     
-    def __init__(self, datadir_manager: DatadirManager, staging_manager: StagingManager, 
-                 cachelink_manager: CachelinkManager):
+    def __init__(self, datadir_manager: DatadirManager, staging_manager: StagingManager,
+                 cachelink_manager: CachelinkManager, fetcher: Fetcher, indexer: Indexer):
         """
         Initialize the Virtual Filesystem Layer
         
@@ -34,10 +36,14 @@ class VirtualFilesystem:
             datadir_manager: DatadirManager instance for local storage operations
             staging_manager: StagingManager instance for staging area operations
             cachelink_manager: CachelinkManager instance for remote content management
+            fetcher: Fetcher instance for remote file downloads
+            indexer: Indexer instance for remote directory listings
         """
         self.datadir = datadir_manager
         self.staging = staging_manager
         self.cachelinks = cachelink_manager
+        self.fetcher = fetcher
+        self.indexer = indexer
         
     def list_directory(self, path: str, include_remote: bool = True) -> List[Dict]:
         """
@@ -102,7 +108,7 @@ class VirtualFilesystem:
     
     def _list_remote_directory(self, path: str) -> List[Dict]:
         """
-        List remote entries from cachelinks
+        List remote entries using indexer
         
         Args:
             path: Path to list (relative to virtual root)
@@ -116,20 +122,30 @@ class VirtualFilesystem:
             
             entries = []
             for cachelink in applicable_cachelinks:
-                # Get remote listing for this cachelink
-                remote_listing = self.cachelinks.list_remote(cachelink, path)
+                # Use indexer to get remote listing for this cachelink
+                # This will automatically use direct rclone-python calls when needed
+                success, performed_action = self.indexer.index_target(
+                    cachelink.canonical_id,
+                    cachelink.remote_listing_url,
+                    cachelink.subfolder
+                )
                 
-                for item in remote_listing:
-                    entries.append({
-                        'name': item['name'],
-                        'path': item['path'],
-                        'is_dir': item['is_dir'],
-                        'size': item.get('size', 0),
-                        'mtime': item.get('mtime'),
-                        'cache_state': 'remote',
-                        'source': 'remote',
-                        'cachelink_id': cachelink.id
-                    })
+                if success:
+                    # Get the indexed entries from the database
+                    # This would need to be implemented to retrieve from indexer's database
+                    indexed_entries = self.indexer.db_manager.get_indexed_entries(cachelink.canonical_id) if self.indexer.db_manager else []
+                    
+                    for item in indexed_entries:
+                        entries.append({
+                            'name': item.get('name', ''),
+                            'path': item.get('path', ''),
+                            'is_dir': item.get('is_dir', False),
+                            'size': item.get('size', 0),
+                            'mtime': item.get('modified'),
+                            'cache_state': 'remote',
+                            'source': 'remote',
+                            'cachelink_id': cachelink.id
+                        })
             
             return entries
             
@@ -217,7 +233,7 @@ class VirtualFilesystem:
     
     def _get_remote_file_info(self, path: str) -> Optional[Dict]:
         """
-        Get information about a remote file
+        Get information about a remote file using indexer
         
         Args:
             path: Path to the file (relative to virtual root)
@@ -231,22 +247,45 @@ class VirtualFilesystem:
             if not cachelink:
                 return None
             
-            # Get remote file info
-            remote_info = self.cachelinks.get_remote_file_info(cachelink, path)
-            if not remote_info:
-                return None
+            # Use indexer to get file info from database
+            if self.indexer.db_manager:
+                file_info = self.indexer.db_manager.get_indexed_file_info(cachelink.canonical_id, path)
+                if file_info:
+                    return {
+                        'path': path,
+                        'name': os.path.basename(path),
+                        'is_dir': file_info.get('is_dir', False),
+                        'size': file_info.get('size', 0),
+                        'mtime': file_info.get('modified'),
+                        'cache_state': 'remote',
+                        'source': 'remote',
+                        'cachelink_id': cachelink.id,
+                        'remote_url': file_info.get('remote_url')
+                    }
             
-            return {
-                'path': path,
-                'name': os.path.basename(path),
-                'is_dir': remote_info.get('is_dir', False),
-                'size': remote_info.get('size', 0),
-                'mtime': remote_info.get('mtime'),
-                'cache_state': 'remote',
-                'source': 'remote',
-                'cachelink_id': cachelink.id,
-                'remote_url': remote_info.get('url')
-            }
+            # Fallback: use indexer to fetch current info
+            success, performed_action = self.indexer.index_target(
+                cachelink.canonical_id,
+                cachelink.remote_listing_url,
+                cachelink.subfolder
+            )
+            
+            if success and self.indexer.db_manager:
+                file_info = self.indexer.db_manager.get_indexed_file_info(cachelink.canonical_id, path)
+                if file_info:
+                    return {
+                        'path': path,
+                        'name': os.path.basename(path),
+                        'is_dir': file_info.get('is_dir', False),
+                        'size': file_info.get('size', 0),
+                        'mtime': file_info.get('modified'),
+                        'cache_state': 'remote',
+                        'source': 'remote',
+                        'cachelink_id': cachelink.id,
+                        'remote_url': file_info.get('remote_url')
+                    }
+            
+            return None
             
         except Exception as e:
             logger.error(f"Error getting remote file info for {path}: {e}")
@@ -298,7 +337,7 @@ class VirtualFilesystem:
     
     def _read_remote_file(self, path: str) -> Optional[bytes]:
         """
-        Read remote file content (triggers download if needed)
+        Read remote file content using fetcher (triggers download if needed)
         
         Args:
             path: Path to the file (relative to virtual root)
@@ -312,8 +351,27 @@ class VirtualFilesystem:
             if not cachelink:
                 return None
             
-            # Download file to staging and return content
-            return self.cachelinks.download_file(cachelink, path)
+            # Construct the full remote URL
+            if cachelink.subfolder and cachelink.subfolder != "/":
+                remote_url = f"{cachelink.remote_listing_url.rstrip('/')}/{cachelink.subfolder.lstrip('/')}/{path.lstrip('/')}"
+            else:
+                remote_url = f"{cachelink.remote_listing_url.rstrip('/')}/{path.lstrip('/')}"
+            
+            # Use fetcher to download the file
+            destination = self.datadir.get_full_path(path)
+            result = self.fetcher.download_file(
+                url=remote_url,
+                destination=destination,
+                resume=True,
+                timeout=300
+            )
+            
+            if result.success and result.file_path and result.file_path.exists():
+                # File was successfully downloaded, read it
+                with open(result.file_path, 'rb') as f:
+                    return f.read()
+            
+            return None
             
         except Exception as e:
             logger.error(f"Error reading remote file {path}: {e}")

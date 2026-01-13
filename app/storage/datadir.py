@@ -67,6 +67,16 @@ class DatadirStorage:
         path.parent.mkdir(parents=True, exist_ok=True)
         mode = "wb" if binary else "w"
         return path.open(mode)
+
+    def create_directory(self, relative_path: PurePosixPath | str) -> bool:
+        """Create a directory at the given relative path."""
+        try:
+            path = self.resolve(relative_path)
+            path.mkdir(parents=True, exist_ok=True)
+            return True
+        except Exception as exc:
+            _logger.error("Failed to create directory %s: %s", relative_path, exc)
+            return False
     
     def get_usage(self) -> Dict[str, Any]:
         """Get storage usage information.
@@ -152,6 +162,10 @@ class DatadirStorage:
             except:
                 pass
             return False
+
+    def write_bytes(self, relative_path: PurePosixPath | str, data: bytes) -> bool:
+        """Write bytes to a file inside the datadir."""
+        return self.atomic_write(relative_path, data)
     
     def get_file_info(self, relative_path: PurePosixPath | str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a file.
@@ -285,6 +299,32 @@ class DatadirStorage:
             return False
 
 
+class DatadirManager:
+    """Compatibility wrapper exposing a simplified datadir interface."""
+
+    def __init__(self, registry: "DatadirRegistry"):
+        self._registry = registry
+
+    @property
+    def primary(self) -> DatadirStorage:
+        return self._registry.primary
+
+    def get_full_path(self, relative_path: PurePosixPath | str) -> Path:
+        return self.primary.resolve(relative_path)
+
+    def list_directory(self, relative_path: PurePosixPath | str, recursive: bool = False) -> List[Dict[str, Any]]:
+        return self.primary.list_directory(relative_path, recursive=recursive)
+
+    def get_file_info(self, relative_path: PurePosixPath | str) -> Optional[Dict[str, Any]]:
+        return self.primary.get_file_info(relative_path)
+
+    def delete_file(self, relative_path: PurePosixPath | str) -> bool:
+        return self.primary.delete_file(relative_path)
+
+    def delete_directory(self, relative_path: PurePosixPath | str, recursive: bool = False) -> bool:
+        return self.primary.delete_directory(relative_path, recursive=recursive)
+
+
 @dataclass
 class DatadirRegistry:
     """Registry for all configured datadirs."""
@@ -302,6 +342,12 @@ class DatadirRegistry:
         if not self.primary_name or self.primary_name not in self.storages:
             raise KeyError("No primary datadir configured")
         return self.storages[self.primary_name]
+
+    def create_directory(self, relative_path: PurePosixPath | str) -> bool:
+        return self.primary.create_directory(relative_path)
+
+    def write_bytes(self, relative_path: PurePosixPath | str, data: bytes) -> bool:
+        return self.primary.write_bytes(relative_path, data)
 
 
 def _normalize_relative(value: PurePosixPath | str) -> tuple[str, ...]:

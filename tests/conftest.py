@@ -1,25 +1,20 @@
 """Shared test fixtures and configuration for CacheInfinity test suite."""
 
-import os
 import sys
 import tempfile
 import shutil
 import pytest
 from pathlib import Path
-from unittest.mock import Mock, MagicMock
-from datetime import datetime
+from unittest.mock import Mock
 
 # Add the app directory to the path for testing
 sys.path.insert(0, str(Path(__file__).parent.parent / 'app'))
 
 # Import CacheInfinity modules
-from core.config import ConfigManager
-from auth.credentials import AuthenticationManager
-from storage.datadir import DatadirManager
-from storage.staging import StagingManager, StagingDefinition
-from storage.vfs import VirtualFilesystem
+from auth.credentials import AuthenticationManager, SSHHostKeyManager, SSHHostKeyAdmin
+from storage.datadir import DatadirRegistry
+from storage.staging import StagingArea, StagingDefinition
 from db.schema import IndexDatabase
-from hosting.ftp import CacheInfinitySFTPHandler, SSHHostKeyManager, SSHHostKeyAdmin
 
 
 @pytest.fixture
@@ -33,7 +28,7 @@ def temp_dir():
 @pytest.fixture
 def mock_config_manager(temp_dir):
     """Create a mock configuration manager."""
-    config = Mock(spec=ConfigManager)
+    config = Mock()
     config.config_dir = temp_dir / "config"
     config.config_dir.mkdir(parents=True, exist_ok=True)
     config.datadir_mounts = [temp_dir / "datadir"]
@@ -73,7 +68,7 @@ def mock_auth_manager():
 @pytest.fixture
 def mock_datadir_manager(temp_dir, mock_config_manager):
     """Create a mock datadir manager."""
-    datadir = Mock(spec=DatadirManager)
+    datadir = Mock(spec=DatadirRegistry)
     datadir.primary = Mock()
     datadir.primary.get_full_path.return_value = temp_dir / "datadir"
     datadir.storages = [datadir.primary]
@@ -83,7 +78,7 @@ def mock_datadir_manager(temp_dir, mock_config_manager):
 @pytest.fixture
 def mock_staging_manager(temp_dir, mock_config_manager):
     """Create a mock staging manager."""
-    staging = Mock(spec=StagingManager)
+    staging = Mock(spec=StagingArea)
     staging.definition = mock_config_manager.staging
     staging.base_path = temp_dir / "staging"
     staging.base_path.mkdir(parents=True, exist_ok=True)
@@ -118,7 +113,7 @@ def mock_cachelink_manager():
 @pytest.fixture
 def mock_vfs(mock_datadir_manager, mock_staging_manager, mock_cachelink_manager):
     """Create a mock virtual filesystem."""
-    vfs = Mock(spec=VirtualFilesystem)
+    vfs = Mock()
     vfs.list_directory.return_value = []
     vfs.get_file_info.return_value = None
     vfs.read_file.return_value = None
@@ -161,7 +156,7 @@ def test_ssh_key():
 @pytest.fixture
 def mock_sftp_handler(mock_auth_manager, mock_datadir_manager, mock_cachelink_manager):
     """Create a mock SFTP handler for testing."""
-    handler = Mock(spec=CacheInfinitySFTPHandler)
+    handler = Mock()
     handler.auth_manager = mock_auth_manager
     handler.datadir_registry = mock_datadir_manager
     handler.cachelinks = mock_cachelink_manager

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import os
@@ -9,15 +10,19 @@ import time
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Optional, List, Any, Callable
+from pathlib import Path, PurePosixPath
+from typing import Dict, Optional, List, Any, Callable, TYPE_CHECKING
 from urllib.parse import urlparse
 
 from core.config import CookieJarDefinition
 from cache.checksum import ChecksumCalculator
 from storage.staging import StagingArea, StagingDefinition
+from db.dbmanage import DatabaseManager
 
 _logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from storage.datadir import DatadirRegistry
 
 
 def _import_pycurl():
@@ -134,21 +139,17 @@ class Fetcher:
         retry_delay: int = 5,
         verify_checksums: bool = True,
         max_concurrent: int = 3,
-        rclone_config_path: Optional[Path] = None,
-        rclone_enabled: bool = False,
         staging_definition: Optional[StagingDefinition] = None,
         zip_caching_limits: Optional[Dict[str, Any]] = None,
     ):
         """Initialize fetcher.
-        
+         
         Args:
             cookie_jars: Cookie jar definitions for authenticated domains
             max_retries: Maximum number of retry attempts
             retry_delay: Delay between retries in seconds
             verify_checksums: Whether to verify checksums after download
             max_concurrent: Maximum number of concurrent downloads
-            rclone_config_path: Optional path to rclone config file
-            rclone_enabled: Whether rclone support is enabled
             staging_definition: Staging area configuration
             zip_caching_limits: Zip caching configuration limits
         """
@@ -161,8 +162,6 @@ class Fetcher:
         self._active_downloads = 0
         self._download_lock = threading.Lock()
         self._progress_callbacks: List[Callable[[str, DownloadProgress], None]] = []
-        self._rclone_config_path = rclone_config_path
-        self._rclone_enabled = rclone_enabled
         
         # Initialize staging area for zip caching
         self.staging_definition = staging_definition or StagingDefinition()
@@ -173,7 +172,10 @@ class Fetcher:
             "max_zip_total_gb": 100,
             "one_zip_cache_at_a_time": False
         }
-        self.zip_cache_manager = self.staging_area.get_zip_cache_manager(self.zip_caching_limits)
+        self.zip_cache_manager = self.staging_area.get_zip_cache_manager(
+            self.zip_caching_limits,
+            self._download_zip_callback,
+        )
         
         _logger.debug("Fetcher initialized with zip caching support")
         
@@ -424,7 +426,9 @@ class Fetcher:
         last_error: str | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                with _rclone_env(self._rclone_config_path if self._rclone_enabled else None):
+                # Get Rclone configuration from database
+                rclone_config_path = self._get_rclone_config_path()
+                with _rclone_env(rclone_config_path):
                     rclone = _import_rclone()
                     if hasattr(rclone, "copyto"):
                         rclone.copyto(remote, str(destination))
@@ -574,6 +578,7 @@ class Fetcher:
         ]
         lines = header + [line for line in cookie_list if line and not line.startswith("#")]
         return "\n".join(lines) + "\n"
+    
     
     def batch_download(
         self,
@@ -853,6 +858,10 @@ class Fetcher:
                 duration=duration,
                 error_message=str(exc),
             )
+
+    def _download_zip_callback(self, url: str, destination: Path) -> DownloadResult:
+        """Download a zip file for the zip cache manager."""
+        return self.download_file(url, destination)
     
     def is_zip_file_url(self, url: str) -> bool:
         """Check if a URL points to a zip file.
@@ -954,3 +963,148 @@ class Fetcher:
                 destination=destination,
                 expected_checksum=expected_checksum
             )
+
+
+def start_download_queue_thread(
+    fetcher: Fetcher,
+    index_db: DatabaseManager,
+    datadir_registry: "DatadirRegistry",
+    stop_event: threading.Event,
+    *,
+    interval_seconds: int = 300,
+    limit: int = 10,
+    max_concurrent: int = 3,
+) -> threading.Thread:
+    """Start a background thread to process queued downloads."""
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            try:
+                pending, id_by_url = _collect_pending_downloads(index_db, datadir_registry, limit=limit)
+                if pending:
+                    _logger.debug("Processing %d pending downloads", len(pending))
+
+                    def _progress(url: str, progress) -> None:
+                        job_id = id_by_url.get(url)
+                        if job_id is None:
+                            return
+                        try:
+                            _update_download_progress(index_db, job_id, progress.downloaded)
+                        except Exception:
+                            _logger.debug("Progress update failed for job %s", job_id)
+
+                    results = fetcher.batch_download(
+                        pending,
+                        max_concurrent=max_concurrent,
+                        progress_callback=_progress,
+                    )
+                    _update_pending_downloads(index_db, datadir_registry, pending, results)
+                else:
+                    _logger.debug("No pending downloads to process")
+            except Exception as exc:  # pragma: no cover - defensive
+                _logger.error("Fetcher queue failed: %s", exc, exc_info=True)
+            stop_event.wait(interval_seconds)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def _collect_pending_downloads(
+    index_db: DatabaseManager,
+    datadir_registry: "DatadirRegistry",
+    *,
+    limit: int,
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    jobs = index_db.claim_pending_downloads(limit=limit)
+    downloads: list[dict[str, Any]] = []
+    id_by_url: dict[str, int] = {}
+    for job in jobs:
+        dest_rel = PurePosixPath(str(job.get("destination", "")).lstrip("/"))
+        dest_path = datadir_registry.primary.resolve(dest_rel)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        url = job.get("url")
+        if isinstance(url, str):
+            id_by_url[url] = job.get("id")
+        downloads.append(
+            {
+                "id": job.get("id"),
+                "url": url,
+                "destination": str(dest_path),
+                "checksum": job.get("expected_checksum"),
+                "resume": True,
+                "timeout": 300,
+                "relative_path": dest_rel,
+            }
+        )
+    return downloads, id_by_url
+
+
+def _update_pending_downloads(
+    index_db: DatabaseManager,
+    datadir_registry: "DatadirRegistry",
+    jobs: list[dict[str, Any]],
+    results: Dict[str, DownloadResult],
+) -> None:
+    for job in jobs:
+        job_id = job.get("id")
+        url = job.get("url")
+        if job_id is None or not url:
+            continue
+        result = results.get(url)
+        if not result:
+            continue
+
+        if result.success and getattr(result, "verified", True):
+            rel = job.get("relative_path")
+            if isinstance(rel, PurePosixPath):
+                datadir_path = datadir_registry.primary.resolve(rel)
+                if datadir_path.exists():
+                    _record_backend_checksum(index_db, rel, datadir_path)
+            index_db.update_download_status(
+                job_id,
+                status="completed",
+                bytes_downloaded=getattr(result, "size", 0),
+                error_message="",
+                actual_checksum=getattr(result, "checksum", None),
+                verified=getattr(result, "verified", None),
+                completed_at=int(time.time()),
+            )
+        else:
+            message = getattr(result, "error_message", "") or "download failed"
+            if result.success and not getattr(result, "verified", True):
+                message = "checksum verification failed"
+            index_db.update_download_status(
+                job_id,
+                status="failed",
+                bytes_downloaded=getattr(result, "size", 0),
+                error_message=message,
+                actual_checksum=getattr(result, "checksum", None),
+                verified=getattr(result, "verified", None),
+                completed_at=int(time.time()),
+            )
+
+
+def _update_download_progress(index_db: DatabaseManager, job_id: int, downloaded: int) -> None:
+    index_db.update_download_status(
+        job_id,
+        status="in_progress",
+        bytes_downloaded=max(0, int(downloaded)),
+        error_message="",
+        verified=None,
+    )
+
+
+def _record_backend_checksum(
+    index_db: DatabaseManager,
+    datadir_rel: PurePosixPath,
+    datadir_path: Path,
+) -> None:
+    try:
+        digest = hashlib.sha256()
+        with open(datadir_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        index_db.record_backend_checksum(datadir_rel, "sha256", digest.hexdigest(), source="download")
+    except Exception:
+        return

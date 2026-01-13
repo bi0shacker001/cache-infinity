@@ -16,5 +16,10 @@ PrivateTmp=true
 NoNewPrivileges=true
 ReadWritePaths=/var/lib/cacheinfinity /var/log/cacheinfinity
 
+# Rclone is now a mandatory dependency for CacheInfinity
+# Ensure rclone-python is installed in the Python environment:
+# pip install rclone-python
+# Also ensure Rclone remotes are configured via the WebUI before starting the service
+
 [Install]
 WantedBy=multi-user.target

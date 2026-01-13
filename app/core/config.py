@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import yaml
@@ -14,7 +14,7 @@ import yaml
 # CookieJarDefinition is defined in this file, no need to import it
 from cache.cachelinks import _detect_mode
 from db.dbmanage import DatabaseManager, DatabaseSettings, load_database_settings
-from storage.datadir import DatadirDefinition
+from storage.datadir import DatadirDefinition, DatadirRegistry
 from storage.staging import StagingDefinition
 
 from .errors import ConfigError
@@ -53,9 +53,27 @@ class FTPConfig:
 class ConfigService:
     """Configuration service backed by the database."""
 
-    def __init__(self, service):
-        self._service = service
+    def __init__(
+        self,
+        config_dir: Path,
+        db_manager: DatabaseManager,
+        settings: "Settings",
+        datadir_registry: DatadirRegistry | None = None,
+    ) -> None:
+        self._config_dir = Path(config_dir)
+        self._db_manager = db_manager
+        self._settings = settings
+        self._datadir_registry = datadir_registry
         self._logger = logging.getLogger(__name__)
+
+    @property
+    def settings(self) -> "Settings":
+        return self._settings
+
+    def update_settings(self, settings: "Settings", *, datadir_registry: DatadirRegistry | None = None) -> None:
+        self._settings = settings
+        if datadir_registry is not None:
+            self._datadir_registry = datadir_registry
 
     def persist_state_snapshot(self) -> None:
         index_db = self._resolve_index_db()
@@ -66,16 +84,12 @@ class ConfigService:
         settings_text = json.dumps(settings_payload, sort_keys=True)
         cachelinks_text = json.dumps(cachelinks_payload, sort_keys=True)
         index_db.save_config_snapshot(settings_text, cachelinks_text)
-        state_store = getattr(self._service, "_state_store", None)
-        if state_store:
-            state_store.save_state(settings_text, cachelinks_text)
 
     def update_settings_detail(self, payload: dict[str, object]) -> None:
         index_db = self._resolve_index_db()
         if not index_db:
             raise ConfigError("Database not initialized")
-        adapter = index_db._db
-        config_dir = self._service.settings.config_dir
+        adapter = self._db_manager.adapter
 
         if "paths" in payload:
             adapter.execute("DELETE FROM config_backends")
@@ -115,19 +129,23 @@ class ConfigService:
 
         if "rclone" in payload:
             rclone = payload.get("rclone") or {}
-            config_path = rclone.get("config_path") or None
-            if config_path:
-                config_path = Path(config_path)
-                if not config_path.is_absolute():
-                    config_path = config_dir / config_path
-                config_path = str(config_path)
+            existing_rclone = index_db.get_rclone() or {}
+            remotes = rclone.get("remotes") if "remotes" in rclone else existing_rclone.get("remotes", {})
+            if isinstance(remotes, str):
+                try:
+                    remotes = json.loads(remotes)
+                except json.JSONDecodeError:
+                    remotes = {}
             index_db.save_rclone(
                 {
-                    "enabled": bool(rclone.get("enabled", False)),
-                    "config_path": config_path,
-                    "rc_url": rclone.get("rc_url") or None,
-                    "rc_user": rclone.get("rc_user") or None,
-                    "rc_pass": rclone.get("rc_pass") or None,
+                    "remotes": remotes,
+                    "bandwidth_limit": rclone.get("bandwidth_limit", existing_rclone.get("bandwidth_limit")),
+                    "transfer_concurrency": int(
+                        rclone.get("transfer_concurrency", existing_rclone.get("transfer_concurrency") or 4)
+                    ),
+                    "checkers": int(rclone.get("checkers", existing_rclone.get("checkers") or 8)),
+                    "timeout": int(rclone.get("timeout", existing_rclone.get("timeout") or 300)),
+                    "retries": int(rclone.get("retries", existing_rclone.get("retries") or 3)),
                 }
             )
 
@@ -213,11 +231,11 @@ class ConfigService:
             )
 
         adapter.commit()
-        self._reload_settings()
+        self.reload_settings()
 
     def import_cachelinks_from_text(self, cachelinks_text: str) -> None:
         self._import_cachelinks_yaml_text(cachelinks_text)
-        self._reload_settings()
+        self.reload_settings()
 
     def import_users_from_text(self, users_text: str) -> None:
         index_db = self._resolve_index_db()
@@ -242,7 +260,7 @@ class ConfigService:
                 }
             )
         index_db._db.commit()
-        self._reload_settings()
+        self.reload_settings()
 
     def load_cachelinks_document(self, path: Path) -> dict:
         index_db = self._resolve_index_db()
@@ -257,7 +275,7 @@ class ConfigService:
             raise ConfigError("Database not initialized")
         cachelinks = self._document_to_cachelinks(document)
         index_db.save_cachelinks(cachelinks)
-        self._reload_settings()
+        self.reload_settings()
 
     def folder_segments(self, path: str | None) -> tuple[str, ...]:
         if not path:
@@ -334,8 +352,8 @@ class ConfigService:
         state = index_db.ensure_target(descriptor, descriptor.remote_listing_url)
         entries = index_db.list_entries_for_descriptor(descriptor)
 
-        if self._service.datadir_registry.storages:
-            datadir = self._service.datadir_registry.primary
+        datadir = self._datadir_registry.primary if self._datadir_registry else None
+        if datadir:
             counts = self.descriptor_counts(descriptor, entries, datadir)
         else:
             self._logger.info("No datadirs configured - using zero counts for cachelink snapshot")
@@ -382,6 +400,12 @@ class ConfigService:
             entry_path = (entry.path or "").lstrip("/")
             if not entry_path:
                 continue
+            try:
+                cache_path = descriptor.backend_relative_folder / PurePosixPath(entry_path)
+                if datadir.exists(cache_path):
+                    cached_files += 1
+            except Exception:
+                continue
         uncached = max(files_total - cached_files, 0)
         return {
             "entries_total": len(entries),
@@ -392,22 +416,18 @@ class ConfigService:
         }
 
     def _resolve_index_db(self):
-        index_db = getattr(self._service, "index_db", None)
-        if isinstance(index_db, DatabaseManager):
-            return index_db.index_db
-        return index_db
+        if isinstance(self._db_manager, DatabaseManager):
+            return self._db_manager.index_db
+        return self._db_manager
 
-    def _reload_settings(self) -> None:
+    def reload_settings(self) -> "Settings":
         settings = load_database_backed_settings_from_manager(
-            self._service.settings.config_dir,
-            self._service.settings.database,
-            self._service.index_db,
+            self._config_dir,
+            self._settings.database,
+            self._db_manager,
         )
-        self._service.apply_settings(settings, self._service.credentials, index_db=self._service.index_db)
-        self._service.ensure_filesystems()
-
-    def reload_settings(self) -> None:
-        self._reload_settings()
+        self._settings = settings
+        return settings
 
     def _import_cachelinks_yaml_text(self, cachelinks_text: str) -> None:
         doc = yaml.safe_load(cachelinks_text) or {}
@@ -429,7 +449,7 @@ class ConfigService:
         return {"cachelinks": index_db.get_cachelinks() or []}
 
     def _settings_payload(self) -> dict[str, object]:
-        settings = self._service.settings
+        settings = self._settings
         datadirs = [
             {
                 "name": name,
@@ -478,11 +498,12 @@ class ConfigService:
                 "one_zip_cache_at_a_time": settings.limits.one_zip_cache_at_a_time,
             },
             "rclone": {
-                "enabled": settings.rclone.enabled,
-                "config_path": str(settings.rclone.config_path) if settings.rclone.config_path else None,
-                "rc_url": settings.rclone.rc_url,
-                "rc_user": settings.rclone.rc_user,
-                "rc_pass": settings.rclone.rc_pass,
+                "remotes": settings.rclone.remotes,
+                "bandwidth_limit": settings.rclone.bandwidth_limit,
+                "transfer_concurrency": settings.rclone.transfer_concurrency,
+                "checkers": settings.rclone.checkers,
+                "timeout": settings.rclone.timeout,
+                "retries": settings.rclone.retries,
             },
             "indexing": {
                 "min_full_reindex_days": settings.indexing.min_full_reindex_days,
@@ -597,7 +618,7 @@ class ConfigService:
             return []
 
         cachelinks: list[dict] = []
-        config_dir = self._service.settings.config_dir
+        config_dir = self._config_dir
 
         def walk(node: dict, path_segments: list[str]) -> None:
             for key, value in node.items():
@@ -836,12 +857,19 @@ class ConfigMigration:
         # Migrate rclone
         rclone_raw = bootstrap_data.get("rclone", {})
         if rclone_raw:
+            remotes = rclone_raw.get("remotes") or {}
+            if isinstance(remotes, str):
+                try:
+                    remotes = json.loads(remotes)
+                except json.JSONDecodeError:
+                    remotes = {}
             rclone = {
-                "enabled": bool(rclone_raw.get("enabled", False)),
-                "config_path": rclone_raw.get("config_path"),
-                "rc_url": rclone_raw.get("rc_url"),
-                "rc_user": rclone_raw.get("rc_user"),
-                "rc_pass": rclone_raw.get("rc_pass"),
+                "remotes": remotes,
+                "bandwidth_limit": rclone_raw.get("bandwidth_limit"),
+                "transfer_concurrency": int(rclone_raw.get("transfer_concurrency") or 4),
+                "checkers": int(rclone_raw.get("checkers") or 8),
+                "timeout": int(rclone_raw.get("timeout") or 300),
+                "retries": int(rclone_raw.get("retries") or 3),
             }
             self.index_db.save_rclone(rclone)
         
@@ -1154,13 +1182,15 @@ class TLSSettings:
 
 @dataclass
 class RcloneSettings:
-    """Rclone configuration for cloud remotes."""
+    """Rclone configuration for cloud remotes (mandatory, database-backed)."""
 
-    enabled: bool = False
-    config_path: Optional[Path] = None
-    rc_url: Optional[str] = None
-    rc_user: Optional[str] = None
-    rc_pass: Optional[str] = None
+    # Database-backed configuration fields for rclone remotes
+    remotes: dict[str, dict] = field(default_factory=dict)
+    bandwidth_limit: Optional[str] = None
+    transfer_concurrency: int = 4
+    checkers: int = 8
+    timeout: int = 300
+    retries: int = 3
 
 
 def load_database_backed_settings(
@@ -1664,13 +1694,19 @@ def _parse_tls(tls_raw: dict, config_dir: Path) -> TLSSettings:
 
 def _parse_rclone(rclone_raw: dict, config_dir: Path) -> RcloneSettings:
     """Parse rclone configuration."""
-    config_path = _optional_path(rclone_raw.get("config_path"), config_dir)
+    remotes = rclone_raw.get("remotes") or {}
+    if isinstance(remotes, str):
+        try:
+            remotes = json.loads(remotes)
+        except json.JSONDecodeError:
+            remotes = {}
     return RcloneSettings(
-        enabled=bool(rclone_raw.get("enabled", False)),
-        config_path=config_path,
-        rc_url=rclone_raw.get("rc_url"),
-        rc_user=rclone_raw.get("rc_user"),
-        rc_pass=rclone_raw.get("rc_pass"),
+        remotes=remotes,
+        bandwidth_limit=rclone_raw.get("bandwidth_limit"),
+        transfer_concurrency=int(rclone_raw.get("transfer_concurrency") or 4),
+        checkers=int(rclone_raw.get("checkers") or 8),
+        timeout=int(rclone_raw.get("timeout") or 300),
+        retries=int(rclone_raw.get("retries") or 3),
     )
 
 

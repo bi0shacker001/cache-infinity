@@ -282,28 +282,27 @@ Cookie import/export uses the same canonical representation as the database:
 
 It must **not** contain transient runtime/indexing results (remote listings, access logs, per-file remote metadata, etc.).
 
-### 5.4 Rclone configuration
+### 5.4 Rclone configuration (Mandatory)
 
 Rclone settings are database-backed and may be imported/exported via bootstrap YAML.
 
-* `rclone.enabled`: enable rclone-based fetch/index handlers.
-* `rclone.config_path`: optional path to an rclone config file (passed via `RCLONE_CONFIG`).
-* `rclone.rc_url`: rclone rc endpoint URL for control operations (for `ui.backend`).
-* `rclone.rc_user` / `rclone.rc_pass`: optional basic auth for rclone rc.
+* **Rclone Configuration**: All rclone settings stored in database (no external config files)
+* `rclone.remotes`: list of configured rclone remotes with their settings.
 
-Rclone is optional; when disabled, rclone handlers are ignored even if present in cachelinks.
-Rclone control is handled via `ui.backend` using rclone's own API (rc); the Admin API does not expose rclone operations.
+Rclone is **mandatory** and required for all cloud provider integrations. The system uses rclone-python library for direct API calls instead of the RC API. All remote management operations use direct rclone-python calls for better integration and reliability.
+
+Rclone control is handled via `ui.backend` using rclone-python library directly; the Admin API exposes rclone operations through the management layer.
 
 
 ### 5.5 Backups and exports
 
-### 5.6 Rclone Remote Link Support
+### 5.6 Rclone Remote Link Support (Mandatory)
 
-CacheInfinity provides comprehensive support for remote link access to cloud providers via rclone-python integration. This enables seamless access to cloud storage providers while maintaining the existing caching and virtual filesystem architecture.
+CacheInfinity provides comprehensive support for remote link access to cloud providers via mandatory rclone-python integration. This enables seamless access to cloud storage providers while maintaining the existing caching and virtual filesystem architecture.
 
 #### 5.6.1 Cloud Provider Support
 
-CacheInfinity supports remote links to the following cloud providers through rclone-python:
+CacheInfinity supports remote links to the following cloud providers through mandatory rclone-python integration:
 
 * **Amazon S3 and compatible services** (AWS S3, Backblaze B2, DigitalOcean Spaces, etc.)
 * **Google Cloud Storage**
@@ -318,9 +317,9 @@ CacheInfinity supports remote links to the following cloud providers through rcl
 * **HTTP/HTTPS endpoints**
 * **Any other rclone-python-supported cloud provider**
 
-#### 5.6.2 Rclone-python Configuration
+#### 5.6.2 Rclone-python Configuration (Direct Integration)
 
-Rclone remotes are configured through rclone-python and integrated with CacheInfinity's cachelink system. All rclone operations use the rclone-python library directly, not through a separate rclone daemon or RC API.
+Rclone remotes are configured through rclone-python and integrated with CacheInfinity's cachelink system. All rclone operations use the rclone-python library directly for mandatory integration, replacing the previous RC API approach.
 
 **Cachelink Configuration for Rclone Remotes:**
 
@@ -349,22 +348,27 @@ cloud_storage:
 * `transfer_concurrency`: Number of parallel transfers (default: 4)
 * `checkers`: Number of parallel checkers (default: 8)
 
-#### 5.6.3 Rclone-python Integration Architecture
+#### 5.6.3 Rclone-python Integration Architecture (Direct API)
 
 ```mermaid
 graph TD
-    A[CacheInfinity VFS] --> B[Rclone-python Handler]
+    A[CacheInfinity VFS] --> B[Rclone-python Direct Handler]
     B --> C[Cloud Provider APIs]
     C --> D[Amazon S3]
     C --> E[Google Cloud Storage]
     C --> F[Azure Blob Storage]
     C --> G[Other Providers]
+    B --> H[Remote Management]
+    H --> I[WebUI]
+    H --> J[Admin API]
+    H --> K[CLI]
 ```
 
 **Integration Components:**
 
-* **Rclone-python Handler**: Manages communication between CacheInfinity and cloud providers using rclone-python library
+* **Rclone-python Direct Handler**: Manages communication between CacheInfinity and cloud providers using rclone-python library directly
 * **Cloud Provider APIs**: Native APIs for each supported cloud provider accessed directly via rclone-python
+* **Remote Management**: Direct rclone-python calls for remote management operations (replaces RC API)
 
 #### 5.6.4 Performance and Caching Behavior
 
@@ -396,6 +400,7 @@ graph TD
 * **Error Rates**: Tracks error rates and types for proactive issue detection
 * **Cache Hit Rates**: Measures effectiveness of caching for cloud content
 * **Bandwidth Utilization**: Monitors bandwidth usage per remote and globally
+* **Remote Management Operations**: Tracks remote management operations via direct rclone-python calls
 When an operator requests a backup/export, CacheInfinity writes a YAML snapshot to disk.
 
 * The export uses the same logical schema as bootstrap import (the same pipeline in reverse).
@@ -582,16 +587,15 @@ Cachelinks are stored in the SQL database and used by the runtime.
 
 The Cachelinks section of the Admin WebUI includes a dedicated **Rclone** tab for configuring and managing rclone-based remote links.
 
-#### 8.7.1 Rclone-python Tab Interface
+#### 8.7.1 Rclone-python Tab Interface (Mandatory)
 
 The Rclone tab provides the following configuration sections:
 
 **Global Rclone Settings:**
 
-* **Enable Rclone Integration**: Master toggle to enable/disable rclone functionality
-* **Rclone Config File Path**: Path to rclone configuration file (optional, uses default rclone config if not specified)
-* **Rclone-python Configuration**: Configuration options for rclone-python library
-* **Performance Settings**: Global bandwidth limits and transfer concurrency settings
+* **Rclone Configuration**: All rclone settings stored in database (no external config files)
+* **Rclone-python Configuration**: Configuration options for rclone-python library stored in database
+* **Performance Settings**: Global bandwidth limits and transfer concurrency settings stored in database
 
 **Rclone Remote Management:**
 
@@ -607,12 +611,12 @@ The Rclone tab provides the following configuration sections:
 
 **Cachelink Creation with Rclone:**
 
-* **Remote Selection**: Dropdown of configured rclone remotes
+* **Remote Selection**: Dropdown of configured rclone remotes (mandatory for rclone-based cachelinks)
 * **Path Configuration**: Fields for specifying remote path and local mount point
 * **Advanced Options**: Rclone-specific parameters (bandwidth, transfer settings, etc.)
 * **Preview**: Show estimated virtual filesystem structure before creation
 
-#### 8.7.2 Rclone-python Cachelink Configuration
+#### 8.7.2 Rclone-python Cachelink Configuration (Direct Integration)
 
 Rclone-based cachelinks use the following configuration format:
 
@@ -644,21 +648,22 @@ cloud_storage:
 * `timeout`: Operation timeout in seconds (default: 300)
 * `retries`: Maximum retry attempts for failed operations (default: 3)
 
-#### 8.7.3 Rclone-python Integration Rules
+#### 8.7.3 Rclone-python Integration Rules (Direct API)
 
 * **Configuration Validation**: All rclone-python configurations are validated before saving
 * **Credential Security**: Credentials are stored securely in CacheInfinity's database and never exposed in logs or UI
-* **Remote Testing**: Connectivity tests verify cloud provider configuration and credentials using rclone-python
+* **Remote Testing**: Connectivity tests verify cloud provider configuration and credentials using direct rclone-python calls
 * **Error Handling**: Clear error messages for configuration issues and connection failures
 * **Performance Limits**: Enforce reasonable limits on concurrency and bandwidth settings
+* **Mandatory Dependency**: Rclone is required for all cloud provider integrations
 
-#### 8.7.4 WebUI Implementation Details
+#### 8.7.4 WebUI Implementation Details (Direct Integration)
 
 * **JavaScript File**: `app/ui/web/assets/js/cachelinks.js` (extended with rclone functionality)
 * **HTML Template**: Rclone tab added to `app/ui/web/assets/pages/cachelinks.html`
-* **Backend Integration**: Uses existing `app/ui/backend.py` management layer
+* **Backend Integration**: Uses existing `app/ui/backend.py` management layer with direct rclone-python calls
 * **Configuration Storage**: All settings stored in database via existing configuration mechanisms
-* **No Direct API Exposure**: Rclone operations go through standard admin management layer
+* **Direct API Calls**: Rclone operations use direct rclone-python calls instead of RC API
 
 ## 9. Source behavior
 
@@ -907,7 +912,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - errors.py #File. Custom exception classes and error handling utilities
     - logging.py #File. Centralized logging configuration and utilities
     - server.py #File. Core server loop. Handles startup and shutdown of the server overall
-    - services.py #File. Service orchestration and lifecycle management
+    - services.py #File. Service orchestration, lifecycle management, and runtime service container
   db: #Folder. All database functionality. Database flow: dbmanage.py (formats/maintains data using schema.py) -> adapter.py (routes WHERE data is written) -> backends/* (implement HOW the DB is accessed)
     - adapter.py #File. Database access shim that routes WHERE data is written; never touches the database directly. -- CAN ONLY BE IMPORTED BY: db.dbmanage
     - backupmgmt.py #File. Database backup and restore management. -- CAN ONLY BE IMPORTED BY: ui.backend, core.services
@@ -921,7 +926,7 @@ app: #Folder. Main application package containing all CacheInfinity core functio
     - browser_interface.py #File. User-facing browser interface for CacheInfinity operations -- CAN ONLY BE IMPORTED BY: core.services
     - dispatcher.py #File. WSGI DispatcherMiddleware for hosting port path routing -- CAN ONLY BE IMPORTED BY: core.services
     - frontend.py #File. Interface adapter for frontend user interactions. Provides a uniform interface for all frontends. Sole interface for all frontend actions. -- CAN ONLY BE IMPORTED BY: hosting.*
-    - webdav.py #File. WebDAV provider for remote file system access -- CAN ONLY BE IMPORTED BY: core.services
+    - webdav.py #File. WebDAV provider + reloadable WSGI wrappers for WebDAV/WebUI apps -- CAN ONLY BE IMPORTED BY: core.services
   net: #Folder. Network operations and data transfer components
     - fetcher.py #File. Download manager (primarily using curl) for remote file retrieval
     - indexer.py #File. Background indexing worker for remote content discovery

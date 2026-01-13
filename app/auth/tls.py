@@ -479,6 +479,42 @@ class TLSAutomationService:
             _LOGGER.warning("Failed to cleanup old certificates: %s", e)
 
 
+def start_tls_automation_thread(
+    tls_automation: TLSAutomationService,
+    tls_settings: TLSSettings,
+    stop_event: "threading.Event",
+    *,
+    interval_seconds: int = 21600,
+) -> "threading.Thread | None":
+    """Start a background thread to refresh TLS certificates."""
+    if tls_settings.mode not in ("http", "dns-01"):
+        _LOGGER.debug("TLS automation not required for mode: %s", tls_settings.mode)
+        return None
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            try:
+                domains: list[str] = []
+                if tls_settings.mode == "http":
+                    domains = list(tls_settings.http.domains)
+                elif tls_settings.mode == "dns-01":
+                    domains = list(tls_settings.dns01.domains)
+                if domains:
+                    _LOGGER.debug("Ensuring TLS certificate for domains: %s", ", ".join(domains))
+                    tls_automation.get_certificate()
+                else:
+                    _LOGGER.debug("No domains configured for TLS automation")
+            except Exception as exc:  # pragma: no cover - defensive
+                _LOGGER.warning("TLS automation failed: %s", exc, exc_info=True)
+            stop_event.wait(interval_seconds)
+
+    import threading
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return thread
+
+
 def create_tls_automation_service(config_dir: Path, tls_settings: TLSSettings) -> Optional[TLSAutomationService]:
     """Create TLS automation service for certificate management.
     
@@ -499,4 +535,5 @@ __all__ = [
     "TLSAutomationError",
     "TLSAutomationService",
     "create_tls_automation_service",
+    "start_tls_automation_thread",
 ]

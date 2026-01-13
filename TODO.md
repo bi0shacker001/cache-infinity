@@ -49,31 +49,31 @@ This file contains the actionable task list for achieving full SPEC compliance, 
 - [x] **TASK-031:** Implement SFTP protocol handler
 - [x] **TASK-032:** Design database schema for SSH host keys
 - [x] **TASK-033:** Implement SSH host key management
-- [ ] **TASK-034:** Add admin interfaces for key rotation
-- [ ] **TASK-035:** Implement SFTP permission mapping
-- [ ] **TASK-036:** Test SFTP functionality
+- [x] **TASK-034:** Add admin interfaces for key rotation
+- [x] **TASK-035:** Implement SFTP permission mapping
+- [~] **TASK-036:** Test SFTP functionality (authorized_keys parsing + update coverage added)
 - [ ] **TASK-037:** Update documentation for SFTP features
-- [ ] **TASK-038:** Implement virtual `.ssh/authorized_keys` management (SPEC 6.3) - **CRITICAL GAP**
-- [ ] **TASK-039:** Add authorized_keys validation and database storage
-- [ ] **TASK-040:** Implement masking of real `.ssh` directories
-- [ ] **TASK-041:** Integrate with authentication system for SSH public key auth
+- [x] **TASK-038:** Implement virtual `.ssh/authorized_keys` management (SPEC 6.3) - **CRITICAL GAP**
+- [x] **TASK-039:** Add authorized_keys validation and database storage
+- [x] **TASK-040:** Implement masking of real `.ssh` directories
+- [x] **TASK-041:** Integrate with authentication system for SSH public key auth
 
 ### Zip Caching Completion 🟡 (MEDIUM PRIORITY)
-- [ ] **TASK-040:** Review current zip caching implementation
-- [ ] **TASK-041:** Implement size limit validation
-- [ ] **TASK-042:** Add one-zip-at-a-time locking mechanism
-- [ ] **TASK-043:** Implement whole-zip vs individual-file logic
-- [ ] **TASK-044:** Add zip caching configuration options
-- [ ] **TASK-045:** Test zip caching scenarios
+- [x] **TASK-040:** Review current zip caching implementation
+- [x] **TASK-041:** Implement size limit validation
+- [x] **TASK-042:** Add one-zip-at-a-time locking mechanism
+- [x] **TASK-043:** Implement whole-zip vs individual-file logic
+- [x] **TASK-044:** Add zip caching configuration options
+- [x] **TASK-045:** Test zip caching scenarios
 - [ ] **TASK-046:** Update documentation for zip features
 
 ## Phase 3: Testing and Robustness (Medium Priority)
 
 ### Comprehensive Testing 🔴 (CRITICAL PRIORITY)
-- [ ] **TASK-050:** Set up testing framework (pytest)
-- [ ] **TASK-051:** Create unit tests for core components
-- [ ] **TASK-052:** Create integration tests for major workflows
-- [ ] **TASK-053:** Implement SPEC compliance validation tests
+- [x] **TASK-050:** Set up testing framework (pytest)
+- [~] **TASK-051:** Create unit tests for core components (server signal handling added)
+- [~] **TASK-052:** Create integration tests for major workflows (dispatcher routing added)
+- [~] **TASK-053:** Implement SPEC compliance validation tests (admin API read-only + dispatcher coverage added)
 - [ ] **TASK-054:** Add test coverage monitoring
 - [ ] **TASK-055:** Set up continuous integration testing
 
@@ -86,12 +86,13 @@ This file contains the actionable task list for achieving full SPEC compliance, 
 - [ ] **TASK-065:** Test advanced indexing features
 
 ### Cookie Management 🟡 (MEDIUM PRIORITY)
-- [ ] **TASK-070:** Review current cookie implementation
-- [ ] **TASK-071:** Complete per-domain cookie jar implementation
-- [ ] **TASK-072:** Add admin cookie refresh capabilities
-- [ ] **TASK-073:** Implement cookie validation
-- [ ] **TASK-074:** Add cookie management UI
-- [ ] **TASK-075:** Test cookie management workflows
+- [x] **TASK-070:** Review current cookie implementation
+- [x] **TASK-071:** Complete per-domain cookie jar implementation
+- [x] **TASK-072:** Add admin cookie refresh capabilities
+- [x] **TASK-073:** Implement cookie validation
+- [x] **TASK-074:** Add cookie management UI
+- [~] **TASK-075:** Test cookie management workflows (management layer coverage added)
+- [ ] **TASK-076:** Add automated cookie refresh using stored credentials (manual upload only today)
 
 ## Phase 4: Documentation and Maintenance (Ongoing)
 

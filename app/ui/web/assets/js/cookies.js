@@ -53,6 +53,10 @@ function bindCookiesDelegatedEvents() {
       event.preventDefault();
       showCookieUpload(domain);
     }
+    if (action === 'cookie-refresh' && domain) {
+      event.preventDefault();
+      refreshCookie(domain);
+    }
   });
 }
 
@@ -72,6 +76,7 @@ async function loadCookies() {
             <div class="cookie-domain">${domain}</div>
             <div class="cookie-actions">
               <button class="btn btn-secondary btn-small" type="button" data-action="cookie-upload" data-domain="${domain}">Upload cookies.txt</button>
+              <button class="btn btn-secondary btn-small" type="button" data-action="cookie-refresh" data-domain="${domain}">Refresh</button>
             </div>
           </div>
           <div class="cookie-info">
@@ -140,6 +145,23 @@ async function showCookieUpload(domain) {
   };
 
   input.click();
+}
+
+async function refreshCookie(domain) {
+  const cookieJar = prompt(`Paste cookies.txt content for ${domain} (leave empty to reuse stored jar)`, '');
+  try {
+    await fetchJSON('cookies/refresh', {
+      method: 'POST',
+      body: JSON.stringify({
+        domain,
+        cookie_jar: cookieJar || null,
+      }),
+    });
+    alert('Cookie refreshed.');
+    loadCookies();
+  } catch (err) {
+    alert('Error: ' + err.message);
+  }
 }
 
 // Helper functions

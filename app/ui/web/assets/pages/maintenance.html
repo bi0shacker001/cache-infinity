@@ -25,6 +25,24 @@
   <div id="reinit-status" class="status-msg"></div>
 </div>
 <div class="panel">
+  <h3>SSH Host Keys</h3>
+  <p class="panel-subtitle">Rotate or replace SFTP host keys used for client trust.</p>
+  <div class="btn-row">
+    <label>
+      Key type
+      <select id="ssh-host-key-type">
+        <option value="rsa">RSA</option>
+        <option value="ecdsa">ECDSA</option>
+        <option value="ed25519">Ed25519</option>
+      </select>
+    </label>
+    <button class="btn btn-secondary" id="ssh-host-key-generate" type="button">Generate</button>
+    <button class="btn btn-danger" id="ssh-host-key-rotate" type="button">Rotate All</button>
+  </div>
+  <div id="ssh-host-key-status" class="status-msg"></div>
+  <div id="ssh-host-key-table">Loading…</div>
+</div>
+<div class="panel">
   <h3>Download Queue</h3>
   <p class="panel-subtitle">Queued and active remote fetches.</p>
   <form id="download-form" class="stacked">

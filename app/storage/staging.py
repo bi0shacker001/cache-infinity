@@ -8,7 +8,7 @@ import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from contextlib import contextmanager
 
 from dataclasses import dataclass
@@ -46,7 +46,7 @@ class StagingArea:
     def reserve_tempfile(self, prefix: str) -> Path:
         """Create a unique staging file path without touching disk."""
 
-        fd, path = tempfile.mkstemp(prefix=f"ci-{prefix}-", dir=self.base_path)
+        fd, path = tempfile.mkstemp(prefix=f"ci-{prefix}-", suffix=".tmp", dir=self.base_path)
         os.close(fd)
         staged = Path(path)
         staged.chmod(0o600)
@@ -239,16 +239,21 @@ class StagingArea:
                 pass
             return None
     
-    def get_zip_cache_manager(self, limits: Dict[str, Any]) -> "StagingArea.ZipCacheManager":
+    def get_zip_cache_manager(
+        self,
+        limits: Dict[str, Any],
+        downloader: Optional[Callable[[str, Path], object]] = None,
+    ) -> "StagingArea.ZipCacheManager":
         """Get a zip cache manager for this staging area.
         
         Args:
             limits: Configuration limits for zip caching
+            downloader: Optional callback to download a zip into a local path
             
         Returns:
             ZipCacheManager instance
         """
-        return self.ZipCacheManager(self, limits)
+        return self.ZipCacheManager(self, limits, downloader)
     
     @dataclass
     class ZipCacheManager:
@@ -256,6 +261,7 @@ class StagingArea:
         
         staging_area: "StagingArea"
         limits: Dict[str, Any]
+        downloader: Optional[Callable[[str, Path], object]] = None
         
         def __post_init__(self):
             """Initialize the zip cache manager."""
@@ -345,6 +351,7 @@ class StagingArea:
             Returns:
                 Path to the extracted file, or None if failed
             """
+            lock_acquired = False
             try:
                 # Download zip to staging
                 staging_zip = self._download_zip_to_staging(zip_url)
@@ -353,13 +360,17 @@ class StagingArea:
                 
                 # Check sizes and decide mode
                 zip_size, uncompressed_size = self.get_zip_sizes(staging_zip)
-                use_whole_zip = (self.can_cache_whole_zip(zip_size, uncompressed_size) and
-                               self.acquire_zip_lock())
+                if zip_size <= 0 or uncompressed_size <= 0:
+                    use_whole_zip = False
+                else:
+                    use_whole_zip = self.can_cache_whole_zip(zip_size, uncompressed_size)
+                if use_whole_zip:
+                    lock_acquired = self.acquire_zip_lock()
+                    use_whole_zip = lock_acquired
                 
                 if use_whole_zip:
                     _logger.debug(f"Using whole-zip mode for {zip_url}")
                     result = self._handle_whole_zip(staging_zip, destination)
-                    self.release_zip_lock()
                     return result
                 else:
                     _logger.debug(f"Using individual-file mode for {zip_url}")
@@ -369,6 +380,8 @@ class StagingArea:
                 _logger.error(f"Failed to handle zip file {zip_url}: {e}")
                 return None
             finally:
+                if lock_acquired:
+                    self.release_zip_lock()
                 # Clean up staging zip file
                 try:
                     if 'staging_zip' in locals() and staging_zip.exists():
@@ -388,13 +401,27 @@ class StagingArea:
             try:
                 _logger.debug(f"Downloading zip from {zip_url} to staging")
                 
+                self.staging_area.ensure_ready()
                 # Reserve a temporary file in staging
                 staging_zip = self.staging_area.reserve_tempfile("zip")
                 
-                # TODO: Integrate with fetcher service to download the zip
-                # This is a placeholder - the actual implementation would use
-                # the fetcher service to download the file
-                _logger.warning("Zip download integration with fetcher not yet implemented")
+                if not self.downloader:
+                    _logger.error("Zip download callback not configured")
+                    return None
+
+                result = self.downloader(zip_url, staging_zip)
+                success = True
+                if hasattr(result, "success"):
+                    success = bool(getattr(result, "success"))
+                elif isinstance(result, bool):
+                    success = result
+                if not success:
+                    _logger.error("Zip download failed for %s", zip_url)
+                    return None
+
+                if not staging_zip.exists() or staging_zip.stat().st_size == 0:
+                    _logger.error("Zip download produced empty file for %s", zip_url)
+                    return None
                 
                 return staging_zip
                 
@@ -470,4 +497,21 @@ class StagingArea:
                 _logger.error(f"Failed to extract individual file {member_path} from {staging_zip}: {e}")
                 return None
         
+
+class StagingManager:
+    """Compatibility wrapper exposing a staging interface."""
+
+    def __init__(self, definition: StagingDefinition):
+        self.definition = definition
+        self._area = StagingArea(definition)
+
+    @property
+    def base_path(self) -> Path:
+        return self._area.base_path
+
+    def ensure_ready(self) -> None:
+        self._area.ensure_ready()
+
+    def reserve_tempfile(self, prefix: str) -> Path:
+        return self._area.reserve_tempfile(prefix)
             

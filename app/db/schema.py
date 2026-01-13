@@ -303,22 +303,41 @@ class IndexDatabase:
                 """
                 CREATE TABLE IF NOT EXISTS config_rclone (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    enabled BOOLEAN NOT NULL,
-                    config_path TEXT,
-                    rc_url TEXT,
-                    rc_user TEXT,
-                    rc_pass TEXT,
+                    remotes TEXT NOT NULL,  -- JSON string of remotes dict
+                    bandwidth_limit TEXT,
+                    transfer_concurrency INTEGER NOT NULL DEFAULT 4,
+                    checkers INTEGER NOT NULL DEFAULT 8,
+                    timeout INTEGER NOT NULL DEFAULT 300,
+                    retries INTEGER NOT NULL DEFAULT 3,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
             rclone_columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_rclone)")}
-            if "rc_url" not in rclone_columns:
-                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_url TEXT")
-            if "rc_user" not in rclone_columns:
-                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_user TEXT")
-            if "rc_pass" not in rclone_columns:
-                self._db.execute("ALTER TABLE config_rclone ADD COLUMN rc_pass TEXT")
+            if "remotes" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN remotes TEXT NOT NULL DEFAULT '{}'")
+            if "bandwidth_limit" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN bandwidth_limit TEXT")
+            if "transfer_concurrency" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN transfer_concurrency INTEGER NOT NULL DEFAULT 4")
+            if "checkers" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN checkers INTEGER NOT NULL DEFAULT 8")
+            if "timeout" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN timeout INTEGER NOT NULL DEFAULT 300")
+            if "retries" not in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone ADD COLUMN retries INTEGER NOT NULL DEFAULT 3")
+            
+            # Migration: Remove old columns if they exist
+            if "enabled" in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone DROP COLUMN enabled")
+            if "config_path" in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone DROP COLUMN config_path")
+            if "rc_url" in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone DROP COLUMN rc_url")
+            if "rc_user" in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone DROP COLUMN rc_user")
+            if "rc_pass" in rclone_columns:
+                self._db.execute("ALTER TABLE config_rclone DROP COLUMN rc_pass")
 
             self._db.execute(
                 """
@@ -1843,11 +1862,11 @@ class IndexDatabase:
             self._db.commit()
 
     def get_rclone(self) -> dict | None:
-        """Get rclone configuration."""
+        """Get rclone configuration (mandatory, database-backed)."""
         with self._lock:
             row = self._db.fetchone(
                 """
-                SELECT enabled, config_path, rc_url, rc_user, rc_pass, updated_at
+                SELECT remotes, bandwidth_limit, transfer_concurrency, checkers, timeout, retries, updated_at
                 FROM config_rclone
                 ORDER BY id DESC
                 LIMIT 1
@@ -1856,29 +1875,33 @@ class IndexDatabase:
         if not row:
             return None
         return {
-            "enabled": bool(row["enabled"]),
-            "config_path": row["config_path"],
-            "rc_url": row.get("rc_url"),
-            "rc_user": row.get("rc_user"),
-            "rc_pass": row.get("rc_pass"),
+            "remotes": row["remotes"],
+            "bandwidth_limit": row.get("bandwidth_limit"),
+            "transfer_concurrency": row["transfer_concurrency"],
+            "checkers": row["checkers"],
+            "timeout": row["timeout"],
+            "retries": row["retries"],
             "updated_at": row["updated_at"],
         }
 
     def save_rclone(self, rclone: dict) -> None:
-        """Save rclone configuration."""
+        """Save rclone configuration (mandatory, database-backed)."""
         now = datetime.now(timezone.utc).isoformat()
+        import json
+        remotes_json = json.dumps(rclone.get("remotes", {}))
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO config_rclone (enabled, config_path, rc_url, rc_user, rc_pass, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO config_rclone (remotes, bandwidth_limit, transfer_concurrency, checkers, timeout, retries, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    rclone["enabled"],
-                    rclone.get("config_path"),
-                    rclone.get("rc_url"),
-                    rclone.get("rc_user"),
-                    rclone.get("rc_pass"),
+                    remotes_json,
+                    rclone.get("bandwidth_limit"),
+                    rclone.get("transfer_concurrency", 4),
+                    rclone.get("checkers", 8),
+                    rclone.get("timeout", 300),
+                    rclone.get("retries", 3),
                     now,
                 ),
             )

@@ -42,6 +42,10 @@ class CachelinkDescriptor:
             return self.download_root + subfolder
         return f"{self.download_root}/{subfolder}"
 
+    @property
+    def id(self) -> str:
+        return self.canonical_id
+
 
 @dataclass
 class CachelinkRecord:
@@ -57,6 +61,46 @@ class CachelinkIndex:
     """Index of cachelinks."""
     
     cachelinks: Dict[str, CachelinkDescriptor]
+
+
+class CachelinkManager:
+    """Lookup helper for cachelink descriptors by path."""
+
+    def __init__(self, index: CachelinkIndex):
+        self._index = index
+
+    def get_cachelinks_for_path(self, path: str) -> list[CachelinkDescriptor]:
+        segments = _path_segments(path)
+        matches = []
+        for descriptor in self._index.cachelinks.values():
+            if _segments_match(segments, descriptor.path_segments):
+                matches.append(descriptor)
+        return matches
+
+    def get_cachelink_for_path(self, path: str) -> CachelinkDescriptor | None:
+        segments = _path_segments(path)
+        best: CachelinkDescriptor | None = None
+        best_len = -1
+        for descriptor in self._index.cachelinks.values():
+            if _segments_match(segments, descriptor.path_segments):
+                if len(descriptor.path_segments) > best_len:
+                    best_len = len(descriptor.path_segments)
+                    best = descriptor
+        return best
+
+
+def _path_segments(value: str) -> tuple[str, ...]:
+    posix = PurePosixPath(value)
+    parts = list(posix.parts)
+    if posix.is_absolute() and parts:
+        parts = parts[1:]
+    return tuple(part for part in parts if part not in ("", "."))
+
+
+def _segments_match(target: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
+    if len(prefix) > len(target):
+        return False
+    return target[: len(prefix)] == prefix
 
 
 class CachelinkMode(str, Enum):

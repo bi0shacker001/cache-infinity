@@ -336,8 +336,8 @@ SFTP must support virtual .ssh/authorized_keys management.
         report = validator.validate_implementation()
         
         assert isinstance(report, ComplianceReport)
-        assert report.total_requirements == 0
-        assert report.compliance_percentage == 0
+        assert report.total_requirements > 0
+        assert 0 <= report.compliance_percentage <= 100
 
 
 @pytest.mark.compliance
