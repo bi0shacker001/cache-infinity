@@ -420,19 +420,66 @@ class RemoteListingFetcher:
             if href in ['../', '..', '/']:
                 continue
             
+            # Skip current directory link
+            if href in ['./', '.']:
+                continue
+            
+            # Skip absolute path links (navigation links) but allow protocol-relative download links
+            if href.startswith('/') and not href.startswith('//'):
+                continue
+            
+            # Skip Wayback Machine toolbar links
+            if href.startswith('/web/') or href.startswith('//web.archive.org/'):
+                continue
+            
+            # Skip archive.org navigation but allow download links
+            if href.startswith('//archive.org/') and not href.startswith('//archive.org/download/'):
+                continue
+            if href.startswith('/details/'):
+                continue
+            
+            # Skip anchor links (within-page navigation)
+            if href.startswith('#'):
+                continue
+            
+            # Skip query parameter links (table sorting)
+            if href.startswith('?'):
+                continue
+            
+            # Skip external links
+            if href.startswith('http'):
+                continue
+            
+            # Skip empty or whitespace-only hrefs
+            if not href or href.strip() != href:
+                continue
+            
+            # Skip very short names that are likely navigation
+            if len(href) <= 2 and not href.endswith('/'):
+                continue
+            
             # Determine if it's a directory or file
             is_dir = href.endswith('/') or text.endswith('/')
             name = text.rstrip('/') if text else href.rstrip('/').split('/')[-1]
             
-            if name:  # Skip empty names
-                entry = {
-                    'name': name,
-                    'path': href,
-                    'is_dir': is_dir,
-                    'url': urljoin(base_url, href) if not href.startswith('http') else href
-                }
+            # Skip entries with empty or very short names
+            if not name or len(name.strip()) <= 1:
+                continue
+            
+            # Skip entries that look like navigation (single characters, etc.)
+            if len(name) == 1 and name not in ['.', '/']:
+                continue
+            
+            entry = {
+                'name': name,
+                'path': href,
+                'is_dir': is_dir,
+                'url': urljoin(base_url, href) if not href.startswith('http') else href
+            }
+            # Only include files, not directories
+            if not is_dir:
                 entries.append(entry)
-        
+         
         return entries
     
     def _parse_ftp_directory(self, file_list: List[str], base_url: str) -> List[Dict[str, Any]]:

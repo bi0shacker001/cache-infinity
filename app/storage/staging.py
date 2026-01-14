@@ -46,6 +46,9 @@ class StagingArea:
     def reserve_tempfile(self, prefix: str) -> Path:
         """Create a unique staging file path without touching disk."""
 
+        # Ensure staging directory exists before creating files
+        self.ensure_ready()
+        
         fd, path = tempfile.mkstemp(prefix=f"ci-{prefix}-", suffix=".tmp", dir=self.base_path)
         os.close(fd)
         staged = Path(path)

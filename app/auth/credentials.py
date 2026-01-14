@@ -839,13 +839,14 @@ class AuthenticationManager:
         # Start session cleanup background thread
         self._start_session_cleanup()
 
-    def authenticate_user(self, username: str, password: str, purpose: str = "webui") -> Optional[str]:
+    def authenticate_user(self, username: str, password: str, purpose: str = "webui", **kwargs) -> Optional[str]:
         """Authenticate a user and create a session token.
         
         Args:
             username: Username to authenticate
             password: Password to verify
             purpose: Authentication purpose (webui, webdav, etc.)
+            **kwargs: Additional parameters for backward compatibility
             
         Returns:
             Session token if authentication succeeds, None otherwise
@@ -1206,13 +1207,13 @@ class AuthenticationManager:
             _logger.error("Failed to update authorized_keys for %s: %s", username, exc)
             return False
 
-    def get_authorized_keys_editable(self, username: str, *, purpose: str = "webdav") -> bool:
+    def get_authorized_keys_editable(self, username: str, **kwargs) -> bool:
         if not username:
             return False
         try:
             row = self.db_manager.fetchone(
-                "SELECT ssh_keys_editable FROM auth_users WHERE username = ? AND purpose = ?",
-                (username, purpose),
+                "SELECT ssh_keys_editable FROM auth_users WHERE username = ?",
+                (username,),
             )
             if not row:
                 return False

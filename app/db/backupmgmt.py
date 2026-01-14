@@ -788,42 +788,122 @@ class DatabaseBackupManager:
         warnings = []
         cachelinks_processed = 0
 
-        if not isinstance(cachelinks_data, list):
-            warnings.append("Cachelinks section must be a list")
+        # Handle both nested dictionary format (SPEC-compliant) and flat list format (backward compatibility)
+        if isinstance(cachelinks_data, dict):
+            # New nested format: cachelinks_data is a dictionary with nested structure
+            cachelinks_db = self._flatten_nested_cachelinks(cachelinks_data)
+            if cachelinks_db:
+                self.index_db.save_cachelinks(cachelinks_db)
+                cachelinks_processed = len(cachelinks_db)
+        elif isinstance(cachelinks_data, list):
+            # Old flat list format: cachelinks_data is a list of cachelink dictionaries
+            cachelinks_db = []
+            for cachelink_data in cachelinks_data:
+                try:
+                    if not isinstance(cachelink_data, dict):
+                        warnings.append("Cachelink entry must be a dictionary")
+                        continue
+
+                    cachelink_db = {
+                        'canonical_id': cachelink_data.get('canonical_id'),
+                        'backend_path': cachelink_data.get('backend_path'),
+                        'url': cachelink_data.get('url'),
+                        'subfolder': cachelink_data.get('subfolder'),
+                        'mode': cachelink_data.get('mode'),
+                        'url_handler': cachelink_data.get('url_handler') or cachelink_data.get('handler'),
+                        'rclone_remote': cachelink_data.get('rclone_remote'),
+                        'rclone_path': cachelink_data.get('rclone_path'),
+                        'bandwidth_limit': cachelink_data.get('bandwidth_limit'),
+                        'transfer_concurrency': cachelink_data.get('transfer_concurrency'),
+                        'checkers': cachelink_data.get('checkers'),
+                        'timeout': cachelink_data.get('timeout'),
+                        'retries': cachelink_data.get('retries'),
+                        'source_file': cachelink_data.get('source_file')
+                    }
+
+                    cachelinks_db.append(cachelink_db)
+                    cachelinks_processed += 1
+
+                except Exception as exc:
+                    warnings.append(f"Failed to process cachelink: {exc}")
+                    self._logger.warning(f"Failed to process cachelink: {exc}")
+
+            if cachelinks_processed > 0:
+                self.index_db.save_cachelinks(cachelinks_db)
+        else:
+            warnings.append("Cachelinks section must be a list or dictionary")
             return False, warnings
 
-        cachelinks_db = []
-        for cachelink_data in cachelinks_data:
-            try:
-                if not isinstance(cachelink_data, dict):
-                    warnings.append("Cachelink entry must be a dictionary")
-                    continue
-
-                cachelink_db = {
-                    'canonical_id': cachelink_data.get('canonical_id'),
-                    'backend_path': cachelink_data.get('backend_path'),
-                    'url': cachelink_data.get('url'),
-                    'subfolder': cachelink_data.get('subfolder'),
-                    'mode': cachelink_data.get('mode'),
-                    'url_handler': cachelink_data.get('url_handler') or cachelink_data.get('handler'),
-                    'rclone_remote': cachelink_data.get('rclone_remote'),
-                    'rclone_path': cachelink_data.get('rclone_path'),
-                    'bandwidth_limit': cachelink_data.get('bandwidth_limit'),
-                    'transfer_concurrency': cachelink_data.get('transfer_concurrency'),
-                    'checkers': cachelink_data.get('checkers'),
-                    'timeout': cachelink_data.get('timeout'),
-                    'retries': cachelink_data.get('retries'),
-                    'source_file': cachelink_data.get('source_file')
-                }
-
-                cachelinks_db.append(cachelink_db)
-                cachelinks_processed += 1
-
-            except Exception as exc:
-                warnings.append(f"Failed to process cachelink: {exc}")
-                self._logger.warning(f"Failed to process cachelink: {exc}")
-
-        if cachelinks_processed > 0:
-            self.index_db.save_cachelinks(cachelinks_db)
-
         return cachelinks_processed > 0, warnings
+
+    def _flatten_nested_cachelinks(self, nested_data: dict) -> List[dict]:
+        """Convert nested cachelink structure to flat list format.
+        
+        Args:
+            nested_data: Nested dictionary structure from YAML
+            
+        Returns:
+            List of cachelink dictionaries in database format
+        """
+        from cache.cachelinks import _detect_mode, _normalize_url_handler
+        
+        cachelinks = []
+        
+        def _traverse_nested_structure(current_path: str, data: dict):
+            """Recursively traverse nested cachelink structure."""
+            for key, value in data.items():
+                new_path = f"{current_path}/{key}" if current_path else key
+                
+                if isinstance(value, dict):
+                    # Check if this is a cachelink entry (has url or other cachelink properties)
+                    if any(field in value for field in ['url', 'subfolder', 'url_handler', 'rclone_remote']):
+                        # This is a cachelink entry
+                        subfolder = value.get('subfolder', '/')
+                        
+                        # Determine mode: prioritize 'zip' field, then 'mode' field, then auto-detect from subfolder
+                        # 'zip' field maps to 'mode' in database (whether this is a zip link)
+                        zip_value = value.get('zip')
+                        mode_value = value.get('mode')
+                        
+                        if zip_value is not None:
+                            # 'zip' field takes precedence - map 'yes'/'no' to appropriate mode values
+                            mode = 'zip' if str(zip_value).lower() in ('yes', 'true', '1') else 'plain'
+                        elif mode_value:
+                            # Use explicit 'mode' field if present and 'zip' is not specified
+                            mode = mode_value
+                        else:
+                            # Auto-detect mode from subfolder if neither 'zip' nor 'mode' is provided
+                            mode = _detect_mode(subfolder).value
+                        
+                        # Handle url_handler: 'type' from YAML maps to 'url_handler' in database
+                        # Fallback: url_handler -> handler -> type -> 'auto'
+                        type_value = value.get('type')  # User provided 'type' in YAML (HTTP, FTP, rclone, etc.)
+                        url_handler = value.get('url_handler') or value.get('handler') or type_value or 'auto'
+                        normalized_url_handler = _normalize_url_handler(url_handler)
+                        
+                        cachelink_db = {
+                            'canonical_id': new_path,
+                            'backend_path': current_path if current_path else "/",
+                            'url': value.get('url'),
+                            'subfolder': subfolder,
+                            'mode': mode,
+                            'url_handler': normalized_url_handler,
+                            'rclone_remote': value.get('rclone_remote'),
+                            'rclone_path': value.get('rclone_path'),
+                            'bandwidth_limit': value.get('bandwidth_limit'),
+                            'transfer_concurrency': value.get('transfer_concurrency'),
+                            'checkers': value.get('checkers'),
+                            'timeout': value.get('timeout'),
+                            'retries': value.get('retries'),
+                            'source_file': '<yaml-import>'
+                        }
+                        cachelinks.append(cachelink_db)
+                    else:
+                        # This is a nested category, recurse deeper
+                        _traverse_nested_structure(new_path, value)
+                else:
+                    # Invalid structure - cachelink entries should be dictionaries
+                    self._logger.warning(f"Invalid cachelink structure at path {new_path}")
+        
+        _traverse_nested_structure("", nested_data)
+        return cachelinks

@@ -26,6 +26,7 @@ dist/
 # Environment
 .env
 .env.local
+/.*
 .venv/
 venv/
 testing/config/
@@ -38,3 +39,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+#Omit .html files in root, as they're used for indexer testing
+/*.html

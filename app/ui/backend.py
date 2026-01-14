@@ -940,7 +940,7 @@ class ManagementLayer:
 
     def _list_admin_users(self) -> List[Dict[str, Any]]:
         """List admin users."""
-        return self.ctx.index_db.index_db.list_users(purpose="webui")
+        return self.ctx.index_db.index_db.list_users()
 
     def _manage_admin_user(
         self,
@@ -955,14 +955,15 @@ class ManagementLayer:
             password_plain=password,
             enabled=enabled,
             is_admin=is_admin,
-            purpose="webui"
+            admin_access=True,
+            webui_access=True
         )
         return {"status": "success", "message": f"Admin user {username} updated"}
 
     def _delete_admin_user(self, username: str) -> Dict[str, Any]:
         if not username:
             raise ValueError("Username is required")
-        self.ctx.index_db.index_db.disable_auth_user(username, purpose="webui")
+        self.ctx.index_db.index_db.disable_auth_user(username, admin_access=True, webui_access=True)
         return {"status": "success", "message": f"Admin user {username} disabled"}
 
     def _admin_users_exist(self) -> bool:
@@ -972,7 +973,7 @@ class ManagementLayer:
     def _validate_admin_credentials(self, username: str, password: str) -> bool:
         """Validate admin credentials."""
         return self.ctx.index_db.index_db.validate_credentials(
-            username, password, purpose="webui", require_admin=True
+            username, password, require_admin=True, admin_access=True, webui_access=True
         )
 
     def _list_webdav_users(self) -> Dict[str, Any]:
@@ -1026,9 +1027,9 @@ class ManagementLayer:
             password_plain=password,
             enabled=enabled,
             is_admin=False,
-            purpose="webdav"
+            webdav_access=True
         )
-        
+         
         # Update share permissions
         self._mutate_share_user(
             share,
@@ -1040,14 +1041,14 @@ class ManagementLayer:
                 "cache": bool(cache),
             }
         )
-        
+         
         return {"status": "success", "message": f"WebDAV user {username} updated"}
 
     def _delete_webdav_user(self, share: str, username: str) -> Dict[str, Any]:
         if not share or not username:
             raise ValueError("Share and username are required")
         self._mutate_share_user(share, username, None)
-        self.ctx.index_db.index_db.disable_auth_user(username, purpose="webdav")
+        self.ctx.index_db.index_db.disable_auth_user(username, webdav_access=True)
         return {"status": "success", "message": f"WebDAV user {username} removed"}
 
     def _mutate_share_user(self, share_name: str, username: str, policy: Optional[Dict[str, bool]]) -> None:
@@ -1114,7 +1115,7 @@ class ManagementLayer:
             }
          
         # Try database credentials
-        if self.ctx.index_db.index_db.validate_credentials(username, password, purpose="webui", require_admin=True):
+        if self.ctx.index_db.index_db.validate_credentials(username, password, require_admin=True, admin_access=True, webui_access=True):
             token = self.ctx.auth_manager.create_session_token(username)
             return {
                 'authenticated': True,
@@ -1143,7 +1144,7 @@ class ManagementLayer:
 
     def _login_user(self, username: str, password: str) -> str | None:
         """Authenticate a user and return a session token."""
-        token = self.ctx.auth_manager.authenticate_user(username, password, purpose="webui")
+        token = self.ctx.auth_manager.authenticate_user(username, password, admin_access=True, webui_access=True)
         if token:
             return token
         if (
@@ -1591,6 +1592,7 @@ class ManagementLayer:
         return {"status": "ok"}
 
     def _list_ssh_users(self) -> List[Dict[str, Any]]:
+        # Get users with webdav access (for SSH key management)
         users = self.ctx.index_db.index_db.list_users(purpose="webdav")
         key_manager = getattr(self.ctx.auth_manager, "user_ssh_key_manager", None)
         for entry in users:
@@ -1607,7 +1609,7 @@ class ManagementLayer:
     def _get_ssh_user_keys(self, username: str | None) -> Dict[str, Any]:
         if not username:
             raise ValueError("username is required")
-        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        user = self.ctx.index_db.index_db.get_auth_user(username, webdav_access=True)
         if not user:
             raise ValueError("user not found")
         return {
@@ -1615,14 +1617,14 @@ class ManagementLayer:
             "authorized_keys": self.ctx.auth_manager.get_authorized_keys_text(username),
             "ssh_keys_editable": self.ctx.auth_manager.get_authorized_keys_editable(
                 username,
-                purpose="webdav",
+                webdav_access=True,
             ),
         }
 
     def _update_ssh_user_keys(self, username: str | None, content: str) -> Dict[str, Any]:
         if not username:
             raise ValueError("username is required")
-        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        user = self.ctx.index_db.index_db.get_auth_user(username, webdav_access=True)
         if not user:
             raise ValueError("user not found")
         ok = self.ctx.auth_manager.update_authorized_keys_text(username, content or "")
@@ -1633,13 +1635,13 @@ class ManagementLayer:
     def _set_ssh_user_keys_editable(self, username: str | None, enabled: bool) -> Dict[str, Any]:
         if not username:
             raise ValueError("username is required")
-        user = self.ctx.index_db.index_db.get_auth_user(username, purpose="webdav")
+        user = self.ctx.index_db.index_db.get_auth_user(username, webdav_access=True)
         if not user:
             raise ValueError("user not found")
         ok = self.ctx.auth_manager.set_authorized_keys_editable(
             username,
             enabled,
-            purpose="webdav",
+            webdav_access=True,
         )
         if not ok:
             raise RuntimeError("Failed to update ssh_keys_editable")

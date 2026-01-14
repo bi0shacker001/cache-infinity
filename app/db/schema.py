@@ -435,7 +435,6 @@ class IndexDatabase:
                     enabled BOOLEAN NOT NULL,
                     is_admin BOOLEAN NOT NULL,
                     webui_access BOOLEAN NOT NULL DEFAULT 0,
-                    purpose TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -444,15 +443,6 @@ class IndexDatabase:
             columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_users)")}
             if "webui_access" not in columns:
                 self._db.execute("ALTER TABLE config_users ADD COLUMN webui_access BOOLEAN NOT NULL DEFAULT 0")
-                self._db.execute(
-                    """
-                    UPDATE config_users
-                    SET webui_access = CASE
-                        WHEN purpose = 'webui' AND is_admin = 1 THEN 1
-                        ELSE 0
-                    END
-                    """
-                )
             
             self._db.execute(
                 """
@@ -644,8 +634,11 @@ class IndexDatabase:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     is_admin INTEGER NOT NULL DEFAULT 1,
                     webui_access INTEGER NOT NULL DEFAULT 0,
-                    ssh_keys_editable INTEGER NOT NULL DEFAULT 1,
-                    purpose TEXT NOT NULL DEFAULT 'webui'
+                    admin_access INTEGER NOT NULL DEFAULT 0,
+                    webdav_access INTEGER NOT NULL DEFAULT 1,
+                    ftp_access INTEGER NOT NULL DEFAULT 0,
+                    sftp_access INTEGER NOT NULL DEFAULT 0,
+                    ssh_keys_editable INTEGER NOT NULL DEFAULT 1
                 )
                 """
             )
@@ -663,37 +656,63 @@ class IndexDatabase:
                 """
             )
             self._db.commit()
+
+            # Add missing columns with proper migration logic
             try:
-                self._db.execute("ALTER TABLE auth_users ADD COLUMN purpose TEXT NOT NULL DEFAULT 'webui'")
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-            try:
-                self._db.execute("ALTER TABLE auth_users ADD COLUMN api_key TEXT")
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-            try:
-                self._db.execute(
-                    "ALTER TABLE auth_users ADD COLUMN ssh_keys_editable INTEGER NOT NULL DEFAULT 1"
-                )
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-            try:
-                self._db.execute(
-                    "ALTER TABLE auth_users ADD COLUMN webui_access INTEGER NOT NULL DEFAULT 0"
-                )
-                self._db.execute(
-                    """
-                    UPDATE auth_users
-                    SET webui_access = CASE
-                        WHEN purpose = 'webui' AND is_admin = 1 THEN 1
-                        ELSE 0
-                    END
-                    """
-                )
-                self._db.commit()
+                columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(auth_users)")}
+                
+                # Add api_key column if missing
+                if "api_key" not in columns:
+                    self._db.execute("ALTER TABLE auth_users ADD COLUMN api_key TEXT")
+                    self._db.commit()
+                
+                # Add ssh_keys_editable column if missing
+                if "ssh_keys_editable" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN ssh_keys_editable INTEGER NOT NULL DEFAULT 1"
+                    )
+                    self._db.commit()
+                
+                # Add webui_access column if missing
+                if "webui_access" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN webui_access INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._db.commit()
+                
+                # Add admin_access column if missing
+                if "admin_access" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN admin_access INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._db.commit()
+                    # Set admin_access for existing admin users (convert boolean to integer)
+                    self._db.execute(
+                        "UPDATE auth_users SET admin_access = CASE WHEN is_admin THEN 1 ELSE 0 END"
+                    )
+                    self._db.commit()
+                
+                # Add webdav_access column if missing
+                if "webdav_access" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN webdav_access INTEGER NOT NULL DEFAULT 1"
+                    )
+                    self._db.commit()
+                
+                # Add ftp_access column if missing
+                if "ftp_access" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN ftp_access INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._db.commit()
+                
+                # Add sftp_access column if missing
+                if "sftp_access" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE auth_users ADD COLUMN sftp_access INTEGER NOT NULL DEFAULT 0"
+                    )
+                    self._db.commit()
+                    
             except Exception:
                 self._db.rollback()
 
@@ -1371,8 +1390,8 @@ class IndexDatabase:
             if row is None:
                 self._db.execute(
                     """
-                    INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, purpose)
-                    VALUES (?, ?, TRUE, TRUE, TRUE, 'webui')
+                    INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, admin_access)
+                    VALUES (?, ?, TRUE, TRUE, TRUE, TRUE)
                     """,
                     ("admin", "password"),
                 )
@@ -1383,7 +1402,8 @@ class IndexDatabase:
                     """
                     UPDATE auth_users
                     SET is_admin = 1,
-                        webui_access = 1
+                        webui_access = 1,
+                        admin_access = 1
                     WHERE username = ?
                     """,
                     ("admin",),
@@ -1399,12 +1419,15 @@ class IndexDatabase:
         enabled: bool = True,
         is_admin: bool | None = None,
         webui_access: bool | None = None,
+        webdav_access: bool | None = None,
+        ftp_access: bool | None = None,
+        sftp_access: bool | None = None,
         ssh_keys_editable: bool | None = None,
     ) -> None:
         with self._lock:
             existing = self._db.fetchone(
                 """
-                SELECT password_plain, password_hash, ssh_keys_editable, is_admin, webui_access
+                SELECT password_plain, password_hash, ssh_keys_editable, is_admin, webui_access, webdav_access, ftp_access, sftp_access
                 FROM auth_users
                 WHERE username = ?
                 """,
@@ -1422,6 +1445,21 @@ class IndexDatabase:
                 if webui_access is not None
                 else (bool(existing["webui_access"]) if existing else admin_flag)
             )
+            webdav_flag = (
+                bool(webdav_access)
+                if webdav_access is not None
+                else (bool(existing["webdav_access"]) if existing else True)
+            )
+            ftp_flag = (
+                bool(ftp_access)
+                if ftp_access is not None
+                else (bool(existing["ftp_access"]) if existing else False)
+            )
+            sftp_flag = (
+                bool(sftp_access)
+                if sftp_access is not None
+                else (bool(existing["sftp_access"]) if existing else False)
+            )
             keys_editable = (
                 ssh_keys_editable
                 if ssh_keys_editable is not None
@@ -1431,10 +1469,12 @@ class IndexDatabase:
                 self._db.execute(
                     """
                     UPDATE auth_users
-                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, webui_access = ?, ssh_keys_editable = ?
+                    SET password_plain = ?, password_hash = ?, enabled = ?,
+                        is_admin = ?, webui_access = ?, webdav_access = ?, ftp_access = ?, sftp_access = ?, ssh_keys_editable = ?
                     WHERE username = ?
                     """,
-                    (plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if keys_editable else 0, username),
+                    (plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if webdav_flag else 0,
+                     1 if ftp_flag else 0, 1 if sftp_flag else 0, 1 if keys_editable else 0, username),
                 )
             else:
                 self._db.execute(
@@ -1446,49 +1486,166 @@ class IndexDatabase:
                         enabled,
                         is_admin,
                         webui_access,
-                        ssh_keys_editable,
-                        purpose
+                        webdav_access,
+                        ftp_access,
+                        sftp_access,
+                        ssh_keys_editable
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'webui')
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (username, plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if keys_editable else 0),
+                    (username, plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if webdav_flag else 0,
+                     1 if ftp_flag else 0, 1 if sftp_flag else 0, 1 if keys_editable else 0),
                 )
             self._db.commit()
 
-    def list_users(self) -> list[dict[str, object]]:
+    def list_users(self, purpose: str | None = None) -> list[dict[str, object]]:
         with self._lock:
-            rows = self._db.fetchall(
-                """
-                SELECT username, enabled, is_admin, webui_access, ssh_keys_editable
-                FROM auth_users
-                ORDER BY username
-                """,
-            )
+            # Check which columns exist to build safe queries
+            columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(auth_users)")}
+            
+            if purpose:
+                # Filter users by purpose using the new multi-column access architecture
+                if purpose == "webdav":
+                    if "webdav_access" in columns:
+                        rows = self._db.fetchall(
+                            """
+                            SELECT username, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
+                            FROM auth_users
+                            WHERE webdav_access = 1
+                            ORDER BY username
+                            """,
+                        )
+                    else:
+                        rows = []
+                elif purpose == "webui":
+                    if "webui_access" in columns:
+                        rows = self._db.fetchall(
+                            """
+                            SELECT username, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
+                            FROM auth_users
+                            WHERE webui_access = 1
+                            ORDER BY username
+                            """,
+                        )
+                    else:
+                        rows = []
+                elif purpose == "admin":
+                    if "admin_access" in columns:
+                        rows = self._db.fetchall(
+                            """
+                            SELECT username, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
+                            FROM auth_users
+                            WHERE admin_access = 1
+                            ORDER BY username
+                            """,
+                        )
+                    else:
+                        rows = []
+                elif purpose == "ftp":
+                    if "ftp_access" in columns:
+                        rows = self._db.fetchall(
+                            """
+                            SELECT username, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
+                            FROM auth_users
+                            WHERE ftp_access = 1
+                            ORDER BY username
+                            """,
+                        )
+                    else:
+                        rows = []
+                elif purpose == "sftp":
+                    if "sftp_access" in columns:
+                        rows = self._db.fetchall(
+                            """
+                            SELECT username, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
+                            FROM auth_users
+                            WHERE sftp_access = 1
+                            ORDER BY username
+                            """,
+                        )
+                    else:
+                        rows = []
+                else:
+                    # Unknown purpose, return empty list
+                    rows = []
+            else:
+                # Return all users with full access information
+                # Build query dynamically based on available columns
+                select_cols = ["username", "enabled", "is_admin"]
+                if "webui_access" in columns:
+                    select_cols.append("webui_access")
+                if "webdav_access" in columns:
+                    select_cols.append("webdav_access")
+                if "ftp_access" in columns:
+                    select_cols.append("ftp_access")
+                if "sftp_access" in columns:
+                    select_cols.append("sftp_access")
+                if "ssh_keys_editable" in columns:
+                    select_cols.append("ssh_keys_editable")
+                
+                select_clause = ", ".join(select_cols)
+                rows = self._db.fetchall(f"SELECT {select_clause} FROM auth_users ORDER BY username")
+         
         return [
             {
                 "username": row["username"],
                 "enabled": bool(row["enabled"]),
                 "is_admin": bool(row["is_admin"]),
                 "webui_access": bool(row.get("webui_access", 0)),
+                "webdav_access": bool(row.get("webdav_access", 1)),
+                "ftp_access": bool(row.get("ftp_access", 0)),
+                "sftp_access": bool(row.get("sftp_access", 0)),
                 "ssh_keys_editable": bool(row.get("ssh_keys_editable", 1)),
             }
             for row in rows
         ]
 
-    def get_auth_user(self, username: str) -> dict | None:
+    def get_auth_user(self, username: str, admin_access: bool = False, webui_access: bool = False, webdav_access: bool = False, ftp_access: bool = False, sftp_access: bool = False) -> dict | None:
         with self._lock:
-            return self._db.fetchone(
-                """
-                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, ssh_keys_editable
+            # Build the query based on which access flags are provided
+            base_query = """
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, webdav_access, ftp_access, sftp_access, ssh_keys_editable
                 FROM auth_users
                 WHERE username = ?
-                """,
-                (username,),
-            )
+            """
+            params = [username]
+            
+            conditions = []
+            if admin_access:
+                conditions.append("admin_access = 1")
+            if webui_access:
+                conditions.append("webui_access = 1")
+            if webdav_access:
+                conditions.append("webdav_access = 1")
+            if ftp_access:
+                conditions.append("ftp_access = 1")
+            if sftp_access:
+                conditions.append("sftp_access = 1")
+            
+            if conditions:
+                base_query += " AND " + " AND ".join(conditions)
+            
+            return self._db.fetchone(base_query, params)
 
-    def disable_auth_user(self, username: str) -> None:
+    def disable_auth_user(self, username: str, admin_access: bool = False, webui_access: bool = False, webdav_access: bool = False, ftp_access: bool = False, sftp_access: bool = False) -> None:
         with self._lock:
-            self._db.execute("UPDATE auth_users SET enabled = 0 WHERE username = ?", (username,))
+            # Build the update query based on which access flags are provided
+            updates = ["enabled = 0"]
+            params = []
+            
+            if admin_access:
+                updates.append("admin_access = 0")
+            if webui_access:
+                updates.append("webui_access = 0")
+            if webdav_access:
+                updates.append("webdav_access = 0")
+            if ftp_access:
+                updates.append("ftp_access = 0")
+            if sftp_access:
+                updates.append("sftp_access = 0")
+            
+            query = f"UPDATE auth_users SET {', '.join(updates)} WHERE username = ?"
+            self._db.execute(query, (username,))
             self._db.commit()
 
     def list_api_keys(self) -> list[dict[str, object]]:
@@ -1497,7 +1654,7 @@ class IndexDatabase:
                 """
                 SELECT username, api_key
                 FROM auth_users
-                WHERE is_admin = 1
+                WHERE is_admin = TRUE
                 ORDER BY username
                 """
             )
@@ -1532,8 +1689,10 @@ class IndexDatabase:
 
     def any_admin_users(self) -> bool:
         with self._lock:
+            # Use 1/0 for integer comparisons since webui_access is INTEGER type
+            # enabled is BOOLEAN, webui_access is INTEGER in the auth_users table
             row = self._db.fetchone(
-                "SELECT 1 AS present FROM auth_users WHERE enabled = 1 AND webui_access = 1 LIMIT 1"
+                "SELECT 1 AS present FROM auth_users WHERE enabled = TRUE AND webui_access = 1 LIMIT 1"
             )
             if row:
                 return True
@@ -1548,8 +1707,8 @@ class IndexDatabase:
             self._logger.warning("No admin users found; recreating default admin/password credentials")
             self._db.execute(
                 """
-                INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, purpose)
-                VALUES (?, ?, TRUE, TRUE, TRUE, 'webui')
+                INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, admin_access)
+                VALUES (?, ?, TRUE, TRUE, 1, 1)
                 """,
                 ("admin", "password"),
             )
@@ -1563,12 +1722,23 @@ class IndexDatabase:
         *,
         require_admin: bool = False,
         require_webui: bool = False,
+        admin_access: bool = False,
+        webui_access: bool = False,
+        webdav_access: bool = False,
+        ftp_access: bool = False,
+        sftp_access: bool = False,
     ) -> bool:
         self._logger.debug(
-            "Validating credentials for user: %s, require_admin: %s, require_webui: %s",
+            "Validating credentials for user: %s, require_admin: %s, require_webui: %s, "
+            "admin_access: %s, webui_access: %s, webdav_access: %s, ftp_access: %s, sftp_access: %s",
             username,
             require_admin,
             require_webui,
+            admin_access,
+            webui_access,
+            webdav_access,
+            ftp_access,
+            sftp_access,
         )
         user = self.get_auth_user(username)
         if not user:
@@ -1583,6 +1753,24 @@ class IndexDatabase:
         if require_webui and not user.get("webui_access", False):
             self._logger.warning("User missing WebUI access: %s", username)
             return False
+        
+        # Check specific access requirements
+        if admin_access and not user.get("admin_access", False):
+            self._logger.warning("User missing admin access: %s", username)
+            return False
+        if webui_access and not user.get("webui_access", False):
+            self._logger.warning("User missing WebUI access: %s", username)
+            return False
+        if webdav_access and not user.get("webdav_access", False):
+            self._logger.warning("User missing WebDAV access: %s", username)
+            return False
+        if ftp_access and not user.get("ftp_access", False):
+            self._logger.warning("User missing FTP access: %s", username)
+            return False
+        if sftp_access and not user.get("sftp_access", False):
+            self._logger.warning("User missing SFTP access: %s", username)
+            return False
+        
         stored_plain = user.get("password_plain")
         stored_hash = _normalize_password_hash(user.get("password_hash"))
         if stored_plain and password == stored_plain:
@@ -2114,7 +2302,7 @@ class IndexDatabase:
                     auth["oidc_config"],
                     auth["ldap_config"],
                     auth["proxy_config"],
-                    int(bool(auth.get("webui_external_enabled", False))),
+                    bool(auth.get("webui_external_enabled", False)),
                     now,
                 ),
             )
@@ -2299,7 +2487,7 @@ class IndexDatabase:
         with self._lock:
             row = self._db.fetchone(
                 """
-                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, purpose, created_at, updated_at
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, created_at, updated_at
                 FROM config_users
                 WHERE username = ?
                 """,
@@ -2314,7 +2502,6 @@ class IndexDatabase:
             "enabled": bool(row["enabled"]),
             "is_admin": bool(row["is_admin"]),
             "webui_access": bool(row.get("webui_access", 0)),
-            "purpose": row["purpose"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -2324,7 +2511,7 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, purpose, created_at, updated_at
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, created_at, updated_at
                 FROM config_users
                 ORDER BY username
                 """
@@ -2337,7 +2524,6 @@ class IndexDatabase:
                 "enabled": bool(row["enabled"]),
                 "is_admin": bool(row["is_admin"]),
                 "webui_access": bool(row.get("webui_access", 0)),
-                "purpose": row["purpose"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
@@ -2364,18 +2550,16 @@ class IndexDatabase:
                     enabled,
                     is_admin,
                     webui_access,
-                    purpose,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(username) DO UPDATE SET
                     password_plain = excluded.password_plain,
                     password_hash = excluded.password_hash,
                     enabled = excluded.enabled,
                     is_admin = excluded.is_admin,
                     webui_access = excluded.webui_access,
-                    purpose = excluded.purpose,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -2385,7 +2569,6 @@ class IndexDatabase:
                     user["enabled"],
                     user["is_admin"],
                     webui_access,
-                    user.get("purpose", "webui"),
                     now,
                     now,
                 ),

@@ -264,6 +264,30 @@ class PostgreSQLBackend:
         converted = re.sub(sqlite_master_pattern2, "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public'", converted, flags=re.IGNORECASE)
         # Quote reserved keyword 'user' as a column name
         converted = re.sub(r'\buser\b', '"user"', converted)
+        
+        # Convert INSERT OR REPLACE to INSERT ... ON CONFLICT for PostgreSQL
+        # Pattern: INSERT OR REPLACE INTO table_name (columns) VALUES (values)
+        insert_or_replace_pattern = r'INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)'
+        def replace_insert_or_replace(match):
+            table_name = match.group(1)
+            columns = match.group(2)
+            values = match.group(3)
+            # Try to determine the primary key for ON CONFLICT clause
+            # Common patterns: id, target_id, cachelink_id, etc.
+            column_list = [col.strip() for col in columns.split(',')]
+            primary_key = None
+            for col in column_list:
+                if col.lower() in ['id', 'target_id', 'cachelink_id', 'file_path', 'domain', 'username', 'token']:
+                    primary_key = col
+                    break
+            if not primary_key and column_list:
+                primary_key = column_list[0]  # Use first column as fallback
+            if primary_key:
+                return f"INSERT INTO {table_name} ({columns}) VALUES ({values}) ON CONFLICT({primary_key}) DO UPDATE SET {', '.join([f'{col} = excluded.{col}' for col in column_list])}"
+            else:
+                return f"INSERT INTO {table_name} ({columns}) VALUES ({values}) ON CONFLICT DO NOTHING"
+        converted = re.sub(insert_or_replace_pattern, replace_insert_or_replace, converted, flags=re.IGNORECASE)
+        
         # For INTEGER columns, keep DEFAULT 1/0 as is (no conversion)
         _logger.debug("Converted SQL: %s", converted)
         return converted
