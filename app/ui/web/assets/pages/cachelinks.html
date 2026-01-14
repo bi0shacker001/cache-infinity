@@ -228,98 +228,259 @@
         </div>
 
         <div data-panel="rclone" class="hidden">
-          <div class="split">
-            <div class="section" style="--delay:0.1s;">
-              <div class="section-header">
-                <h2>Global Settings</h2>
+          <div class="tabs" style="margin-bottom: 12px;">
+            <button class="tab active" data-rclone-tab="settings">Global Settings</button>
+            <button class="tab" data-rclone-tab="remotes">Remote Manager</button>
+            <button class="tab" data-rclone-tab="creator">Remote Creator</button>
+            <button class="tab" data-rclone-tab="integrator">Cachelink Integrator</button>
+          </div>
+
+          <div data-rclone-panel="settings">
+            <div class="split">
+              <div class="section" style="--delay:0.1s;">
+                <div class="section-header">
+                  <h2>Global Settings</h2>
+                </div>
+                <form id="rclone-settings-form" class="stack">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label class="label">Bandwidth Limit</label>
+                      <input class="input" id="rclone-bandwidth" placeholder="10M">
+                    </div>
+                    <div class="field">
+                      <label class="label">Transfer Concurrency</label>
+                      <input class="input" id="rclone-transfers" type="number" min="1" max="16">
+                    </div>
+                    <div class="field">
+                      <label class="label">Checkers</label>
+                      <input class="input" id="rclone-checkers" type="number" min="1" max="32">
+                    </div>
+                    <div class="field">
+                      <label class="label">Timeout (seconds)</label>
+                      <input class="input" id="rclone-timeout" type="number" min="30" max="600">
+                    </div>
+                    <div class="field">
+                      <label class="label">Retries</label>
+                      <input class="input" id="rclone-retries" type="number" min="0" max="10">
+                    </div>
+                  </div>
+                  <button class="button secondary" type="submit">Save Settings</button>
+                </form>
               </div>
-              <form id="rclone-settings-form" class="stack">
+
+              <div class="section" style="--delay:0.15s;">
+                <div class="section-header">
+                  <h2>Remotes</h2>
+                </div>
+                <div id="rclone-remote-list" class="list"></div>
+              </div>
+            </div>
+
+            <div class="section" style="--delay:0.2s;">
+              <div class="section-header">
+                <h2>Add / Edit Remote</h2>
+              </div>
+              <form id="rclone-remote-form" class="stack">
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Remote Name</label>
+                    <input class="input" id="rclone-remote-name" placeholder="my-remote">
+                  </div>
+                  <div class="field">
+                    <label class="label">Remote Type</label>
+                    <select class="select" id="rclone-remote-type">
+                      <option value="s3">s3</option>
+                      <option value="gdrive">gdrive</option>
+                      <option value="dropbox">dropbox</option>
+                      <option value="azureblob">azureblob</option>
+                      <option value="onedrive">onedrive</option>
+                      <option value="swift">swift</option>
+                      <option value="other">other</option>
+                    </select>
+                  </div>
+                  <div class="field" style="grid-column:1/-1;">
+                    <label class="label">Configuration (JSON)</label>
+                    <textarea class="textarea" id="rclone-remote-config" placeholder='{"key":"value"}'></textarea>
+                  </div>
+                </div>
                 <div class="form-grid">
                   <div class="field">
                     <label class="label">Bandwidth Limit</label>
-                    <input class="input" id="rclone-bandwidth" placeholder="10M">
+                    <input class="input" id="rclone-remote-bandwidth" placeholder="10M">
                   </div>
                   <div class="field">
                     <label class="label">Transfer Concurrency</label>
-                    <input class="input" id="rclone-transfers" type="number" min="1" max="16">
+                    <input class="input" id="rclone-remote-transfers" type="number" min="1" max="16">
                   </div>
                   <div class="field">
                     <label class="label">Checkers</label>
-                    <input class="input" id="rclone-checkers" type="number" min="1" max="32">
+                    <input class="input" id="rclone-remote-checkers" type="number" min="1" max="32">
                   </div>
                   <div class="field">
                     <label class="label">Timeout (seconds)</label>
-                    <input class="input" id="rclone-timeout" type="number" min="30" max="600">
+                    <input class="input" id="rclone-remote-timeout" type="number" min="30" max="600">
                   </div>
                   <div class="field">
                     <label class="label">Retries</label>
-                    <input class="input" id="rclone-retries" type="number" min="0" max="10">
+                    <input class="input" id="rclone-remote-retries" type="number" min="0" max="10">
                   </div>
                 </div>
-                <button class="button secondary" type="submit">Save Settings</button>
+                <button class="button primary" type="submit">Save Remote</button>
+                <div class="notice">Use the test button in the remote list to verify connectivity.</div>
               </form>
-            </div>
-
-            <div class="section" style="--delay:0.15s;">
-              <div class="section-header">
-                <h2>Remotes</h2>
-              </div>
-              <div id="rclone-remote-list" class="list"></div>
             </div>
           </div>
 
-          <div class="section" style="--delay:0.2s;">
-            <div class="section-header">
-              <h2>Add / Edit Remote</h2>
+          <div data-rclone-panel="remotes" class="hidden">
+            <div class="section" style="--delay:0.1s;">
+              <div class="section-header">
+                <h2>Rclone Remotes</h2>
+                <div class="row">
+                  <button class="button primary" id="refresh-remotes">Refresh List</button>
+                </div>
+              </div>
+              <div id="rclone-remote-manager-list" class="list"></div>
             </div>
-            <form id="rclone-remote-form" class="stack">
-              <div class="form-grid">
-                <div class="field">
-                  <label class="label">Remote Name</label>
-                  <input class="input" id="rclone-remote-name" placeholder="my-remote">
-                </div>
-                <div class="field">
-                  <label class="label">Remote Type</label>
-                  <select class="select" id="rclone-remote-type">
-                    <option value="s3">s3</option>
-                    <option value="gdrive">gdrive</option>
-                    <option value="dropbox">dropbox</option>
-                    <option value="azureblob">azureblob</option>
-                    <option value="onedrive">onedrive</option>
-                    <option value="swift">swift</option>
-                    <option value="other">other</option>
-                  </select>
-                </div>
-                <div class="field" style="grid-column:1/-1;">
-                  <label class="label">Configuration (JSON)</label>
-                  <textarea class="textarea" id="rclone-remote-config" placeholder='{"key":"value"}'></textarea>
-                </div>
+          </div>
+
+          <div data-rclone-panel="creator" class="hidden">
+            <div class="section" style="--delay:0.1s;">
+              <div class="section-header">
+                <h2>Create New Rclone Remote</h2>
+                <p>Configure a new cloud storage remote with detailed settings.</p>
               </div>
-              <div class="form-grid">
-                <div class="field">
-                  <label class="label">Bandwidth Limit</label>
-                  <input class="input" id="rclone-remote-bandwidth" placeholder="10M">
+
+              <form id="rclone-remote-creator-form" class="stack">
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Remote Name</label>
+                    <input class="input" id="remote-name" placeholder="my-s3-bucket" required>
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Remote Type</label>
+                    <select class="select" id="remote-type">
+                      <option value="s3">Amazon S3</option>
+                      <option value="gdrive">Google Drive</option>
+                      <option value="dropbox">Dropbox</option>
+                      <option value="azureblob">Azure Blob Storage</option>
+                      <option value="onedrive">OneDrive</option>
+                      <option value="swift">OpenStack Swift</option>
+                      <option value="ftp">FTP</option>
+                      <option value="webdav">WebDAV</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
                 </div>
-                <div class="field">
-                  <label class="label">Transfer Concurrency</label>
-                  <input class="input" id="rclone-remote-transfers" type="number" min="1" max="16">
+
+                <div class="section-subheader">
+                  <h3>Provider Configuration</h3>
                 </div>
-                <div class="field">
-                  <label class="label">Checkers</label>
-                  <input class="input" id="rclone-remote-checkers" type="number" min="1" max="32">
+
+                <div id="remote-config-container">
+                  <!-- Dynamic configuration fields will be inserted here -->
                 </div>
-                <div class="field">
-                  <label class="label">Timeout (seconds)</label>
-                  <input class="input" id="rclone-remote-timeout" type="number" min="30" max="600">
+
+                <div class="section-subheader">
+                  <h3>Performance Settings</h3>
                 </div>
-                <div class="field">
-                  <label class="label">Retries</label>
-                  <input class="input" id="rclone-remote-retries" type="number" min="0" max="10">
+
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Bandwidth Limit</label>
+                    <input class="input" id="remote-bandwidth" placeholder="10M">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Transfer Concurrency</label>
+                    <input class="input" id="remote-transfers" type="number" min="1" max="16" value="4">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Checkers</label>
+                    <input class="input" id="remote-checkers" type="number" min="1" max="32" value="8">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Timeout (seconds)</label>
+                    <input class="input" id="remote-timeout" type="number" min="30" max="600" value="300">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Retries</label>
+                    <input class="input" id="remote-retries" type="number" min="0" max="10" value="3">
+                  </div>
                 </div>
+
+                <div class="row">
+                  <button class="button primary" type="submit">Create Remote</button>
+                  <button class="button" type="button" id="test-remote-config">Test Configuration</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div data-rclone-panel="integrator" class="hidden">
+            <div class="section" style="--delay:0.1s;">
+              <div class="section-header">
+                <h2>Create Cachelink from Rclone Remote</h2>
+                <p>Turn any rclone remote into a CacheInfinity cachelink.</p>
               </div>
-              <button class="button primary" type="submit">Save Remote</button>
-              <div class="notice">Use the test button in the remote list to verify connectivity.</div>
-            </form>
+
+              <form id="rclone-cachelink-integrator-form" class="stack">
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Select Rclone Remote</label>
+                    <select class="select" id="integrator-remote-select">
+                      <option value="">Select a remote...</option>
+                    </select>
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Parent Path</label>
+                    <input class="input" id="integrator-parent-path" placeholder="games/cloud">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Cachelink Name</label>
+                    <input class="input" id="integrator-cachelink-name" placeholder="(auto)">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Remote Path</label>
+                    <input class="input" id="integrator-remote-path" value="/">
+                  </div>
+                </div>
+
+                <div class="section-subheader">
+                  <h3>Performance Overrides (Optional)</h3>
+                </div>
+
+                <div class="form-grid">
+                  <div class="field">
+                    <label class="label">Bandwidth Limit</label>
+                    <input class="input" id="integrator-bandwidth" placeholder="Inherit from remote">
+                  </div>
+                  
+                  <div class="field">
+                    <label class="label">Transfer Concurrency</label>
+                    <input class="input" id="integrator-transfers" type="number" min="1" max="16" placeholder="Inherit">
+                  </div>
+                </div>
+
+                <div class="row">
+                  <button class="button primary" type="submit">Create Cachelink</button>
+                  <button class="button" type="button" id="preview-integration">Preview Listing</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="section" style="--delay:0.2s;">
+              <div class="section-header">
+                <h2>Preview Results</h2>
+              </div>
+              <div id="integration-preview-list" class="list"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -329,5 +490,6 @@
 
     <script src="/assets/js/common.js"></script>
     <script src="/assets/js/cachelinks.js"></script>
+    <script src="/assets/js/rclone.js"></script>
   </body>
 </html>

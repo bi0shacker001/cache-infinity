@@ -716,6 +716,19 @@ class ManagementLayer:
         normalized_remote = (rclone_remote or "").strip() or None
         normalized_path = (rclone_path or "").strip() or None
         normalized_bandwidth = (bandwidth_limit or "").strip() or None
+        
+        # If this is an rclone cachelink, automatically create/update the rclone remote
+        if url_handler == "rclone" and normalized_remote:
+            self._create_or_update_rclone_remote_for_cachelink(
+                remote_name=normalized_remote,
+                remote_config={},
+                bandwidth_limit=normalized_bandwidth,
+                transfer_concurrency=transfer_concurrency,
+                checkers=checkers,
+                timeout=timeout,
+                retries=retries
+            )
+        
         cachelinks.append(
             {
                 "canonical_id": canonical_id,
@@ -840,6 +853,55 @@ class ManagementLayer:
         index_db.save_cachelinks(remaining)
         self._request_reload()
         return {"status": "success", "message": f"Folder {path} deleted"}
+
+    def _create_or_update_rclone_remote_for_cachelink(
+        self,
+        remote_name: str,
+        remote_config: Dict[str, Any],
+        bandwidth_limit: Optional[str] = None,
+        transfer_concurrency: Optional[int] = None,
+        checkers: Optional[int] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+    ) -> None:
+        """Create or update an rclone remote configuration for a cachelink."""
+        if not remote_name:
+            raise ValueError("Remote name is required")
+        
+        # Get current rclone settings from database
+        rclone_settings = self.ctx.index_db.index_db.get_rclone() or {
+            "remotes": {},
+            "bandwidth_limit": "",
+            "transfer_concurrency": 4,
+            "checkers": 8,
+            "timeout": 300,
+            "retries": 3,
+        }
+        
+        remotes = rclone_settings.get("remotes", {})
+        
+        # Create or update the remote configuration
+        remote_config = remote_config or {}
+        if not remote_config.get("type"):
+            remote_config["type"] = "s3"  # Default to S3 if no type specified
+        
+        # Apply cachelink-specific overrides
+        if bandwidth_limit:
+            remote_config["ci_bandwidth_limit"] = bandwidth_limit
+        if transfer_concurrency is not None:
+            remote_config["ci_transfer_concurrency"] = transfer_concurrency
+        if checkers is not None:
+            remote_config["ci_checkers"] = checkers
+        if timeout is not None:
+            remote_config["ci_timeout"] = timeout
+        if retries is not None:
+            remote_config["ci_retries"] = retries
+        
+        remotes[remote_name] = remote_config
+        rclone_settings["remotes"] = remotes
+        
+        # Save updated rclone settings back to database
+        self.ctx.index_db.index_db.save_rclone(rclone_settings)
 
     def _preview_cachelink(
         self,
@@ -1663,10 +1725,31 @@ class ManagementLayer:
 
     # === Rclone Operations ===
     def rclone(self, action: str, **kwargs) -> Dict[str, Any]:
-        """Rclone operations: remotes"""
+        """Rclone operations: remotes, create, update, test"""
         try:
             if action == "remotes":
                 return self._rclone_list_remotes()
+            if action == "create":
+                return self._rclone_create_remote(
+                    remote_name=kwargs.get("remote_name"),
+                    remote_type=kwargs.get("remote_type"),
+                    remote_config=kwargs.get("remote_config", {}),
+                    bandwidth_limit=kwargs.get("bandwidth_limit"),
+                    transfer_concurrency=kwargs.get("transfer_concurrency"),
+                    checkers=kwargs.get("checkers"),
+                    timeout=kwargs.get("timeout"),
+                    retries=kwargs.get("retries"),
+                )
+            if action == "update":
+                return self._rclone_update_remote(
+                    remote_name=kwargs.get("remote_name"),
+                    remote_config=kwargs.get("remote_config", {}),
+                    bandwidth_limit=kwargs.get("bandwidth_limit"),
+                    transfer_concurrency=kwargs.get("transfer_concurrency"),
+                    checkers=kwargs.get("checkers"),
+                    timeout=kwargs.get("timeout"),
+                    retries=kwargs.get("retries"),
+                )
             if action == "test":
                 return self._rclone_test_remote(
                     remote=kwargs.get("remote"),
@@ -1696,6 +1779,133 @@ class ManagementLayer:
         except Exception as e:
             logger.error(f"Failed to list rclone remotes: {e}")
             return {"error": f"Failed to list rclone remotes: {e}", "status": "error"}
+
+    def _rclone_create_remote(
+        self,
+        remote_name: str,
+        remote_type: str,
+        remote_config: Dict[str, Any],
+        bandwidth_limit: Optional[str] = None,
+        transfer_concurrency: Optional[int] = None,
+        checkers: Optional[int] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a new rclone remote with detailed configuration."""
+        if not remote_name:
+            raise ValueError("Remote name is required")
+        if not remote_type:
+            raise ValueError("Remote type is required")
+        
+        # Get current rclone settings from database
+        rclone_settings = self.ctx.index_db.index_db.get_rclone() or {
+            "remotes": {},
+            "bandwidth_limit": "",
+            "transfer_concurrency": 4,
+            "checkers": 8,
+            "timeout": 300,
+            "retries": 3,
+        }
+        
+        remotes = rclone_settings.get("remotes", {})
+        
+        # Check if remote already exists
+        if remote_name in remotes:
+            raise ValueError(f"Remote '{remote_name}' already exists")
+        
+        # Build remote configuration
+        remote_config = remote_config or {}
+        remote_config["type"] = remote_type
+        
+        # Apply performance settings as CacheInfinity-specific overrides
+        if bandwidth_limit:
+            remote_config["ci_bandwidth_limit"] = bandwidth_limit
+        if transfer_concurrency is not None:
+            remote_config["ci_transfer_concurrency"] = transfer_concurrency
+        if checkers is not None:
+            remote_config["ci_checkers"] = checkers
+        if timeout is not None:
+            remote_config["ci_timeout"] = timeout
+        if retries is not None:
+            remote_config["ci_retries"] = retries
+        
+        remotes[remote_name] = remote_config
+        rclone_settings["remotes"] = remotes
+        
+        # Save updated rclone settings back to database
+        self.ctx.index_db.index_db.save_rclone(rclone_settings)
+        
+        return {
+            "status": "success",
+            "remote_name": remote_name,
+            "message": f"Rclone remote '{remote_name}' created successfully"
+        }
+
+    def _rclone_update_remote(
+        self,
+        remote_name: str,
+        remote_config: Dict[str, Any],
+        bandwidth_limit: Optional[str] = None,
+        transfer_concurrency: Optional[int] = None,
+        checkers: Optional[int] = None,
+        timeout: Optional[int] = None,
+        retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing rclone remote configuration."""
+        if not remote_name:
+            raise ValueError("Remote name is required")
+        
+        # Get current rclone settings from database
+        rclone_settings = self.ctx.index_db.index_db.get_rclone() or {
+            "remotes": {},
+            "bandwidth_limit": "",
+            "transfer_concurrency": 4,
+            "checkers": 8,
+            "timeout": 300,
+            "retries": 3,
+        }
+        
+        remotes = rclone_settings.get("remotes", {})
+        
+        # Check if remote exists
+        if remote_name not in remotes:
+            raise ValueError(f"Remote '{remote_name}' not found")
+        
+        existing_config = remotes[remote_name]
+        
+        # Update remote configuration
+        if remote_config:
+            # Preserve the remote type if not explicitly changed
+            if "type" not in remote_config and "type" in existing_config:
+                remote_config["type"] = existing_config["type"]
+            existing_config.update(remote_config)
+        
+        # Update performance settings as CacheInfinity-specific overrides
+        if bandwidth_limit is not None:
+            existing_config["ci_bandwidth_limit"] = bandwidth_limit if bandwidth_limit else None
+        if transfer_concurrency is not None:
+            existing_config["ci_transfer_concurrency"] = transfer_concurrency if transfer_concurrency else None
+        if checkers is not None:
+            existing_config["ci_checkers"] = checkers if checkers else None
+        if timeout is not None:
+            existing_config["ci_timeout"] = timeout if timeout else None
+        if retries is not None:
+            existing_config["ci_retries"] = retries if retries else None
+        
+        # Clean up None values
+        existing_config = {k: v for k, v in existing_config.items() if v is not None}
+        
+        remotes[remote_name] = existing_config
+        rclone_settings["remotes"] = remotes
+        
+        # Save updated rclone settings back to database
+        self.ctx.index_db.index_db.save_rclone(rclone_settings)
+        
+        return {
+            "status": "success",
+            "remote_name": remote_name,
+            "message": f"Rclone remote '{remote_name}' updated successfully"
+        }
 
     def _rclone_test_remote(self, remote: str | None, path: str | None = None) -> Dict[str, Any]:
         if not remote:

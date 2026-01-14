@@ -521,6 +521,39 @@ class WebUIApp:
                 )
             )
 
+        @app.route("/rclone/remotes/create", methods=["POST"])
+        def rclone_create_remote():
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.rclone(
+                    "create",
+                    remote_name=payload.get("remote_name"),
+                    remote_type=payload.get("remote_type"),
+                    remote_config=payload.get("remote_config", {}),
+                    bandwidth_limit=payload.get("bandwidth_limit"),
+                    transfer_concurrency=payload.get("transfer_concurrency"),
+                    checkers=payload.get("checkers"),
+                    timeout=payload.get("timeout"),
+                    retries=payload.get("retries"),
+                )
+            )
+
+        @app.route("/rclone/remotes/<remote_name>", methods=["PUT"])
+        def rclone_update_remote(remote_name: str):
+            payload = request.get_json(silent=True) or {}
+            return jsonify(
+                self.management.rclone(
+                    "update",
+                    remote_name=remote_name,
+                    remote_config=payload.get("remote_config", {}),
+                    bandwidth_limit=payload.get("bandwidth_limit"),
+                    transfer_concurrency=payload.get("transfer_concurrency"),
+                    checkers=payload.get("checkers"),
+                    timeout=payload.get("timeout"),
+                    retries=payload.get("retries"),
+                )
+            )
+
     def _resolve_theme(self) -> str | None:
         notheme = request.args.get("notheme", "").lower()
         if notheme in ("1", "true", "yes", "on"):

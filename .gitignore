@@ -42,3 +42,6 @@ Thumbs.db
 
 #Omit .html files in root, as they're used for indexer testing
 /*.html
+
+#And the /plans folder, as they're an artifact of the AI assistance tools that help me plan and debug
+/plans/

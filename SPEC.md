@@ -610,89 +610,225 @@ Cachelinks are stored in the SQL database and used by the runtime.
 * CacheInfinity does **not** watch cachelink YAML files for changes during normal operation.
 * Disk files are not merged with database state after startup; any on-disk YAML is treated as either bootstrap input or a backup export.
 
-### 8.7 Rclone-python Configuration in Cachelinks WebUI
+### 8.7 Enhanced Rclone Integration with Remote Creator/Editor
 
-The Cachelinks section of the Admin WebUI includes a dedicated **Rclone** tab for configuring and managing rclone-based remote links.
+The Cachelinks section of the Admin WebUI includes a comprehensive **Rclone** tab that integrates rclone remote management with direct cachelink creation, replacing the standalone rclone webui functionality.
 
-#### 8.7.1 Rclone-python Tab Interface (Mandatory)
+#### 8.7.1 Enhanced Rclone Tab Interface (Mandatory)
 
-The Rclone tab provides the following configuration sections:
+The Rclone tab provides four integrated sections for complete rclone remote lifecycle management:
 
-**Global Rclone Settings:**
+**1. Global Settings:**
+- **Database-Backed Configuration**: All rclone settings stored in database (no external config files)
+  * CacheInfinity may render a temporary runtime `rclone.conf` (e.g., under `config_dir/runtime/`) for rclone-python usage; the database remains the sole source of truth
+- **Performance Settings**: Global bandwidth limits, transfer concurrency, checkers, timeout, and retries
+- **Basic Remote Management**: List, edit, test, and remove existing rclone remotes
 
-* **Rclone Configuration**: All rclone settings stored in database (no external config files)
-  * CacheInfinity may render a temporary runtime `rclone.conf` (e.g., under `config_dir/runtime/`) for rclone-python usage; the database remains the source of truth and no user-managed config file is required.
-* **Rclone-python Configuration**: Configuration options for rclone-python library stored in database
-* **Performance Settings**: Global bandwidth limits and transfer concurrency settings stored in database
+**2. Remote Manager:**
+- **Comprehensive Remote List**: Display of all configured rclone remotes with detailed status
+- **Remote Actions**: Test connectivity, edit configuration, remove remotes
+- **Performance Metrics**: Display of remote-specific settings and overrides
+- **Database Integration**: All operations work directly with database-stored configurations
 
-**Rclone Remote Management:**
+**3. Remote Creator (New - Replaces rclone webui):**
+- **Provider-Specific Form Fields**: Dynamic configuration interface based on selected cloud provider
+- **Supported Cloud Providers**: Amazon S3, Google Drive, Dropbox, Azure Blob Storage, OneDrive, OpenStack Swift, FTP, WebDAV
+- **No JSON Editing**: Users never edit raw JSON; all configuration through structured form fields
+- **Configuration Fields by Provider**:
+  * **Amazon S3**: Access Key ID, Secret Access Key, Region, Default Bucket (all as separate fields)
+  * **Google Drive**: Client ID, Client Secret, OAuth Token (structured fields)
+  * **Dropbox**: Client ID, Client Secret, Access Token (structured fields)
+  * **Azure Blob**: Account Name, Account Key, Endpoint (structured fields)
+  * **OneDrive**: Client ID, Client Secret, OAuth Token (structured fields)
+  * **FTP**: Host, Username, Password, Port (structured fields)
+  * **WebDAV**: URL, Username, Password (structured fields)
+- **Performance Settings**: Bandwidth limits, transfer concurrency, checkers, timeout, retries
+- **Pre-Creation Testing**: Validate connectivity before saving to database
+- **Database Storage**: All configurations stored as structured data in database, never as JSON blobs
 
-* **Remote List**: Display of configured rclone remotes with status indicators
-* **Add/Edit Remote**: Form for configuring rclone remotes with the following fields:
-  * **Remote Name**: Unique identifier for the rclone remote
-  * **Remote Type**: Dropdown selection of supported cloud providers
-  * **Configuration**: Provider-specific configuration fields (credentials, endpoints, etc.)
-  * **Bandwidth Limits**: Optional bandwidth restrictions for this remote
-  * **Transfer Settings**: Concurrency and timeout configurations
-  * **CacheInfinity Overrides**: Remote-level overrides are stored as CacheInfinity-only metadata and are not written into the rendered `rclone.conf` file.
-* **Test Connectivity**: Button to verify remote configuration and credentials
-* **Remove Remote**: Option to delete configured remotes
+**4. Cachelink Integrator (New):**
+- **Seamless Integration**: Direct creation of cachelinks from rclone remotes
+- **Remote Selection**: Dropdown of database-stored rclone remotes
+- **Cachelink Configuration**: Parent path, cachelink name, remote path
+- **Performance Overrides**: Optional cachelink-specific settings
+- **Preview Functionality**: Preview remote contents before creating cachelink
+- **Automatic Configuration**: System automatically handles rclone configuration when creating cachelinks
 
-**Cachelink Creation with Rclone:**
+#### 8.7.2 YAML Format for Rclone Configuration (Mandatory)
 
-* **Remote Selection**: Dropdown of configured rclone remotes (mandatory for rclone-based cachelinks)
-* **Path Configuration**: Fields for specifying remote path and local mount point
-* **Advanced Options**: Rclone-specific parameters (bandwidth, transfer settings, etc.)
-* **Preview**: Show estimated virtual filesystem structure before creation
-
-#### 8.7.2 Rclone-python Cachelink Configuration (Direct Integration)
-
-Rclone-based cachelinks use the following configuration format:
-
+**Rclone Remotes in Bootstrap YAML:**
 ```yaml
-cloud_storage:
-  my_aws_bucket:
-    url: rclone://my-aws-remote:/bucket/path
-    subfolder: /
-    url_handler: rclone
-    rclone_remote: my-aws-remote
-    rclone_path: /bucket/path
-    bandwidth_limit: 10M
+rclone:
+  canonical_id:
+    type: "s3"
+    access_key_id: "AKIAIOSFODNN7EXAMPLE"
+    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    region: "us-east-1"
+    bucket: "my-bucket"
+    bandwidth_limit: "10M"
     transfer_concurrency: 4
 ```
 
-**Required Parameters:**
+**Cachelinks with Rclone in Bootstrap YAML:**
+```yaml
+cachelinks:
+  games:
+    3do:
+      cachelink_myrient_redump_panasonic_3do_interactive_multiplayer:
+        subfolder: "/"
+        url: "https://myrient.erista.me/files/Redump/Panasonic%20-%203DO%20Interactive%20Multiplayer/"
+        zip: "no"
+        type: "http"
+        rclone: "canonical_id"
+```
 
-* `url`: Must use the `rclone://` prefix followed by remote name and path
-* `subfolder`: Scope within the remote path (typically `/` for root access)
-* `url_handler`: Must be set to `rclone`
-* `rclone_remote`: Name of the configured rclone remote
-* `rclone_path`: Path within the rclone remote to use as the root
+**Key YAML Format Rules:**
+- **Structured Hierarchy**: Cachelinks organized by category/subcategory
+- **Explicit Types**: `type` field specifies handler (http, ftp, rclone, etc.)
+- **Rclone Reference**: `rclone` field references remote by canonical ID
+- **No JSON Blobs**: All values as individual YAML fields or lists
+- **Lists for Multi-values**: Use YAML lists for fields with multiple values
+- **Database Sync**: YAML import/export synchronizes with database
 
-**Optional Parameters:**
+#### 8.7.3 Rclone Remote Creation Workflow
 
-* `bandwidth_limit`: Bandwidth limits for this remote (e.g., `10M`, `50M`, `unlimited`)
-* `transfer_concurrency`: Number of parallel transfers (default: 4, max: 16)
-* `checkers`: Number of parallel checkers for operations (default: 8, max: 32)
-* `timeout`: Operation timeout in seconds (default: 300)
-* `retries`: Maximum retry attempts for failed operations (default: 3)
+**Database-Centric Remote Creator Process:**
+1. User selects remote type from dropdown (S3, Google Drive, etc.)
+2. System displays provider-specific form fields (no JSON editing)
+3. User enters credentials and settings into structured fields
+4. User configures performance parameters through form inputs
+5. User can test configuration (system validates and tests connectivity)
+6. System validates all inputs and stores as structured data in database
+7. Remote becomes immediately available for cachelink creation
 
-#### 8.7.3 Rclone-python Integration Rules (Direct API)
+**Cachelink Integration Process:**
+1. User selects existing database-stored rclone remote from dropdown
+2. User specifies parent path and cachelink name
+3. User sets remote path within the cloud storage
+4. User can preview remote contents (system fetches via rclone-python)
+5. System creates cachelink with automatic rclone configuration
+6. Cachelink appears in tree with rclone handler and database-stored settings
 
-* **Configuration Validation**: All rclone-python configurations are validated before saving
-* **Credential Security**: Credentials are stored securely in CacheInfinity's database and never exposed in logs or UI
-* **Remote Testing**: Connectivity tests verify cloud provider configuration and credentials using direct rclone-python calls
-* **Error Handling**: Clear error messages for configuration issues and connection failures
-* **Performance Limits**: Enforce reasonable limits on concurrency and bandwidth settings
-* **Mandatory Dependency**: Rclone is required for all cloud provider integrations
+#### 8.7.4 Rclone Configuration Storage (Mandatory)
 
-#### 8.7.4 WebUI Implementation Details (Direct Integration)
+**Database Schema for Rclone Remotes:**
+```yaml
+# Stored in database as structured data, not JSON
+rclone:
+  my-s3-remote:
+    type: "s3"
+    access_key_id: "AKIAIOSFODNN7EXAMPLE"
+    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    region: "us-east-1"
+    bucket: "my-bucket"
+    bandwidth_limit: "10M"
+    transfer_concurrency: 4
+  my-gdrive-remote:
+    type: "gdrive"
+    client_id: "123456789.apps.googleusercontent.com"
+    client_secret: "GOCSPX-abcdefghijklmnopqrstuvwxyz"
+    token: "{\"access_token\":\"ya29.a0AfB_by_xxx\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//0g_xxx\",\"expiry\":\"2024-01-01T00:00:00Z\"}"
+    bandwidth_limit: "50M"
+    transfer_concurrency: 8
+```
 
-* **JavaScript File**: `app/ui/web/assets/js/cachelinks.js` (extended with rclone functionality)
-* **HTML Template**: Rclone tab added to `app/ui/web/assets/pages/cachelinks.html`
-* **Backend Integration**: Uses existing `app/ui/backend.py` management layer with direct rclone-python calls
-* **Configuration Storage**: All settings stored in database via existing configuration mechanisms
-* **Direct API Calls**: Rclone operations use direct rclone-python calls instead of RC API
+**Key Storage Principles:**
+- **No JSON Blobs**: All configuration stored as individual database fields
+- **Provider-Specific Structure**: Each provider type has its own field structure
+- **YAML Compatibility**: Configurations can be imported/exported via YAML bootstrap files
+- **Database Only**: No external configuration files; database is sole source of truth
+- **Structured Lists**: Multi-value fields stored as YAML lists
+
+#### 8.7.5 Rclone Integration Rules (Mandatory)
+
+**Configuration Management:**
+- **Database Only**: All configurations stored in database; no external files
+- **Structured Data**: Provider-specific fields, not JSON blobs
+- **YAML Flow**: Import/export via bootstrap YAML files only
+- **No User JSON Editing**: Users never see or edit raw JSON
+- **Validation**: All inputs validated before database storage
+
+**Security:**
+- **Credential Protection**: Credentials stored securely in database
+- **No Log Exposure**: Credentials never exposed in logs
+- **UI Protection**: Sensitive fields use appropriate input types (password)
+- **Database Encryption**: Sensitive data encrypted at rest in database
+
+**Integration:**
+- **Automatic Remote Creation**: Creating rclone cachelinks auto-creates/updates rclone remotes
+- **One-to-One Mapping**: Each rclone remote maps to one or more cachelinks
+- **Performance Inheritance**: Cachelinks inherit remote settings unless overridden
+- **Direct API**: All operations use rclone-python direct calls
+
+**Error Handling:**
+- **Clear Messages**: User-friendly error messages
+- **Validation**: Input validation before database operations
+- **Testing**: Pre-creation connectivity testing
+- **Recovery**: Safe failure handling with rollback
+
+#### 8.7.6 WebUI Implementation (Mandatory)
+
+**Files:**
+- `app/ui/web/assets/js/rclone.js`: Comprehensive rclone integration
+- `app/ui/web/assets/js/cachelinks.js`: Existing cachelinks functionality
+- `app/ui/web/assets/pages/cachelinks.html`: Enhanced with rclone tabs
+
+**Backend:**
+- `app/ui/backend.py`: Extended with rclone remote creation/update methods
+- API Endpoints: `/rclone/remotes/create`, `/rclone/remotes/{name}`
+- Database Integration: Direct database storage of structured configurations
+
+**Key Features:**
+- **Dynamic Forms**: Provider-specific fields generated automatically
+- **No JSON Editing**: All configuration through structured UI elements
+- **Database Storage**: Direct database operations, no intermediate files
+- **YAML Compatibility**: Configurations exportable via bootstrap YAML
+- **Testing**: Built-in connectivity testing for all providers
+
+#### 8.7.7 Provider Configuration Examples
+
+**Amazon S3 (Database Stored):**
+```yaml
+# Stored as individual database fields, not JSON
+rclone:
+  my-s3-remote:
+    type: "s3"
+    access_key_id: "AKIAIOSFODNN7EXAMPLE"
+    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    region: "us-east-1"
+    bucket: "my-bucket"
+    bandwidth_limit: "10M"
+    transfer_concurrency: 4
+```
+
+**Google Drive (Database Stored):**
+```yaml
+# Stored as individual database fields, not JSON
+rclone:
+  my-gdrive-remote:
+    type: "gdrive"
+    client_id: "123456789.apps.googleusercontent.com"
+    client_secret: "GOCSPX-abcdefghijklmnopqrstuvwxyz"
+    token: "{\"access_token\":\"ya29.a0AfB_by_xxx\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//0g_xxx\",\"expiry\":\"2024-01-01T00:00:00Z\"}"
+    bandwidth_limit: "50M"
+    transfer_concurrency: 8
+```
+
+**FTP (Database Stored):**
+```yaml
+# Stored as individual database fields, not JSON
+rclone:
+  my-ftp-remote:
+    type: "ftp"
+    host: "ftp.example.com"
+    user: "username"
+    pass: "password"
+    port: 21
+    bandwidth_limit: "5M"
+    retries: 3
+```
+
+All configurations follow the same pattern: structured database fields that can be imported/exported via YAML bootstrap files, with no user exposure to raw JSON or complex configuration formats.
 
 ## 9. Source behavior
 
