@@ -248,6 +248,7 @@ class ConfigService:
                     "oidc_config": json.dumps(auth.get("oidc") or {}),
                     "ldap_config": json.dumps(auth.get("ldap") or {}),
                     "proxy_config": json.dumps(auth.get("proxy_header") or {}),
+                    "webui_external_enabled": bool(auth.get("webui_external_enabled", False)),
                 }
             )
 
@@ -614,6 +615,7 @@ class ConfigService:
                     "header_name": settings.auth.proxy_header.header_name,
                     "auto_create": settings.auth.proxy_header.auto_create,
                 },
+                "webui_external_enabled": settings.auth.webui_external_enabled,
             },
             "tls": {
                 "enabled": settings.tls.enabled,
@@ -1213,6 +1215,7 @@ class AuthSettings:
     oidc: OIDCSettings = field(default_factory=OIDCSettings)
     ldap: LDAPSettings = field(default_factory=LDAPSettings)
     proxy_header: ProxyAuthSettings = field(default_factory=ProxyAuthSettings)
+    webui_external_enabled: bool = False
     
     def validate(self) -> None:
         """Validate authentication settings."""
@@ -1237,6 +1240,10 @@ class AuthSettings:
                 raise ConfigError("LDAP enabled but user_base_dn not configured")
             if not self.ldap.user_filter:
                 raise ConfigError("LDAP enabled but user_filter not configured")
+        if self.webui_external_enabled and not (
+            self.oidc.enabled or self.ldap.enabled or self.proxy_header.enabled
+        ):
+            raise ConfigError("WebUI external auth enabled but no provider configured")
 
 
 @dataclass
@@ -1495,7 +1502,8 @@ def _load_settings_from_database(config_dir: Path, database_settings: DatabaseSe
                 enabled=bool(proxy_raw.get("enabled", False)),
                 header_name=proxy_raw.get("header_name", "X-Forwarded-User"),
                 auto_create=bool(proxy_raw.get("auto_create", False))
-            )
+            ),
+            webui_external_enabled=bool(auth_raw.get("webui_external_enabled", False)),
         )
     else:
         auth = AuthSettings()
@@ -1800,7 +1808,12 @@ def _parse_auth(auth_raw: dict) -> AuthSettings:
         auto_create=bool(auth_raw.get("proxy_header", {}).get("auto_create", False)),
     )
 
-    return AuthSettings(oidc=oidc, ldap=ldap, proxy_header=proxy_header)
+    return AuthSettings(
+        oidc=oidc,
+        ldap=ldap,
+        proxy_header=proxy_header,
+        webui_external_enabled=bool(auth_raw.get("webui_external_enabled", False)),
+    )
 
 
 def _parse_tls(tls_raw: dict, config_dir: Path) -> TLSSettings:

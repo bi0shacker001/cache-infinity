@@ -25,7 +25,13 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
-from auth.credentials import ASYNCSSH_AVAILABLE, AuthenticationManager, SSHHostKeyAdmin, SSHHostKeyManager
+from auth.credentials import (
+    ASYNCSSH_AVAILABLE,
+    AuthenticationManager,
+    ExternalAuthManager,
+    SSHHostKeyAdmin,
+    SSHHostKeyManager,
+)
 from cache.cachelinks import (
     CachelinkIndex,
     _detect_mode,
@@ -51,6 +57,7 @@ class ManagementContext:
     settings: Settings
     index_db: DatabaseManager
     auth_manager: AuthenticationManager
+    external_auth_manager: ExternalAuthManager | None
     datadir_registry: DatadirRegistry
     staging: StagingArea
     cachelinks: CachelinkIndex
@@ -1100,7 +1107,19 @@ class ManagementLayer:
                 'username': username,
                 'token': token
             }
-         
+        if (
+            self.ctx.external_auth_manager
+            and self.ctx.settings.auth.webui_external_enabled
+            and self.ctx.external_auth_manager.authenticate_webui_credentials(username, password)
+        ):
+            token = self.ctx.auth_manager.create_session_token(username)
+            return {
+                'authenticated': True,
+                'method': 'external',
+                'username': username,
+                'token': token,
+            }
+
         return {'authenticated': False, 'error': 'Invalid credentials'}
 
     def _authenticate_session(self, token: str) -> str | None:
@@ -1109,11 +1128,28 @@ class ManagementLayer:
 
     def _login_user(self, username: str, password: str) -> str | None:
         """Authenticate a user and return a session token."""
-        return self.ctx.auth_manager.authenticate_user(username, password, purpose="webui")
+        token = self.ctx.auth_manager.authenticate_user(username, password, purpose="webui")
+        if token:
+            return token
+        if (
+            self.ctx.external_auth_manager
+            and self.ctx.settings.auth.webui_external_enabled
+            and self.ctx.external_auth_manager.authenticate_webui_credentials(username, password)
+        ):
+            return self.ctx.auth_manager.create_session_token(username)
+        return None
 
     def _logout_session(self, token: str) -> None:
         """Invalidate a session token."""
         self.ctx.auth_manager.logout_user(token)
+
+    def resolve_webui_proxy_user(self, *, headers: Dict[str, str], environ: Dict[str, str]) -> str | None:
+        if not self.ctx.external_auth_manager:
+            return None
+        return self.ctx.external_auth_manager.resolve_webui_proxy_user(
+            headers=headers,
+            environ=environ,
+        )
 
 
     # === Cookie Operations ===
@@ -1410,6 +1446,7 @@ class ManagementLayer:
                     "header_name": auth.proxy_header.header_name,
                     "auto_create": auth.proxy_header.auto_create,
                 },
+                "webui_external_enabled": auth.webui_external_enabled,
             },
             "cookies": cookies,
             "shares": shares,

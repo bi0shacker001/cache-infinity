@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when optional depende
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from auth.credentials import AuthenticationManager
+    from auth.credentials import AuthenticationManager, ExternalAuthManager
     from cache.cachelinks import CachelinkIndex
     from core.config import Settings
     from core.services import ServiceManager, WebDAVService, WebUIService
@@ -58,6 +58,7 @@ class HostingContext:
     cachelinks: "CachelinkIndex"
     fetcher: "Fetcher"
     auth_manager: "AuthenticationManager | None" = None
+    external_auth_manager: "ExternalAuthManager | None" = None
 
 
 def _current_webdav_app(service_manager: "ServiceManager"):
@@ -158,6 +159,7 @@ class CacheInfinityDomainController(BaseDomainController):
         self._config = config
         self._context = config.get("cacheinfinity_context")
         self._auth_manager = getattr(self._context, "auth_manager", None)
+        self._external_auth_manager = getattr(self._context, "external_auth_manager", None)
         self._user_mapping = config.get("simple_dc", {}).get("user_mapping", {})
 
     def getDomainRealm(self, path_info, environ):
@@ -190,12 +192,16 @@ class CacheInfinityDomainController(BaseDomainController):
         mode = entry.get("auth", "local")
         if mode == "anonymous":
             return True
-        if mode == "external":
-            return True
-        if mode == "ldap":
-            return bool(self._context.index_db.validate_ldap_credentials(username, password, purpose="webdav"))
-        if mode == "oidc":
-            return bool(self._context.index_db.validate_oidc_credentials(username, password))
+        if mode in {"external", "ldap", "oidc"}:
+            if not self._external_auth_manager:
+                return False
+            provider = "proxy_header" if mode == "external" else mode
+            return self._external_auth_manager.authenticate_webdav(
+                username,
+                password,
+                environ=environ,
+                provider=provider,
+            )
         if self._auth_manager:
             return bool(self._auth_manager.authenticate_user(username, password, purpose="webdav"))
         return bool(self._context.index_db.validate_credentials(username, password, purpose="webdav"))
@@ -207,7 +213,7 @@ class CacheInfinityDomainController(BaseDomainController):
         entry = self._get_user_entry(realm, username)
         if not entry or not self._context:
             return False
-        if entry.get("auth") in {"anonymous", "external"}:
+        if entry.get("auth") in {"anonymous", "external", "ldap", "oidc"}:
             return False
         if not self._auth_manager:
             return False

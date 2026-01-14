@@ -207,19 +207,32 @@
             <h2>Authentication</h2>
           </div>
           <div class="stack">
+            <div class="notice">
+              Local auth (admin users in the database) is always enabled. Configure an external provider to layer on top.
+            </div>
             <div class="field">
-              <label class="label">Auth Mode</label>
-              <select class="select" id="auth-mode">
-                <option value="local">Local (username/password)</option>
+              <label class="label">External Auth Enabled</label>
+              <select class="select" id="auth-external-enabled">
+                <option value="false">False</option>
+                <option value="true">True</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">External Auth Provider</label>
+              <select class="select" id="auth-external-type">
                 <option value="oidc">OIDC</option>
                 <option value="ldap">LDAP</option>
                 <option value="proxy">Proxy Header</option>
               </select>
-              <div class="help">Only one admin auth method should be active for the WebUI.</div>
+              <div class="help">External auth is optional and supports a single provider at a time.</div>
             </div>
-
-            <div data-auth-panel="local" class="notice">
-              Local auth uses admin users stored in the CacheInfinity database.
+            <div class="field">
+              <label class="label">Allow External Auth in WebUI</label>
+              <select class="select" id="auth-webui-external-enabled">
+                <option value="false">False</option>
+                <option value="true">True</option>
+              </select>
+              <div class="help">When enabled, external auth can be used in addition to local admin logins.</div>
             </div>
 
             <div data-auth-panel="oidc" class="stack">

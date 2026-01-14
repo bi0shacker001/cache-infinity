@@ -64,8 +64,8 @@ docker compose -f testing/compose.yml logs -f
 ### Access Points
 
 Once running:
-- **Web UI**: http://localhost:8090 (default: `admin` / `password`)
-- **WebDAV**: http://localhost:8080
+- **Web UI**: http://localhost:10090 (default: `admin` / `password`)
+- **WebDAV**: http://localhost:10080
 
 ### Volumes
 

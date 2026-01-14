@@ -12,12 +12,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any, Dict, List, Mapping, Optional
 
 # Import necessary components for SSH key management
 # Note: We should not import db.adapter directly - use database management service instead
 # Use absolute imports as required by project standards
-from core.config import FTPConfig # Absolute import for config
+from core.config import AuthSettings, FTPConfig # Absolute import for config
 from db.dbmanage import DatabaseManager # Use database management service instead
 
 try:
@@ -26,6 +26,13 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
+
+try:
+    import ldap3
+    LDAP3_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    LDAP3_AVAILABLE = False
+    ldap3 = None
 
 _logger = logging.getLogger(__name__)
 
@@ -592,6 +599,216 @@ class SSHHostKeyAdmin:
             return None
 
 
+class ExternalAuthManager:
+    """External authentication provider coordination for WebDAV/WebUI."""
+
+    def __init__(self, auth_settings: AuthSettings, db_adapter) -> None:
+        self._auth = auth_settings
+        self._db = db_adapter
+        self._logger = logging.getLogger(__name__)
+
+    def resolve_proxy_header_user(
+        self,
+        *,
+        headers: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> str | None:
+        header_name = self._auth.proxy_header.header_name or "X-Forwarded-User"
+        value = None
+        if headers:
+            value = headers.get(header_name)
+            if value is None:
+                header_lower = header_name.lower()
+                for key, val in headers.items():
+                    if key.lower() == header_lower:
+                        value = val
+                        break
+        if not value and environ:
+            key = f"HTTP_{header_name.upper().replace('-', '_')}"
+            value = environ.get(key) or environ.get("REMOTE_USER")
+        if not value:
+            return None
+        candidate = value.split(",")[0].strip()
+        return candidate or None
+
+    def authenticate_webdav(
+        self,
+        username: str,
+        password: str,
+        *,
+        environ: Mapping[str, str] | None = None,
+        provider: str | None = None,
+    ) -> bool:
+        provider_key = self._normalize_provider(provider)
+        if self._auth.proxy_header.enabled and provider_key in (None, "proxy_header"):
+            if self._proxy_header_allowed(
+                username,
+                environ=environ,
+                purpose="webdav",
+                allow_auto_create=self._auth.proxy_header.auto_create,
+                require_admin=False,
+            ):
+                return True
+        if self._auth.ldap.enabled and provider_key in (None, "ldap"):
+            if self._validate_ldap(username, password):
+                return True
+        if self._auth.oidc.enabled and provider_key in (None, "oidc"):
+            if self._validate_oidc(username, password):
+                return True
+        return False
+
+    def authenticate_webui_credentials(self, username: str, password: str) -> bool:
+        if not self._auth.webui_external_enabled:
+            return False
+        if self._auth.ldap.enabled and self._validate_ldap(username, password):
+            return self._webui_user_allowed(username)
+        if self._auth.oidc.enabled and self._validate_oidc(username, password):
+            return self._webui_user_allowed(username)
+        return False
+
+    def resolve_webui_proxy_user(
+        self,
+        *,
+        headers: Mapping[str, str] | None = None,
+        environ: Mapping[str, str] | None = None,
+    ) -> str | None:
+        if not (self._auth.webui_external_enabled and self._auth.proxy_header.enabled):
+            return None
+        username = self.resolve_proxy_header_user(headers=headers, environ=environ)
+        if not username:
+            return None
+        if not self._webui_user_allowed(username):
+            return None
+        return username
+
+    def _webui_user_allowed(self, username: str) -> bool:
+        user = self._get_user_record(username, purpose="webui")
+        if not user:
+            return False
+        if not user.get("enabled", False):
+            return False
+        if not user.get("is_admin", False):
+            return False
+        return True
+
+    def _get_user_record(self, username: str, *, purpose: str) -> dict | None:
+        try:
+            return self._db.get_user_credentials(username, purpose=purpose)
+        except Exception as exc:
+            self._logger.warning("External auth user lookup failed for %s: %s", username, exc)
+            return None
+
+    def _ensure_user_record(
+        self,
+        username: str,
+        *,
+        purpose: str,
+        allow_auto_create: bool,
+    ) -> dict | None:
+        record = self._get_user_record(username, purpose=purpose)
+        if record or not allow_auto_create:
+            return record
+        created = self._db.upsert_auth_user(
+            username=username,
+            enabled=True,
+            is_admin=False,
+            purpose=purpose,
+        )
+        if not created:
+            return None
+        return self._get_user_record(username, purpose=purpose)
+
+    def _proxy_header_allowed(
+        self,
+        username: str,
+        *,
+        environ: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
+        purpose: str,
+        allow_auto_create: bool,
+        require_admin: bool,
+    ) -> bool:
+        header_user = self.resolve_proxy_header_user(headers=headers, environ=environ)
+        if not header_user:
+            return False
+        if username and header_user != username:
+            return False
+        record = self._ensure_user_record(
+            header_user,
+            purpose=purpose,
+            allow_auto_create=allow_auto_create,
+        )
+        if record:
+            if not record.get("enabled", False):
+                return False
+            if require_admin and not record.get("is_admin", False):
+                return False
+        elif require_admin:
+            return False
+        return True
+
+    def _validate_ldap(self, username: str, password: str) -> bool:
+        if not LDAP3_AVAILABLE:
+            self._logger.warning("LDAP auth requested but ldap3 is not installed")
+            return False
+        if not username or not password:
+            return False
+        settings = self._auth.ldap
+        try:
+            tls_config = None
+            if settings.ca_cert:
+                tls_config = ldap3.Tls(ca_certs_file=str(settings.ca_cert))
+            server = ldap3.Server(settings.uri, get_info=ldap3.NONE, tls=tls_config)
+            auto_bind = ldap3.AUTO_BIND_TLS_BEFORE_BIND if settings.start_tls else True
+            conn = ldap3.Connection(
+                server,
+                user=settings.bind_dn,
+                password=settings.bind_password,
+                auto_bind=auto_bind,
+            )
+            try:
+                search_filter = settings.user_filter.format(username=username)
+            except Exception:
+                self._logger.warning("Invalid LDAP user_filter format")
+                conn.unbind()
+                return False
+            if not conn.search(settings.user_base_dn, search_filter, attributes=["dn"]):
+                conn.unbind()
+                return False
+            if not conn.entries:
+                conn.unbind()
+                return False
+            user_dn = str(conn.entries[0].entry_dn)
+            conn.unbind()
+            user_conn = ldap3.Connection(
+                server,
+                user=user_dn,
+                password=password,
+                auto_bind=auto_bind,
+            )
+            bound = bool(user_conn.bound)
+            user_conn.unbind()
+            return bound
+        except Exception as exc:
+            self._logger.warning("LDAP auth error: %s", exc)
+            return False
+
+    def _validate_oidc(self, username: str, password: str) -> bool:
+        # TODO(TASK-130): Implement OIDC external auth flow with token validation.
+        self._logger.warning("OIDC auth is not implemented yet")
+        return False
+
+    @staticmethod
+    def _normalize_provider(provider: str | None) -> str | None:
+        if not provider:
+            return None
+        if provider in {"proxy", "proxy_header", "external"}:
+            return "proxy_header"
+        if provider in {"oidc", "ldap"}:
+            return provider
+        return provider
+
+
 # --- Authentication Manager ---
 
 class AuthenticationManager:
@@ -636,6 +853,10 @@ class AuthenticationManager:
         if self._validate_user_credentials(username, password, purpose):
             return self._create_session_token(username)
         return None
+
+    def create_session_token(self, username: str) -> str:
+        """Create a session token without re-validating credentials."""
+        return self._create_session_token(username)
 
     def _validate_user_credentials(self, username: str, password: str, purpose: str) -> bool:
         """Validate user credentials against database.
@@ -1019,6 +1240,7 @@ class AuthenticationManager:
 __all__ = [
     "ASYNCSSH_AVAILABLE",
     "AuthenticationManager",
+    "ExternalAuthManager",
     "SSHHostKeyAdmin",
     "SSHHostKeyManager",
     "SessionToken",

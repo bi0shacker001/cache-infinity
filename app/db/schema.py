@@ -327,10 +327,20 @@ class IndexDatabase:
                     oidc_config TEXT,      -- JSON string
                     ldap_config TEXT,      -- JSON string
                     proxy_config TEXT,     -- JSON string
+                    webui_external_enabled BOOLEAN NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            try:
+                columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_auth)")}
+                if "webui_external_enabled" not in columns:
+                    self._db.execute(
+                        "ALTER TABLE config_auth ADD COLUMN webui_external_enabled BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                    self._db.commit()
+            except Exception:
+                self._db.rollback()
             
             self._db.execute(
                 """
@@ -424,12 +434,25 @@ class IndexDatabase:
                     password_hash TEXT,
                     enabled BOOLEAN NOT NULL,
                     is_admin BOOLEAN NOT NULL,
+                    webui_access BOOLEAN NOT NULL DEFAULT 0,
                     purpose TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {row["name"] for row in self._db.fetchall("PRAGMA table_info(config_users)")}
+            if "webui_access" not in columns:
+                self._db.execute("ALTER TABLE config_users ADD COLUMN webui_access BOOLEAN NOT NULL DEFAULT 0")
+                self._db.execute(
+                    """
+                    UPDATE config_users
+                    SET webui_access = CASE
+                        WHEN purpose = 'webui' AND is_admin = 1 THEN 1
+                        ELSE 0
+                    END
+                    """
+                )
             
             self._db.execute(
                 """
@@ -620,6 +643,7 @@ class IndexDatabase:
                     api_key TEXT,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     is_admin INTEGER NOT NULL DEFAULT 1,
+                    webui_access INTEGER NOT NULL DEFAULT 0,
                     ssh_keys_editable INTEGER NOT NULL DEFAULT 1,
                     purpose TEXT NOT NULL DEFAULT 'webui'
                 )
@@ -652,6 +676,22 @@ class IndexDatabase:
             try:
                 self._db.execute(
                     "ALTER TABLE auth_users ADD COLUMN ssh_keys_editable INTEGER NOT NULL DEFAULT 1"
+                )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+            try:
+                self._db.execute(
+                    "ALTER TABLE auth_users ADD COLUMN webui_access INTEGER NOT NULL DEFAULT 0"
+                )
+                self._db.execute(
+                    """
+                    UPDATE auth_users
+                    SET webui_access = CASE
+                        WHEN purpose = 'webui' AND is_admin = 1 THEN 1
+                        ELSE 0
+                    END
+                    """
                 )
                 self._db.commit()
             except Exception:
@@ -1325,13 +1365,28 @@ class IndexDatabase:
     def ensure_default_admin(self) -> None:
         with self._lock:
             row = self._db.fetchone(
-                "SELECT username FROM auth_users WHERE username = ? AND purpose = ?",
-                ("admin", "webui"),
+                "SELECT username, is_admin, webui_access FROM auth_users WHERE username = ?",
+                ("admin",),
             )
             if row is None:
                 self._db.execute(
-                    "INSERT INTO auth_users (username, password_plain, enabled, is_admin, purpose) VALUES (?, ?, TRUE, TRUE, ?)",
-                    ("admin", "password", "webui"),
+                    """
+                    INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, purpose)
+                    VALUES (?, ?, TRUE, TRUE, TRUE, 'webui')
+                    """,
+                    ("admin", "password"),
+                )
+                self._db.commit()
+                return
+            if not row.get("is_admin") or not row.get("webui_access"):
+                self._db.execute(
+                    """
+                    UPDATE auth_users
+                    SET is_admin = 1,
+                        webui_access = 1
+                    WHERE username = ?
+                    """,
+                    ("admin",),
                 )
                 self._db.commit()
 
@@ -1342,17 +1397,31 @@ class IndexDatabase:
         password_plain: str | None = None,
         password_hash: str | None = None,
         enabled: bool = True,
-        is_admin: bool = True,
+        is_admin: bool | None = None,
+        webui_access: bool | None = None,
         ssh_keys_editable: bool | None = None,
-        purpose: str = "webui",
     ) -> None:
         with self._lock:
             existing = self._db.fetchone(
-                "SELECT password_plain, password_hash, ssh_keys_editable FROM auth_users WHERE username = ? AND purpose = ?",
-                (username, purpose),
+                """
+                SELECT password_plain, password_hash, ssh_keys_editable, is_admin, webui_access
+                FROM auth_users
+                WHERE username = ?
+                """,
+                (username,),
             )
             plain = password_plain if password_plain is not None else (existing["password_plain"] if existing else None)
             hashed = password_hash if password_hash is not None else (existing["password_hash"] if existing else None)
+            admin_flag = (
+                bool(is_admin)
+                if is_admin is not None
+                else (bool(existing["is_admin"]) if existing else False)
+            )
+            webui_flag = (
+                bool(webui_access)
+                if webui_access is not None
+                else (bool(existing["webui_access"]) if existing else admin_flag)
+            )
             keys_editable = (
                 ssh_keys_editable
                 if ssh_keys_editable is not None
@@ -1362,10 +1431,10 @@ class IndexDatabase:
                 self._db.execute(
                     """
                     UPDATE auth_users
-                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, ssh_keys_editable = ?
-                    WHERE username = ? AND purpose = ?
+                    SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, webui_access = ?, ssh_keys_editable = ?
+                    WHERE username = ?
                     """,
-                    (plain, hashed, enabled, is_admin, 1 if keys_editable else 0, username, purpose),
+                    (plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if keys_editable else 0, username),
                 )
             else:
                 self._db.execute(
@@ -1376,51 +1445,50 @@ class IndexDatabase:
                         password_hash,
                         enabled,
                         is_admin,
+                        webui_access,
                         ssh_keys_editable,
                         purpose
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'webui')
                     """,
-                    (username, plain, hashed, enabled, is_admin, 1 if keys_editable else 0, purpose),
+                    (username, plain, hashed, enabled, admin_flag, 1 if webui_flag else 0, 1 if keys_editable else 0),
                 )
             self._db.commit()
 
-    def list_users(self, *, purpose: str = "webui") -> list[dict[str, object]]:
+    def list_users(self) -> list[dict[str, object]]:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT username, enabled, is_admin, ssh_keys_editable
+                SELECT username, enabled, is_admin, webui_access, ssh_keys_editable
                 FROM auth_users
-                WHERE purpose = ?
                 ORDER BY username
                 """,
-                (purpose,),
             )
         return [
             {
                 "username": row["username"],
                 "enabled": bool(row["enabled"]),
                 "is_admin": bool(row["is_admin"]),
+                "webui_access": bool(row.get("webui_access", 0)),
                 "ssh_keys_editable": bool(row.get("ssh_keys_editable", 1)),
             }
             for row in rows
         ]
 
-    def get_auth_user(self, username: str, *, purpose: str = "webui") -> dict | None:
+    def get_auth_user(self, username: str) -> dict | None:
         with self._lock:
-            row = self._db.fetchone(
+            return self._db.fetchone(
                 """
-                SELECT username, password_plain, password_hash, enabled, is_admin, ssh_keys_editable
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, ssh_keys_editable
                 FROM auth_users
-                WHERE username = ? AND purpose = ?
+                WHERE username = ?
                 """,
-                (username, purpose),
+                (username,),
             )
-        return row
 
-    def disable_auth_user(self, username: str, *, purpose: str = "webui") -> None:
+    def disable_auth_user(self, username: str) -> None:
         with self._lock:
-            self._db.execute("UPDATE auth_users SET enabled = 0 WHERE username = ? AND purpose = ?", (username, purpose))
+            self._db.execute("UPDATE auth_users SET enabled = 0 WHERE username = ?", (username,))
             self._db.commit()
 
     def list_api_keys(self) -> list[dict[str, object]]:
@@ -1429,7 +1497,7 @@ class IndexDatabase:
                 """
                 SELECT username, api_key
                 FROM auth_users
-                WHERE purpose = 'webui' AND is_admin = 1
+                WHERE is_admin = 1
                 ORDER BY username
                 """
             )
@@ -1449,7 +1517,7 @@ class IndexDatabase:
     def set_api_key(self, username: str, api_key: str) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE auth_users SET api_key = ? WHERE username = ? AND purpose = 'webui'",
+                "UPDATE auth_users SET api_key = ? WHERE username = ?",
                 (api_key, username),
             )
             self._db.commit()
@@ -1457,7 +1525,7 @@ class IndexDatabase:
     def clear_api_key(self, username: str) -> None:
         with self._lock:
             self._db.execute(
-                "UPDATE auth_users SET api_key = NULL WHERE username = ? AND purpose = 'webui'",
+                "UPDATE auth_users SET api_key = NULL WHERE username = ?",
                 (username,),
             )
             self._db.commit()
@@ -1465,14 +1533,14 @@ class IndexDatabase:
     def any_admin_users(self) -> bool:
         with self._lock:
             row = self._db.fetchone(
-                "SELECT 1 AS present FROM auth_users WHERE enabled = 1 AND is_admin = 1 AND purpose = 'webui' LIMIT 1"
+                "SELECT 1 AS present FROM auth_users WHERE enabled = 1 AND webui_access = 1 LIMIT 1"
             )
             if row:
                 return True
 
             # No enabled admins; if the admin set is empty, recreate the default credentials
             has_any_admin = self._db.fetchone(
-                "SELECT 1 AS present FROM auth_users WHERE is_admin = 1 AND purpose = 'webui' LIMIT 1"
+                "SELECT 1 AS present FROM auth_users WHERE webui_access = 1 LIMIT 1"
             )
             if has_any_admin:
                 return False
@@ -1480,37 +1548,52 @@ class IndexDatabase:
             self._logger.warning("No admin users found; recreating default admin/password credentials")
             self._db.execute(
                 """
-                INSERT INTO auth_users (username, password_plain, enabled, is_admin, purpose)
-                VALUES (?, ?, TRUE, TRUE, ?)
+                INSERT INTO auth_users (username, password_plain, enabled, is_admin, webui_access, purpose)
+                VALUES (?, ?, TRUE, TRUE, TRUE, 'webui')
                 """,
-                ("admin", "password", "webui"),
+                ("admin", "password"),
             )
             self._db.commit()
             return True
 
-    def validate_credentials(self, username: str, password: str, *, purpose: str = "webui", require_admin: bool = False) -> bool:
-        self._logger.debug("Validating credentials for user: %s, purpose: %s, require_admin: %s", username, purpose, require_admin)
-        user = self.get_auth_user(username, purpose=purpose)
+    def validate_credentials(
+        self,
+        username: str,
+        password: str,
+        *,
+        require_admin: bool = False,
+        require_webui: bool = False,
+    ) -> bool:
+        self._logger.debug(
+            "Validating credentials for user: %s, require_admin: %s, require_webui: %s",
+            username,
+            require_admin,
+            require_webui,
+        )
+        user = self.get_auth_user(username)
         if not user:
             self._logger.warning("User not found: %s", username)
             return False
         if not user["enabled"]:
             self._logger.warning("User disabled: %s", username)
             return False
-        if require_admin and not user["is_admin"]:
+        if require_admin and not user.get("is_admin", False):
             self._logger.warning("User not admin: %s", username)
+            return False
+        if require_webui and not user.get("webui_access", False):
+            self._logger.warning("User missing WebUI access: %s", username)
             return False
         stored_plain = user.get("password_plain")
         stored_hash = _normalize_password_hash(user.get("password_hash"))
         if stored_plain and password == stored_plain:
             if not stored_hash:
                 stored_hash = _hash_password(password)
-                if purpose not in ("webdav", "cli") and username != "cli-backend":
+                if username != "cli-backend":
                     stored_plain = None
                 with self._lock:
                     self._db.execute(
-                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ? AND purpose = ?",
-                        (stored_plain, stored_hash, username, purpose),
+                        "UPDATE auth_users SET password_plain = ?, password_hash = ? WHERE username = ?",
+                        (stored_plain, stored_hash, username),
                     )
                     self._db.commit()
             self._logger.info("Successful authentication for user: %s", username)
@@ -1521,14 +1604,14 @@ class IndexDatabase:
         self._logger.warning("No password found for user: %s", username)
         return False
 
-    def get_user_password_plain(self, username: str, *, purpose: str = "webdav") -> str | None:
-        user = self.get_auth_user(username, purpose=purpose)
+    def get_user_password_plain(self, username: str) -> str | None:
+        user = self.get_auth_user(username)
         if not user or not user["enabled"]:
             return None
         return user.get("password_plain")
 
     def list_webdav_credentials(self) -> list[dict[str, object]]:
-        return self.list_users(purpose="webdav")
+        return self.list_users()
 
     # Configuration Repository Methods -----------------------------------------
     def get_backend(self, name: str) -> dict | None:
@@ -1996,7 +2079,7 @@ class IndexDatabase:
         with self._lock:
             row = self._db.fetchone(
                 """
-                SELECT oidc_config, ldap_config, proxy_config, updated_at
+                SELECT oidc_config, ldap_config, proxy_config, webui_external_enabled, updated_at
                 FROM config_auth
                 ORDER BY id DESC
                 LIMIT 1
@@ -2008,6 +2091,7 @@ class IndexDatabase:
             "oidc_config": row["oidc_config"],
             "ldap_config": row["ldap_config"],
             "proxy_config": row["proxy_config"],
+            "webui_external_enabled": bool(row["webui_external_enabled"]),
             "updated_at": row["updated_at"],
         }
 
@@ -2017,18 +2101,20 @@ class IndexDatabase:
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO config_auth (oidc_config, ldap_config, proxy_config, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO config_auth (oidc_config, ldap_config, proxy_config, webui_external_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     oidc_config = excluded.oidc_config,
                     ldap_config = excluded.ldap_config,
                     proxy_config = excluded.proxy_config,
+                    webui_external_enabled = excluded.webui_external_enabled,
                     updated_at = excluded.updated_at
                 """,
                 (
                     auth["oidc_config"],
                     auth["ldap_config"],
                     auth["proxy_config"],
+                    int(bool(auth.get("webui_external_enabled", False))),
                     now,
                 ),
             )
@@ -2213,7 +2299,7 @@ class IndexDatabase:
         with self._lock:
             row = self._db.fetchone(
                 """
-                SELECT username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, purpose, created_at, updated_at
                 FROM config_users
                 WHERE username = ?
                 """,
@@ -2227,6 +2313,7 @@ class IndexDatabase:
             "password_hash": row["password_hash"],
             "enabled": bool(row["enabled"]),
             "is_admin": bool(row["is_admin"]),
+            "webui_access": bool(row.get("webui_access", 0)),
             "purpose": row["purpose"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -2237,7 +2324,7 @@ class IndexDatabase:
         with self._lock:
             rows = self._db.fetchall(
                 """
-                SELECT username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at
+                SELECT username, password_plain, password_hash, enabled, is_admin, webui_access, purpose, created_at, updated_at
                 FROM config_users
                 ORDER BY username
                 """
@@ -2249,6 +2336,7 @@ class IndexDatabase:
                 "password_hash": row["password_hash"],
                 "enabled": bool(row["enabled"]),
                 "is_admin": bool(row["is_admin"]),
+                "webui_access": bool(row.get("webui_access", 0)),
                 "purpose": row["purpose"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -2265,16 +2353,28 @@ class IndexDatabase:
             password_hash = _hash_password(password_plain)
             if user.get("purpose") != "cli" and user.get("username") != "cli-backend":
                 password_plain = None
+        webui_access = bool(user.get("webui_access", user.get("is_admin", False)))
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO config_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO config_users (
+                    username,
+                    password_plain,
+                    password_hash,
+                    enabled,
+                    is_admin,
+                    webui_access,
+                    purpose,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(username) DO UPDATE SET
                     password_plain = excluded.password_plain,
                     password_hash = excluded.password_hash,
                     enabled = excluded.enabled,
                     is_admin = excluded.is_admin,
+                    webui_access = excluded.webui_access,
                     purpose = excluded.purpose,
                     updated_at = excluded.updated_at
                 """,
@@ -2284,7 +2384,8 @@ class IndexDatabase:
                     password_hash,
                     user["enabled"],
                     user["is_admin"],
-                    user["purpose"],
+                    webui_access,
+                    user.get("purpose", "webui"),
                     now,
                     now,
                 ),
@@ -2427,16 +2528,26 @@ class IndexDatabase:
         """Get user credentials from database."""
         try:
             result = self._db.fetchone(
-                "SELECT id, username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at FROM auth_users WHERE username = ?",
+                """
+                SELECT id, username, password_plain, password_hash, enabled, is_admin, webui_access, created_at, updated_at
+                FROM auth_users
+                WHERE username = ?
+                """,
                 (username,)
             )
             return result
         except Exception:
             return None
 
-    def upsert_auth_user(self, username: str, password_plain: str = None,
-                        password_hash: str = None, enabled: bool = True,
-                        is_admin: bool = False, purpose: str = None) -> bool:
+    def upsert_auth_user(
+        self,
+        username: str,
+        password_plain: str | None = None,
+        password_hash: str | None = None,
+        enabled: bool = True,
+        is_admin: bool | None = None,
+        webui_access: bool | None = None,
+    ) -> bool:
         """Create or update user in database."""
         try:
             # Check if user exists
@@ -2449,20 +2560,52 @@ class IndexDatabase:
             normalized_hash = _normalize_password_hash(password_hash)
             if password_plain:
                 normalized_hash = _hash_password(password_plain)
-                if purpose != "cli" and username != "cli-backend":
+                if username != "cli-backend":
                     password_plain = None
+            admin_flag = bool(is_admin) if is_admin is not None else False
+            webui_flag = bool(webui_access) if webui_access is not None else admin_flag
             
             if existing:
                 # Update existing user
                 self._db.execute(
-                    "UPDATE auth_users SET password_plain = ?, password_hash = ?, enabled = ?, is_admin = ?, purpose = ?, updated_at = ? WHERE username = ?",
-                    (password_plain, normalized_hash, enabled, is_admin, purpose, now, username)
+                    """
+                    UPDATE auth_users
+                    SET password_plain = ?,
+                        password_hash = ?,
+                        enabled = ?,
+                        is_admin = ?,
+                        webui_access = ?,
+                        updated_at = ?
+                    WHERE username = ?
+                    """,
+                    (password_plain, normalized_hash, enabled, admin_flag, 1 if webui_flag else 0, now, username),
                 )
             else:
                 # Create new user
                 self._db.execute(
-                    "INSERT INTO auth_users (username, password_plain, password_hash, enabled, is_admin, purpose, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (username, password_plain, normalized_hash, 1 if enabled else 0, 1 if is_admin else 0, purpose, now, now)
+                    """
+                    INSERT INTO auth_users (
+                        username,
+                        password_plain,
+                        password_hash,
+                        enabled,
+                        is_admin,
+                        webui_access,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        username,
+                        password_plain,
+                        normalized_hash,
+                        1 if enabled else 0,
+                        1 if admin_flag else 0,
+                        1 if webui_flag else 0,
+                        now,
+                        now,
+                    ),
                 )
             
             self._db.commit()

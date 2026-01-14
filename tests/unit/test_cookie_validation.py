@@ -65,6 +65,7 @@ def _build_management(index_db, fetcher=None, settings=None):
         settings=settings,
         index_db=FakeDatabaseManager(index_db),
         auth_manager=SimpleNamespace(),
+        external_auth_manager=None,
         datadir_registry=SimpleNamespace(),
         staging=SimpleNamespace(base_path=Path("/tmp/staging")),
         cachelinks=SimpleNamespace(),

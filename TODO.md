@@ -71,6 +71,10 @@ This file contains the actionable task list for achieving full SPEC compliance, 
 - [x] **TASK-120:** Add rclone remote connectivity test/validation in management layer + WebUI
 - [x] **TASK-121:** Persist rclone cachelink fields (rclone_remote, rclone_path, bandwidth_limit, transfer_concurrency, checkers, timeout, retries) and expose in WebUI
 
+### External Authentication 🟡 (MEDIUM PRIORITY)
+- [ ] **TASK-130:** Implement Authentik-focused OIDC OAuth2 flow (authorization code + token validation) and add provider-specific tests
+- [ ] **TASK-131:** Unify user list with WebUI/Admin access flags and external auto-create toggle
+
 ## Phase 3: Testing and Robustness (Medium Priority)
 
 ### Comprehensive Testing 🔴 (CRITICAL PRIORITY)

@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 from typing import Any, TYPE_CHECKING
 
-from auth.credentials import AuthenticationManager, start_session_cleanup_thread
+from auth.credentials import AuthenticationManager, ExternalAuthManager, start_session_cleanup_thread
 from auth.tls import TLSAutomationService, create_tls_automation_service, start_tls_automation_thread
 from cache.cachelinks import CachelinkIndex, load_cachelinks
 from cache.checksum import ChecksumCatalog
@@ -323,14 +323,20 @@ class AuthService(BaseService):
     """Initializes authentication manager for WebUI and service authentication."""
 
     name = "auth"
-    dependencies = ("database",)
+    dependencies = ("database", "config")
 
     def __init__(self) -> None:
         self.auth_manager: AuthenticationManager | None = None
+        self.external_auth_manager: ExternalAuthManager | None = None
 
     def initialize(self, context: dict[str, Any]) -> None:
+        config_service: ConfigManagerService = context["config"]
         database_service: DatabaseService = context["database"]
         self.auth_manager = AuthenticationManager(database_service.database_manager.adapter)
+        self.external_auth_manager = ExternalAuthManager(
+            config_service.settings.auth,
+            database_service.database_manager.adapter,
+        )
 
     def start(self) -> None:
         return None
@@ -614,6 +620,7 @@ class WebDAVService(BaseService):
             cachelinks=cachelinks_service.cachelinks,
             fetcher=fetcher_service.fetcher,
             auth_manager=auth_service.auth_manager,
+            external_auth_manager=auth_service.external_auth_manager,
         )
         user_mapping = build_user_mapping(config_service.settings)
         provider = WebDAVProvider(context_obj)
@@ -671,6 +678,7 @@ class WebUIService(BaseService):
             settings=config_service.settings,
             index_db=database_service.database_manager,
             auth_manager=auth_service.auth_manager,
+            external_auth_manager=auth_service.external_auth_manager,
             datadir_registry=storage_service.datadir_registry,
             staging=storage_service.staging,
             cachelinks=cachelinks_service.cachelinks,

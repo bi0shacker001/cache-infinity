@@ -313,7 +313,8 @@ class DatabaseBackupManager:
             bootstrap_data['auth'] = {
                 'oidc': json.loads(auth['oidc_config']) if auth['oidc_config'] else {},
                 'ldap': json.loads(auth['ldap_config']) if auth['ldap_config'] else {},
-                'proxy_header': json.loads(auth['proxy_config']) if auth['proxy_config'] else {}
+                'proxy_header': json.loads(auth['proxy_config']) if auth['proxy_config'] else {},
+                'webui_external_enabled': bool(auth.get('webui_external_enabled', False)),
             }
 
         # Collect TLS settings
@@ -561,11 +562,13 @@ class DatabaseBackupManager:
             oidc_config = auth_data.get('oidc', {})
             ldap_config = auth_data.get('ldap', {})
             proxy_config = auth_data.get('proxy_header', {})
+            webui_external_enabled = bool(auth_data.get('webui_external_enabled', False))
 
             auth_db = {
                 'oidc_config': json.dumps(oidc_config),
                 'ldap_config': json.dumps(ldap_config),
-                'proxy_config': json.dumps(proxy_config)
+                'proxy_config': json.dumps(proxy_config),
+                'webui_external_enabled': webui_external_enabled,
             }
 
             self.index_db.save_auth(auth_db)

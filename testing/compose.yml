@@ -19,8 +19,8 @@ services:
     depends_on:
       - db
     ports:
-      - "9080:9080"                           # expose WebDAV service
-      - "9090:9090"                           # expose Web UI control plane
+      - "10080:9080"                          # expose WebDAV service
+      - "10090:9090"                          # expose Web UI control plane
     tmpfs:
       - /run:rw,noexec,nosuid,size=100m,uid=${UID:-1000},gid=${GID:-1000},mode=0755
     volumes:

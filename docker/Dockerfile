@@ -32,20 +32,18 @@ RUN pip install --no-cache-dir \
         cheroot>=10.0 \
         watchdog>=4.0 \
         psycopg[binary]>=3.2 \
+        pyftpdlib>=1.5 \
         pytest>=8.0 \
         requests>=2.0 \
         beautifulsoup4>=4.0 \
         pycurl>=7.45.7 \
-<<<<<<< HEAD
         Flask>=3.0 \
-        rclone-python>=1.0 && \
-=======
-        Flask>=3.0 && \
->>>>>>> 1faf9bc3cc2ee4f0576fabe70ebe2ec5feb869f1
+        rclone-python>=1.0 \
+        ldap3>=2.9 && \
     mkdir -p /datadir /staging /config && \
     chown -R cacheinfinity:cacheinfinity /app /datadir /staging /config
 
 USER cacheinfinity
-EXPOSE 8080
+EXPOSE 9080 9090
 ENTRYPOINT ["python", "/app/cacheinfinity.py"]
 CMD ["--config-dir", "/config"]

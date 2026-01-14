@@ -238,7 +238,7 @@ const SettingsPage = (() => {
       },
       auth: {
         oidc: {
-          enabled: el('auth-mode').value === 'oidc',
+          enabled: el('auth-external-enabled').value === 'true' && el('auth-external-type').value === 'oidc',
           issuer: el('auth-oidc-issuer').value.trim(),
           client_id: el('auth-oidc-client').value.trim(),
           client_secret: el('auth-oidc-secret').value.trim(),
@@ -247,7 +247,7 @@ const SettingsPage = (() => {
           allow_insecure_http: el('auth-oidc-insecure').value === 'true'
         },
         ldap: {
-          enabled: el('auth-mode').value === 'ldap',
+          enabled: el('auth-external-enabled').value === 'true' && el('auth-external-type').value === 'ldap',
           uri: el('auth-ldap-uri').value.trim(),
           bind_dn: el('auth-ldap-bind').value.trim(),
           bind_password: el('auth-ldap-password').value.trim(),
@@ -257,10 +257,11 @@ const SettingsPage = (() => {
           ca_cert: el('auth-ldap-ca').value.trim()
         },
         proxy_header: {
-          enabled: el('auth-mode').value === 'proxy',
+          enabled: el('auth-external-enabled').value === 'true' && el('auth-external-type').value === 'proxy',
           header_name: el('auth-proxy-header').value.trim(),
           auto_create: el('auth-proxy-auto').value === 'true'
-        }
+        },
+        webui_external_enabled: el('auth-webui-external-enabled').value === 'true'
       },
       shares: state.shares
     };
@@ -330,15 +331,20 @@ const SettingsPage = (() => {
     const oidc = auth.oidc || {};
     const ldap = auth.ldap || {};
     const proxy = auth.proxy_header || {};
-    let authMode = 'local';
+    let externalType = 'oidc';
+    let externalEnabled = false;
     if (oidc.enabled) {
-      authMode = 'oidc';
+      externalType = 'oidc';
+      externalEnabled = true;
     } else if (ldap.enabled) {
-      authMode = 'ldap';
+      externalType = 'ldap';
+      externalEnabled = true;
     } else if (proxy.enabled) {
-      authMode = 'proxy';
+      externalType = 'proxy';
+      externalEnabled = true;
     }
-    el('auth-mode').value = authMode;
+    el('auth-external-enabled').value = String(externalEnabled);
+    el('auth-external-type').value = externalType;
     el('auth-oidc-issuer').value = oidc.issuer || '';
     el('auth-oidc-client').value = oidc.client_id || '';
     el('auth-oidc-secret').value = oidc.client_secret || '';
@@ -356,7 +362,8 @@ const SettingsPage = (() => {
 
     el('auth-proxy-header').value = proxy.header_name || '';
     el('auth-proxy-auto').value = String(proxy.auto_create || false);
-    applyAuthMode(authMode);
+    el('auth-webui-external-enabled').value = String(auth.webui_external_enabled || false);
+    applyAuthMode();
     applyTlsMode();
   };
 
@@ -509,9 +516,12 @@ const SettingsPage = (() => {
     });
   };
 
-  const applyAuthMode = (mode) => {
+  const applyAuthMode = () => {
+    const externalEnabled = el('auth-external-enabled').value === 'true';
+    const mode = el('auth-external-type').value;
     const panels = document.querySelectorAll('[data-auth-panel]');
     panels.forEach((panel) => panel.classList.add('hidden'));
+    if (!externalEnabled) return;
     const target = document.querySelector(`[data-auth-panel="${mode}"]`);
     if (target) {
       target.classList.remove('hidden');
@@ -539,7 +549,8 @@ const SettingsPage = (() => {
     applyThemeSelection();
     bindSshKeys();
     loadSshUsers();
-    el('auth-mode').addEventListener('change', () => applyAuthMode(el('auth-mode').value));
+    el('auth-external-enabled').addEventListener('change', applyAuthMode);
+    el('auth-external-type').addEventListener('change', applyAuthMode);
     el('tls-mode').addEventListener('change', applyTlsMode);
     el('tls-enabled').addEventListener('change', applyTlsMode);
   };

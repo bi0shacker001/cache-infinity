@@ -38,7 +38,7 @@ When running natively the config search order is:
   keep sessions alive without capturing end-user cookies.
 - Integrated Web UI: the primary admin surface that exposes health/usage stats plus
   forms to edit config/cachelinks or add new cachelinks that immediately queue for
-  indexing. It listens on its own control port (default `8090`) so you can firewall
+  indexing. It listens on its own control port (default `9090`) so you can firewall
   or expose it independently from WebDAV traffic.
 - `cacheinfinity admin …` CLI: mirrors the Web UI API so you can manage users,
   cachelinks, reindex jobs, and cookie regeneration from automation without touching
@@ -137,8 +137,8 @@ When running natively the config search order is:
    ```bash
    cacheinfinity serve --config-dir $CONFIG \
        --credentials $CONFIG/credentials/users.yaml \
-       --host 0.0.0.0 --port 8080 \
-       --ui-port 8090
+       --host 0.0.0.0 --port 9080 \
+       --ui-port 9090
    ```
    
    **Environment variables:**
@@ -181,7 +181,7 @@ When running natively the config search order is:
   backups. This prevents surprise reloads and keeps the database as the single source
   of truth.
 - **Web UI:** a lightweight dashboard (served from a dedicated control port, default
-  `http://<host>:8090/`) shows datadir/staging utilization, cache hit/miss counts,
+  `http://<host>:9090/`) shows datadir/staging utilization, cache hit/miss counts,
   indexing hotness, checksum catalog totals, degraded cachelinks, and cookie status.
   It is the preferred way to configure CacheInfinity—administrators can edit live
   config, add/remove cachelinks, inspect gathered metadata, kick off reindexes, or
@@ -265,7 +265,7 @@ When running natively the config search order is:
 - ✅ Database-first configuration (SQLite and PostgreSQL)
 - ✅ WebDAV provider with read-through caching
 - ✅ Background indexing with tiered, access-aware scheduling
-- ✅ Web UI dashboard (port 8090)
+- ✅ Web UI dashboard (port 9090)
 - ✅ CLI admin commands
 - ✅ Cookie management for Archive.org and other domains
 - ✅ Checksum catalog import

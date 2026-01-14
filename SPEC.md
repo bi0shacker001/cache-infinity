@@ -275,6 +275,12 @@ A **bootstrap YAML** is any YAML file containing durable configuration that Cach
 
 The bootstrap YAML may contain: settings (paths/limits), cachelinks, users/permissions, shares, cookies, TLS, and other durable configuration.
 
+User entries in bootstrap YAML are unified across local and external authentication:
+
+* Users are defined once and may authenticate via local credentials, external providers, or both.
+* Per-user access flags determine whether the account may access the Admin WebUI and Admin API/CLI surfaces.
+* Share-level permissions remain the source of truth for WebDAV access.
+
 Cookie import/export uses the same canonical representation as the database:
 
 * per-domain records with `domain`, `captured_at`, and `cookies_b64` (Base64 of the full Netscape `cookies.txt` content)
@@ -519,9 +525,28 @@ User accounts, credentials, and authorization policies are stored in the databas
 * Users and credentials are created/updated via the **admin WebUI**, **admin CLI**, or imported via **bootstrap YAML**.
 * No credential files are required or used at runtime.
 * Authentication for the admin surfaces (admin WebUI + admin API) uses the admin user/permission model.
+* Local admin authentication (username/password in the database) is **always enabled** for the WebUI.
+  * External authentication (OIDC, LDAP, or proxy header) is optional and may be enabled **in addition** to local auth.
+  * External authentication is coordinated via `ExternalAuthManager` and is always available to WebDAV when a provider is enabled.
+  * WebUI external authentication is gated by `webui_external_enabled` and must still map to an enabled user with WebUI access.
+  * External user auto-creation is controlled by a single toggle; when disabled, external logins require a pre-existing user record.
 * The admin API is **read-only** and must not implement write operations directly; it routes through the admin management layer for authorization and data access.
 * **AuthenticationManager** handles all authentication operations including session management and credential validation.
 * API keys have been removed and replaced with session-based authentication.
+
+Users are stored in a single, unified list:
+
+* Each user may authenticate via local credentials, external providers, or both.
+* Per-user access flags control admin surface access:
+  * `webui_access`: may access the Admin WebUI (control port).
+  * `admin_access`: may access the Admin API and Admin CLI.
+* External providers map identities to the same user records (no separate external user list).
+* Auto-created external users have no local password and default to `webui_access: false`, `admin_access: false`.
+
+OIDC support targets Authentik first:
+
+* Implement OAuth2 Authorization Code flow with OIDC discovery.
+* Provide configuration compatible with Authentik defaults (issuer URL, client ID/secret, redirect URI).
 
 ## 8. Mount trees (cachelinks)
 
@@ -917,7 +942,7 @@ Top-level:
 
 app: #Folder. Main application package containing all CacheInfinity core functionality
   auth: #Folder. Authentication and security management components
-    - credentials.py #File. User credential management, authentication store, and session handling using AuthenticationManager
+    - credentials.py #File. User credential management, external auth coordination, and session handling using AuthenticationManager
     - tls.py #File. TLS certificate management and automation for secure communications
   cache: #Folder. Caching logic and checksum validation systems
     - cachelinks.py #File. Virtual file system management for remote content organization

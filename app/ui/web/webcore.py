@@ -24,6 +24,7 @@ class WebUIApp:
         settings,
         index_db,
         auth_manager,
+        external_auth_manager,
         datadir_registry,
         staging,
         cachelinks,
@@ -36,6 +37,7 @@ class WebUIApp:
                 settings=settings,
                 index_db=index_db,
                 auth_manager=auth_manager,
+                external_auth_manager=external_auth_manager,
                 datadir_registry=datadir_registry,
                 staging=staging,
                 cachelinks=cachelinks,
@@ -60,7 +62,10 @@ class WebUIApp:
     def _current_user(self) -> str | None:
         token = request.cookies.get("ci_session")
         if not token:
-            return None
+            return self.management.resolve_webui_proxy_user(
+                headers=request.headers,
+                environ=request.environ,
+            )
         result = self.management.auth("session_validate", token=token)
         username = result.get("valid") if isinstance(result, dict) else None
         if isinstance(username, str) and username:

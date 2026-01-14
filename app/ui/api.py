@@ -17,6 +17,7 @@ def _build_management(*, context: object | None, service: object | None) -> Mana
             settings=getattr(context, "settings"),
             index_db=getattr(context, "index_db"),
             auth_manager=getattr(context, "auth_manager"),
+            external_auth_manager=getattr(context, "external_auth_manager", None),
             datadir_registry=getattr(context, "datadir_registry"),
             staging=getattr(context, "staging"),
             cachelinks=getattr(context, "cachelinks"),
