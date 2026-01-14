@@ -48,9 +48,17 @@
           <div class="split">
             <div class="section" style="--delay:0.1s;">
               <div class="section-header">
-                <h2>Tree</h2>
+                <h2>Tree & File Browser</h2>
+                <div class="row">
+                  <select class="select" id="browse-location" style="min-width:120px;">
+                    <option value="tree">Cachelink Tree</option>
+                    <option value="datadir">Datadir Files</option>
+                  </select>
+                  <button class="button ghost" id="browse-refresh">Refresh</button>
+                </div>
               </div>
               <div id="cachelink-tree" class="list"></div>
+              <div id="datadir-browser" class="list hidden"></div>
             </div>
             <div class="stack">
               <div class="section" style="--delay:0.15s;">

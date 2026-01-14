@@ -2,7 +2,9 @@ const CachelinksPage = (() => {
   const state = {
     entries: {},
     folders: [],
-    rclone: null
+    rclone: null,
+    currentPath: '/',
+    browseMode: 'tree'
   };
 
   const el = (id) => document.getElementById(id);
@@ -485,6 +487,123 @@ const CachelinksPage = (() => {
     }
   };
 
+  const renderDatadirBrowser = async (path = '/') => {
+    const browser = el('datadir-browser');
+    if (!browser) return;
+    
+    try {
+      const data = await CI.getJSON(`/storage/entries?location=datadir&relative=${encodeURIComponent(path)}&view_mode=list`);
+      const entries = data.entries || [];
+      const breadcrumbs = data.breadcrumbs || [];
+      
+      if (entries.length === 0) {
+        browser.innerHTML = '<div class="notice">No files in datadir. Add content via Storage page or cachelinks will populate on access.</div>';
+        return;
+      }
+      
+      // Build breadcrumb navigation
+      let breadcrumbHtml = breadcrumbs.map((crumb, idx) => {
+        const isLast = idx === breadcrumbs.length - 1;
+        if (isLast) {
+          return `<span>${crumb.label}</span>`;
+        }
+        return `<a href="#" data-nav-path="${crumb.path}">${crumb.label}</a>`;
+      }).join(' / ');
+      
+      // Build file list with default list view
+      const listHtml = entries.map(entry => {
+        const icon = entry.is_dir ? '📁' : '📄';
+        const sizeText = entry.is_dir ? '-' : formatBytes(entry.size);
+        return `
+          <div class="list-item">
+            <div>
+              <span>${icon}</span>
+              ${entry.is_dir ?
+                `<a href="#" data-browse-path="${entry.path}"><strong>${entry.name}</strong></a>` :
+                `<strong>${entry.name}</strong>`
+              }
+              <div class="help">${entry.path} • ${sizeText}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+      
+      browser.innerHTML = `
+        <div class="notice" style="margin-bottom:12px;">
+          <strong>Path:</strong> ${breadcrumbHtml}
+        </div>
+        ${listHtml}
+      `;
+      
+      // Bind navigation events
+      browser.querySelectorAll('[data-nav-path]').forEach(link => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          const targetPath = link.dataset.navPath;
+          state.currentPath = targetPath;
+          renderDatadirBrowser(targetPath);
+        });
+      });
+      
+      browser.querySelectorAll('[data-browse-path]').forEach(link => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          const targetPath = link.dataset.browsePath;
+          state.currentPath = targetPath;
+          renderDatadirBrowser(targetPath);
+        });
+      });
+      
+    } catch (err) {
+      browser.innerHTML = `<div class="notice error">${err.message || 'Failed to load datadir contents'}</div>`;
+    }
+  };
+  
+  const formatBytes = (bytes) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
+  };
+  
+  const switchBrowseMode = (mode) => {
+    state.browseMode = mode;
+    const treeEl = el('cachelink-tree');
+    const browserEl = el('datadir-browser');
+    
+    if (mode === 'tree') {
+      treeEl.classList.remove('hidden');
+      browserEl.classList.add('hidden');
+      renderTree();
+    } else {
+      treeEl.classList.add('hidden');
+      browserEl.classList.remove('hidden');
+      renderDatadirBrowser(state.currentPath);
+    }
+  };
+  
+  const bindBrowserControls = () => {
+    const locationSelect = el('browse-location');
+    const refreshBtn = el('browse-refresh');
+    
+    if (locationSelect) {
+      locationSelect.addEventListener('change', () => {
+        switchBrowseMode(locationSelect.value);
+      });
+    }
+    
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', () => {
+        if (state.browseMode === 'tree') {
+          loadTree();
+        } else {
+          renderDatadirBrowser(state.currentPath);
+        }
+      });
+    }
+  };
+
   const init = () => {
     bindTabs();
     bindCreateForm();
@@ -492,6 +611,7 @@ const CachelinksPage = (() => {
     bindFolderForm();
     bindPreview();
     bindRcloneForm();
+    bindBrowserControls();
     loadTree();
     loadRclone().then(bindRcloneHelper);
     el('update-handler').addEventListener('change', toggleUpdateRcloneFields);

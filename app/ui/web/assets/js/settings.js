@@ -400,6 +400,48 @@ const SettingsPage = (() => {
       }
     });
 
+    el('config-export').addEventListener('click', async () => {
+      try {
+        const data = await CI.getJSON('/settings/config');
+        const yamlContent = data.settings_text || '';
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+        const filename = `cacheinfinity-config-${timestamp}.yml`;
+        
+        const blob = new Blob([yamlContent], { type: 'text/yaml' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        CI.showToast(`Configuration exported to ${filename}`, 'info');
+      } catch (err) {
+        CI.showToast(err.message || 'Export failed', 'error');
+      }
+    });
+
+    el('config-import').addEventListener('click', () => {
+      el('config-import-file').click();
+    });
+
+    el('config-import-file').addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      try {
+        const text = await file.text();
+        el('config-text').value = text;
+        CI.showToast(`Loaded ${file.name} into editor`, 'info');
+        event.target.value = '';
+      } catch (err) {
+        CI.showToast(err.message || 'Failed to read file', 'error');
+        event.target.value = '';
+      }
+    });
+
     el('config-save').addEventListener('click', async () => {
       try {
         await CI.postJSON('/settings/config', {

@@ -310,10 +310,14 @@
           <h2>Config (YAML)</h2>
           <div class="row">
             <button class="button" id="config-load" type="button">Load</button>
+            <button class="button" id="config-export" type="button">Export</button>
+            <input type="file" id="config-import-file" accept=".yml,.yaml" style="display:none;">
+            <button class="button" id="config-import" type="button">Import</button>
             <button class="button secondary" id="config-save" type="button">Apply</button>
           </div>
         </div>
         <textarea class="textarea" id="config-text" placeholder="Load configuration YAML..."></textarea>
+        <div class="help">Export downloads the complete configuration. Import loads a YAML file into the editor. Apply saves the configuration.</div>
       </section>
     </main>
 
