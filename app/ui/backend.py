@@ -36,6 +36,7 @@ from cache.cachelinks import (
     CachelinkIndex,
     _detect_mode,
     derive_cachelink_name,
+    load_cachelinks,
 )
 from cache.checksum import ChecksumCatalog
 from core.config import ConfigError, ConfigService, Settings
@@ -201,7 +202,7 @@ class ManagementLayer:
             "staging_root": str(self.ctx.staging.base_path),
             "share_count": len(share_list),
             "shares": share_list,
-            "cachelink_count": len(self.ctx.cachelinks.cachelinks),
+            "cachelink_count": len(self._load_cachelink_index().cachelinks),
             "stats": summary,
             "indexing_metrics": indexing_metrics,
             "storage": storage,
@@ -279,6 +280,19 @@ class ManagementLayer:
 
     def _sync_settings(self) -> None:
         self.ctx.settings = self.config_service.settings
+
+    def _load_cachelink_index(self) -> CachelinkIndex:
+        try:
+            stored = self.ctx.index_db.index_db.get_cachelinks() or []
+        except Exception as exc:
+            logger.warning("Failed to read cachelinks from database: %s", exc)
+            stored = []
+        if stored:
+            try:
+                return load_cachelinks([], inline_docs=stored, inline_source=Path("<database>"))
+            except Exception as exc:
+                logger.warning("Failed to parse cachelinks from database: %s", exc)
+        return self.ctx.cachelinks
 
     def _request_reload(self) -> None:
         try:
@@ -616,7 +630,8 @@ class ManagementLayer:
         except Exception:
             degraded_map = {}
 
-        for descriptor in self.ctx.cachelinks.cachelinks.values():
+        cachelink_index = self._load_cachelink_index()
+        for descriptor in cachelink_index.cachelinks.values():
             snapshot = self.config_service.build_cachelink_snapshot(
                 descriptor,
                 degraded=degraded_map.get(descriptor.canonical_id),

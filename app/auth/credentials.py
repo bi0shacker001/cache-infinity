@@ -873,7 +873,7 @@ class AuthenticationManager:
             query = """
                 SELECT password_plain, password_hash, enabled
                 FROM auth_users
-                WHERE username = ? AND purpose = ? AND enabled = 1
+                WHERE username = ? AND purpose = ? AND enabled = TRUE
             """
             result = self.db_manager.fetchone(query, (username, purpose))
             
@@ -1136,7 +1136,7 @@ class AuthenticationManager:
             query = """
                 SELECT write_access, read_access, delete_access, modify_access
                 FROM auth_users
-                WHERE username = ? AND enabled = 1
+                WHERE username = ? AND enabled = TRUE
             """
             result = self.db_manager.fetchone(query, (username,))
             if not result:

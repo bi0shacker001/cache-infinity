@@ -1857,7 +1857,7 @@ class IndexDatabase:
                                            per_domain_backoff_base_seconds, per_domain_backoff_max_seconds,
                                            giant_directory_entry_limit, giant_directory_cooldown_minutes,
                                            partition_hint_max_children, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     min_full_reindex_days = excluded.min_full_reindex_days,
                     max_full_reindex_days = excluded.max_full_reindex_days,

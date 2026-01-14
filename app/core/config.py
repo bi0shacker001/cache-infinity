@@ -340,7 +340,12 @@ class ConfigService:
         return False
 
     def is_leaf_mapping(self, node: object) -> bool:
-        return isinstance(node, dict) and "url" in node and "subfolder" in node
+        if not isinstance(node, dict):
+            return False
+        url = node.get("url")
+        if not url or not str(url).strip():
+            return False
+        return "subfolder" in node
 
     def locate_cachelink_leaf(self, descriptor) -> tuple[dict, dict]:
         doc = self.load_cachelinks_document(descriptor.source_file)

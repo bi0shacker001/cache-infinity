@@ -10,27 +10,75 @@
   </head>
   <body{% if theme %} data-theme="{{ theme }}"{% endif %}>
     <main class="page" style="min-height:100vh; align-items:center; justify-content:center;">
-      <section class="section" style="max-width:480px; width:100%;">
+      <section class="section" style="max-width:480px; width:100%; animation-delay: 0.1s;">
         <div class="stack">
-          <div>
-            <h1>CacheInfinity Admin</h1>
-            <p>Sign in to manage cachelinks, storage, and system operations.</p>
+          <div class="text-center">
+            <div style="display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; background: linear-gradient(135deg, var(--accent), var(--accent-alt)); border-radius: 50%; margin-bottom: 16px; box-shadow: 0 0 0 8px var(--accent-soft);">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="M12 8v4l3 3"/>
+              </svg>
+            </div>
+            <h1 style="margin-bottom: 0.5em;">CacheInfinity Admin</h1>
+            <p class="text-muted">Sign in to manage cachelinks, storage, and system operations.</p>
           </div>
+          
           {% if error %}
-          <div class="notice warn">{{ error }}</div>
+          <div class="alert error">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <div>{{ error }}</div>
+          </div>
           {% endif %}
+          
           <form method="post" class="stack">
             <div class="field">
-              <label class="label" for="username">Username</label>
-              <input class="input" id="username" name="username" autocomplete="username" required>
+              <label class="label" for="username">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: inline-block; vertical-align: middle; margin-right: 4px;">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                  <circle cx="12" cy="7" r="4"/>
+                </svg>
+                Username
+              </label>
+              <input class="input" id="username" name="username" autocomplete="username" placeholder="Enter your username" required autofocus>
             </div>
+            
             <div class="field">
-              <label class="label" for="password">Password</label>
-              <input class="input" id="password" name="password" type="password" autocomplete="current-password" required>
+              <label class="label" for="password">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: inline-block; vertical-align: middle; margin-right: 4px;">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+                Password
+              </label>
+              <input class="input" id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required>
             </div>
-            <button class="button primary" type="submit">Sign In</button>
+            
+            <button class="button primary lg" type="submit" style="margin-top: 8px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                <polyline points="10 17 15 12 10 7"/>
+                <line x1="15" y1="12" x2="3" y2="12"/>
+              </svg>
+              Sign In
+            </button>
           </form>
-          <p class="help">Admin actions require a secure network boundary. Keep this port private.</p>
+          
+          <div class="divider"></div>
+          
+          <div class="alert info" style="font-size: 0.85rem;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="16" x2="12" y2="12"/>
+              <line x1="12" y1="8" x2="12.01" y2="8"/>
+            </svg>
+            <div>
+              <strong>Security Notice:</strong> Admin actions require a secure network boundary. Keep this port private and behind a firewall or VPN.
+            </div>
+          </div>
         </div>
       </section>
     </main>
